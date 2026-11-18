@@ -69,6 +69,7 @@ namespace TideCombat
         private const int HotkeyMessage = 0x0312;
 
         private readonly Button start = Theme.Button("启动战斗", true);
+        private readonly Button farm = Theme.Button("刷4C声骸");
         private readonly Button preview = Theme.Button("仅检测");
         private readonly Button stop = Theme.Button("停止");
         private readonly Button profiles = Theme.Button("角色档案");
@@ -82,6 +83,7 @@ namespace TideCombat
         private readonly Label lastAction = Theme.Text("—", Theme.Ink, true);
         private readonly Label footer = Theme.Text("建议使用 1920×1080 游戏画面", Theme.Muted);
         private readonly CheckBox autoTarget = Option("看见敌人血条后自动锁定");
+        private readonly CheckBox autoRevive = Option("角色倒下后自动点击复活");
         private readonly CheckBox useLiberation = Option("大世界使用共鸣解放");
         private readonly CheckBox checkLevitator = Option("根据控物图标判断浮空");
         private readonly CheckBox rotate = Option("自动切换队伍角色");
@@ -129,6 +131,7 @@ namespace TideCombat
             }
             LoadControls();
             start.Click += delegate { BeginRun(false); };
+            farm.Click += delegate { BeginFarm(); };
             preview.Click += delegate { BeginRun(true); };
             stop.Click += delegate { EndRun(); };
             profiles.Click += delegate { OpenProfiles(); };
@@ -170,6 +173,7 @@ namespace TideCombat
             var actions = Theme.Row();
             actions.Anchor = AnchorStyles.Right;
             actions.Controls.Add(start);
+            actions.Controls.Add(farm);
             actions.Controls.Add(preview);
             actions.Controls.Add(stop);
             stop.Enabled = false;
@@ -237,6 +241,7 @@ namespace TideCombat
             cloudPage.Visible = false;
             source.SelectedIndexChanged += delegate { cloudPage.Visible = source.SelectedIndex >= (int)GameSource.Cloud; };
             card.Controls.Add(autoTarget);
+            card.Controls.Add(autoRevive);
             card.Controls.Add(useLiberation);
             card.Controls.Add(checkLevitator);
             card.Controls.Add(rotate);
@@ -334,6 +339,7 @@ namespace TideCombat
         private void LoadControls()
         {
             autoTarget.Checked = settings.AutoTarget;
+            autoRevive.Checked = settings.AutoRevive;
             useLiberation.Checked = settings.UseLiberation;
             rotate.Checked = settings.RotateParty;
             concerto.Checked = settings.PreferConcerto;
@@ -362,11 +368,13 @@ namespace TideCombat
         {
             var current = new CombatSettings
             {
-                AutoTarget = autoTarget.Checked, UseLiberation = useLiberation.Checked,
+                AutoTarget = autoTarget.Checked, AutoRevive = autoRevive.Checked,
+                UseLiberation = useLiberation.Checked,
                 RotateParty = rotate.Checked, PreferConcerto = concerto.Checked, SwitchAtLowHealth = lowHealth.Checked,
                 SupportOpener = supportOpener.Checked, IunoC6 = settings.IunoC6, RocciaC6 = settings.RocciaC6,
                 Source = (GameSource)source.SelectedIndex, CheckLevitator = checkLevitator.Checked,
-                ChisaDps = settings.ChisaDps, SuomingDps = settings.SuomingDps, PartyCharacters = new string[3],
+                ChisaDps = settings.ChisaDps, SuomingDps = settings.SuomingDps, Farm = settings.Farm,
+                PartyCharacters = new string[3],
                 DetectSkillKeys = detectKeys.Checked, ResonanceKey = keys[0].Text, EchoKey = keys[1].Text,
                 LiberationKey = keys[2].Text, ToolKey = keys[3].Text, Slots = new Rotation[3], Characters = settings.Characters
             };
@@ -385,12 +393,44 @@ namespace TideCombat
         {
             if (work != null || closing)
                 return;
-            try { settings = ReadControls(); }
+            CombatSettings current;
+            try { current = ReadControls(); }
             catch (InvalidDataException error)
             {
                 SetFooter(error.Message, true);
                 return;
             }
+            await StartWork(current, isPreview, false);
+        }
+
+        private async void BeginFarm()
+        {
+            if (work != null || closing)
+                return;
+            CombatSettings current;
+            try { current = ReadControls(); }
+            catch (InvalidDataException error)
+            {
+                SetFooter(error.Message, true);
+                return;
+            }
+            if (current.Source == GameSource.Background || current.Source == GameSource.ManagedCloud)
+            {
+                SetFooter("4C 刷取需要「前台」来源：本地客户端·前台或网页云游戏·前台。", true);
+                return;
+            }
+            using (var dialog = new FarmForm(current.Farm ?? FarmOptions.Defaults()))
+            {
+                if (dialog.ShowDialog(this) != DialogResult.OK || dialog.Result == null)
+                    return;
+                current.Farm = dialog.Result;
+            }
+            await StartWork(current, false, true);
+        }
+
+        private async Task StartWork(CombatSettings current, bool isPreview, bool isFarm)
+        {
+            settings = current;
             SaveSettings();
             if (!isPreview && (settings.Source == GameSource.Foreground || settings.Source == GameSource.Background) &&
                 InputIntegrity.LocalGameNeedsElevation())
@@ -404,9 +444,14 @@ namespace TideCombat
             hasReadout = false;
             target.Text = character.Text = skills.Text = lastAction.Text = "—";
             SetRunning(true);
-            mode.Text = isPreview ? "仅检测" : "已待命";
-            state.Text = "等待切回《鸣潮》客户端";
-            var progress = new Progress<BattleReport>(report =>
+            mode.Text = isPreview ? "仅检测" : isFarm ? "刷4C" : "已待命";
+            state.Text = isFarm ? "准备刷取 4C 声骸" : "等待切回《鸣潮》客户端";
+            var progress = new Progress<FarmReport>(report =>
+            {
+                if (!cancellation.IsCancellationRequested && ReferenceEquals(work, cancellation))
+                    RenderFarm(report);
+            });
+            var battleProgress = new Progress<BattleReport>(report =>
             {
                 if (!cancellation.IsCancellationRequested && ReferenceEquals(work, cancellation))
                     RenderReport(report);
@@ -415,7 +460,10 @@ namespace TideCombat
             string failure = null;
             try
             {
-                await Task.Run(() => BattleLoop.Run(settings, isPreview, progress, cancellation.Token, concertoMeter));
+                if (isFarm)
+                    await Task.Run(() => FarmLoop.Run(settings, settings.Farm, progress, cancellation.Token, concertoMeter));
+                else
+                    await Task.Run(() => BattleLoop.Run(settings, isPreview, battleProgress, cancellation.Token, concertoMeter));
             }
             catch (InputElevationRequiredException)
             {
@@ -431,7 +479,7 @@ namespace TideCombat
                 cancellation.Dispose();
                 SetRunning(false);
                 mode.Text = "已停止";
-                state.Text = failure == null ? "切回游戏后按快捷键，或从这里启动。" : "战斗已停止，见下方错误信息。";
+                state.Text = failure == null ? "切回游戏后按快捷键，或从这里启动。" : "任务已停止，见下方错误信息。";
                 if (failure != null) SetFooter(failure, true);
                 if (closing)
                     Close();
@@ -468,6 +516,21 @@ namespace TideCombat
             {
                 SetFooter(error.NativeErrorCode == 1223 ? "已取消管理员授权，暂未开始战斗。" : FriendlyError(error), true);
             }
+        }
+
+        private void RenderFarm(FarmReport report)
+        {
+            mode.Text = report.Finished ? "刷取结束" : "刷4C";
+            state.Text = report.State;
+            if (!string.IsNullOrEmpty(report.LastAction))
+                lastAction.Text = report.LastAction;
+            target.Text = report.Kills > 0 ? "已刷 " + report.Kills : "—";
+            skills.Text = string.Format("{0:F1} 个/小时", report.Rate);
+            if (report.Finished && report.Failure != null)
+                SetFooter(report.Failure, true);
+            else
+                SetFooter(string.Format("{0} 个声骸 · {1:F1} 个/小时 · {2}", report.Kills, report.Rate,
+                    report.Size.Width > 0 ? report.Size.Width + "×" + report.Size.Height : "—"), false);
         }
 
         private void RenderReport(BattleReport report)
@@ -562,7 +625,7 @@ namespace TideCombat
 
         private void SetRunning(bool running)
         {
-            start.Enabled = preview.Enabled = preferences.Enabled = team.Enabled = !running;
+            start.Enabled = farm.Enabled = preview.Enabled = preferences.Enabled = team.Enabled = !running;
             stop.Enabled = running;
         }
 

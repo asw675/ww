@@ -31,6 +31,7 @@ namespace TideCombat
             indicators.UnionWith(CombatVision.DesktopTargetLabels);
             indicators.UnionWith(CombatVision.DesktopTargetAreas);
             indicators.UnionWith(CombatVision.HotkeyLabels);
+            indicators.UnionWith(FarmIndicators.All);
             foreach (CharacterKit fighter in CharacterRoster.All)
                 indicators.UnionWith(fighter.Indicators);
             var fighters = new HashSet<string>(StringComparer.Ordinal);

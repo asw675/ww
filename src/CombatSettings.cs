@@ -67,10 +67,13 @@ namespace TideCombat
         private void ReadDefaults(StreamingContext context)
         {
             CheckLevitator = true;
+            AutoRevive = true;
             ToolKey = "T";
+            Farm = FarmOptions.Defaults();
         }
 
         public bool AutoTarget { get; set; }
+        public bool AutoRevive { get; set; }
         public bool UseLiberation { get; set; }
         public bool RotateParty { get; set; }
         public bool PreferConcerto { get; set; }
@@ -87,6 +90,7 @@ namespace TideCombat
         public bool SuomingDps { get; set; }
         public GameSource Source { get; set; }
         public bool CheckLevitator { get; set; }
+        public FarmOptions Farm { get; set; }
         public string[] PartyCharacters { get; set; }
         public Rotation[] Slots { get; set; }
         public List<CharacterProfile> Characters { get; set; }
@@ -96,6 +100,7 @@ namespace TideCombat
             return new CombatSettings
             {
                 AutoTarget = true,
+                AutoRevive = true,
                 UseLiberation = true,
                 RotateParty = true,
                 PreferConcerto = true,
@@ -107,6 +112,7 @@ namespace TideCombat
                 ToolKey = "T",
                 SupportOpener = true,
                 CheckLevitator = true,
+                Farm = FarmOptions.Defaults(),
                 PartyCharacters = new string[3],
                 Slots = new[] { Rotation.ForRole(BattleRole.Main), Rotation.ForRole(BattleRole.Secondary),
                     Rotation.ForRole(BattleRole.Support) },
@@ -128,6 +134,9 @@ namespace TideCombat
                 PartyCharacters = new string[3];
                 SupportOpener = true;
             }
+            if (Farm == null)
+                Farm = FarmOptions.Defaults();
+            Farm.Validate();
             if (Slots == null || Slots.Length != 3 || PartyCharacters.Length != 3 ||
                 Slots.Any(slot => slot == null) || Characters == null || !Enum.IsDefined(typeof(GameSource), Source))
                 throw new InvalidDataException("配置文件缺少技能布局或队伍设置。");

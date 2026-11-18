@@ -47,6 +47,10 @@ namespace TideCombat
             Check("low-health support follows the learned character", LowHealthSupport);
             Check("fight cleanup runs the character's own handoff before its healer switch", FightEndHandoff);
             Check("configuration round-trip and validation", SettingsRoundTrip);
+            Check("4C farm signatures load from the embedded table", FarmChecks.Signatures);
+            Check("4C farm walks approach, challenge, combat and pickup", FarmChecks.StateMachine);
+            Check("4C farm teleport opens the guidebook and picks a boss", FarmChecks.TeleportFlow);
+            Check("4C farm revive clicks the death prompt", FarmChecks.ReviveFlow);
             Check("input cannot run without a verified foreground window", MissingWindow);
             Check("local game window is recognized without a readable title or installation path", LocalWindowIdentity);
             Check("input privilege preflight detects elevated clients and reads native process tokens", InputPrivilegePreflight);

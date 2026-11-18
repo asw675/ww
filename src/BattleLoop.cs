@@ -26,6 +26,9 @@ namespace TideCombat
             var vision = new HudVision(settings, concerto);
             bool cloudStream = settings.Source == GameSource.Cloud || settings.Source == GameSource.ManagedCloud;
             var planner = new BattlePlanner(settings, cloudStream);
+            var reviveInput = new FarmInput(window);
+            var reviveVision = new FarmVision();
+            long nextReviveClick = 0;
             var browser = settings.Source == GameSource.ManagedCloud ? new CloudBrowser() : null;
             Func<bool> release = browser == null ? (Func<bool>)input.ReleaseAll : browser.ReleaseAll;
             Func<BattleAction, CancellationToken, bool> send = browser == null ?
@@ -46,6 +49,8 @@ namespace TideCombat
                     string state;
                     HudSnapshot hud = null;
                     bool waitingFrame = false;
+                    PixelFrame currentFrame = default(PixelFrame);
+                    bool haveFrame = false;
                     if (browser != null)
                     {
                         state = "等待已打开的官网云游戏窗口";
@@ -54,6 +59,8 @@ namespace TideCombat
                         if (browser.TryRead(cancellation, out frame, out size))
                         {
                             bounds = new Rectangle(Point.Empty, size);
+                            currentFrame = frame;
+                            haveFrame = true;
                             hud = vision.Read(frame, planner.Fighting, true, planner.LucillaTransformSlot,
                                 planner.ShouldScanExecution(started));
                         }
@@ -79,8 +86,12 @@ namespace TideCombat
                                 waitingFrame = true;
                             }
                             else if (window.Available())
+                            {
+                                currentFrame = frame;
+                                haveFrame = true;
                                 hud = vision.Read(frame, planner.Fighting, cloudStream, planner.LucillaTransformSlot,
                                     planner.ShouldScanExecution(started));
+                            }
                         }
                         catch (Win32Exception)
                         {
@@ -112,6 +123,11 @@ namespace TideCombat
                         state = hud.Valid ? "仅检测" : hud.Detail;
                     else
                     {
+                        if (settings.AutoRevive && hud.Dead && browser == null && haveFrame && now >= nextReviveClick)
+                        {
+                            nextReviveClick = now + 2600;
+                            TryRevive(currentFrame, hud, bounds, reviveInput, reviveVision, cancellation, ref state);
+                        }
                         BattleAction action = planner.Observe(hud, now);
                         state = planner.Status;
                         if (planner.TakeReleaseRequest())
@@ -149,7 +165,7 @@ namespace TideCombat
             }
         }
 
-        private sealed class WindowFrames : IDisposable
+        internal sealed class WindowFrames : IDisposable
         {
             private readonly GameWindow window;
             private readonly GameCapture desktop;
@@ -214,6 +230,31 @@ namespace TideCombat
                 if (graphics != null) graphics.Dispose();
                 desktop.Dispose();
                 fallback.Dispose();
+            }
+        }
+
+        private static void TryRevive(PixelFrame frame, HudSnapshot hud, Rectangle bounds, FarmInput input,
+            FarmVision vision, CancellationToken cancellation, ref string state)
+        {
+            if (frame.Width <= 0 || frame.Height <= 0 || bounds.Width <= 0)
+                return;
+            var size = new Size(frame.Width, frame.Height);
+            var region = new Rectangle((int)(frame.Width * .42), (int)(frame.Height * .42),
+                Math.Max(1, (int)(frame.Width * .55)), Math.Max(1, (int)(frame.Height * .45)));
+            Rectangle box;
+            Point point;
+            if (vision.FindLabel(frame, "revive_confirm_hcenter_vcenter", region, 4, .84, out box))
+                point = new Point(box.X + box.Width / 2, box.Y + box.Height / 2);
+            else
+                point = new Point((int)(frame.Width * .78), (int)(frame.Height * .72));
+            try
+            {
+                if (input.Click(point, size, bounds, FarmMouse.Left, 80, cancellation))
+                    state = "尝试自动复活";
+            }
+            catch (System.ComponentModel.Win32Exception)
+            {
+                state = "等待手动恢复";
             }
         }
 

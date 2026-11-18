@@ -86,6 +86,8 @@ Revive / Night / MonthlyCard 为可随时插入的旁路状态。
 | `echo2.png` | 有发光特效 | YOLO 检出 1 个框（0.70） |
 | `in_combat.png` | 无死亡弹窗 | 死亡不误报，识别为大世界 |
 | `big_map.png` | 无图鉴/传送按钮 | 全部不误报 |
+| `find_confirm.png` | 左侧面板有提示文字 | OCR 识别「提示」「本次」（置信度 1.00） |
+| `absorb.png` | 吸收提示 | OCR 识别「吸收」（1.00） |
 
 ## 已知差异
 

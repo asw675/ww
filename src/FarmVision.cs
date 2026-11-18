@@ -8,13 +8,14 @@ namespace TideCombat
     {
         internal bool FPrompt;
         internal Rectangle FBox;
+        internal bool Absorb;
         internal bool Claim;
         internal bool Challenge;
         internal bool TeamStart;
         internal bool SkipDialog;
         internal bool Death;
-        internal bool Treasure;
-        internal Rectangle TreasureBox;
+        internal bool Treasure { get; set; }
+        internal Rectangle TreasureBox { get; set; }
         internal bool Book;
         internal Rectangle BookBox;
         internal List<Rectangle> BossRows = new List<Rectangle>();
@@ -117,97 +118,109 @@ namespace TideCombat
 
     internal sealed class FarmVision
     {
-        private static readonly int[] Small = { 0, -3, 3, -6, 6, -9, 9, -12, 12 };
+        private struct Candidate
+        {
+            internal double Score;
+            internal Rectangle Rect;
+            internal Candidate(double score, Rectangle rect) { Score = score; Rect = rect; }
+        }
+
+        private static readonly int[] Small = { 0, -2, 2, -4, 4, -6, 6, -8, 8, -10, 10, -12, 12 };
         private readonly FrameIndex index = new FrameIndex();
 
         internal FarmUi Read(PixelFrame frame, bool detailed)
         {
             var ui = new FarmUi();
             index.Load(frame);
-            ui.FPrompt = FindNear(frame, "pick_up_f_hcenter_vcenter", 26, 2, .80, out ui.FBox);
-            ui.InRealm = FindNear(frame, "illusive_realm_exit", 8, 2, .70, out Rectangle realm);
-            ui.OpenWorld = !ui.InRealm && FindNear(frame, "world_earth_icon", 8, 2, .70, out Rectangle world);
-            ui.Death = FindNear(frame, "revive_confirm_hcenter_vcenter", 60, 4, .84, out Rectangle death);
-            if (ui.Death)
-                ui.Evidence |= 1;
-            ui.Claim = FindIn(frame, "claim_cancel_button_hcenter_vcenter",
-                Ratio(frame, .12, .38, .88, .78), 6, .80, out Rectangle claim) ||
-                FindIn(frame, "cancel_button_hcenter_vcenter", Ratio(frame, .12, .38, .88, .78), 6, .80, out claim);
+            ui.FPrompt = FindNear(frame, "pick_up_f_hcenter_vcenter", 20, .86, .70, out ui.FBox);
+            ui.Absorb = FindNear(frame, "absorb_zh_CN", 30, .86, .70, out Rectangle absorb) ||
+                FindNear(frame, "absorb_en_US", 30, .86, .70, out absorb);
+            ui.Claim = FindNear(frame, "claim_cancel_button_hcenter_vcenter", 8, .88, .72, out Rectangle claim) ||
+                FindNear(frame, "cancel_button_hcenter_vcenter", 8, .88, .72, out claim);
             if (ui.Claim)
                 ui.Evidence |= 2;
-            ui.TeamStart = FindIn(frame, "team_start_challenge", Ratio(frame, .78, .74, 1, .97), 6, .80, out Rectangle start);
-            ui.Challenge = ui.TeamStart ||
-                FindIn(frame, "gray_button_challenge", Ratio(frame, .5, .70, .85, .92), 6, .78, out start) ||
-                FindIn(frame, "gray_start_battle", Ratio(frame, .78, .74, 1, .97), 6, .78, out start);
+            ui.TeamStart = FindNear(frame, "team_start_challenge", 8, .88, .72, out Rectangle start);
+            bool grayChallenge = FindNear(frame, "gray_button_challenge", 8, .88, .72, out start);
+            bool grayStart = FindNear(frame, "gray_start_battle", 8, .88, .72, out start);
+            ui.Challenge = ui.TeamStart || grayChallenge || grayStart;
             if (ui.Challenge)
                 ui.Evidence |= 4;
-            bool check = FindIn(frame, "skip_dialog_check", Ratio(frame, .28, .40, .72, .68), 5, .76, out Rectangle box);
-            bool confirm = FindIn(frame, "skip_dialog_confirm", Ratio(frame, .40, .45, .75, .72), 5, .76, out Rectangle confirmBox) ||
-                FindIn(frame, "confirm_btn_hcenter_vcenter", Ratio(frame, .40, .42, .80, .74), 5, .76, out confirmBox);
+            bool check = FindNear(frame, "skip_dialog_check", 8, .86, .70, out Rectangle box);
+            bool confirm = FindNear(frame, "skip_dialog_confirm", 8, .86, .70, out Rectangle confirmBox) ||
+                FindNear(frame, "confirm_btn_hcenter_vcenter", 8, .86, .70, out confirmBox);
             ui.SkipDialog = check && confirm;
-            if (!detailed && !ui.SkipDialog)
+            if (!detailed)
             {
-                ui.Detail = ui.FPrompt ? "可交互" : "等待";
+                ui.Detail = ui.FPrompt ? "可交互" : "探索中";
                 return ui;
             }
-            ui.Treasure = FindIn(frame, "treasure_icon", Ratio(frame, .02, .10, .98, .82), 8, .80, out ui.TreasureBox);
-            if (ui.Treasure)
-                ui.Evidence |= 8;
-            ui.Book = FindIn(frame, "gray_book_boss", Ratio(frame, 0, .08, .16, .92), 6, .30, out ui.BookBox);
+            ui.Death = FindNear(frame, "revive_confirm_hcenter_vcenter", 8, .92, .78, out Rectangle death);
+            if (ui.Death)
+                ui.Evidence |= 1;
+            ui.InRealm = FindNear(frame, "illusive_realm_exit", 8, .86, .72, out Rectangle realm);
+            ui.OpenWorld = !ui.InRealm && FindNear(frame, "world_earth_icon", 8, .86, .72, out Rectangle world);
+            ui.Book = FindNear(frame, "gray_book_boss", 8, .86, .72, out ui.BookBox);
             if (ui.Book)
-            {
                 ui.Evidence |= 16;
-                ui.BossRows = FindAll(frame, "boss_proceed", Ratio(frame, .86, .18, 1, .90), 4, .76);
-            }
-            ui.Teleport = FindIn(frame, "gray_teleport", Ratio(frame, .55, .72, 1, 1), 6, .72, out ui.TeleportBox);
+            ui.Teleport = FindNear(frame, "gray_teleport", 8, .86, .72, out ui.TeleportBox);
             if (ui.Teleport)
                 ui.Evidence |= 32;
+            if (ui.Book)
+                ui.BossRows = FindAll(frame, "boss_proceed", Ratio(frame, .86, .18, 1, .90), 4, .90, .76);
             ui.Detail = ui.Death ? "死亡" : ui.Claim ? "领奖弹窗" : ui.Challenge ? "挑战界面" :
-                ui.Treasure ? "宝箱" : ui.Book ? "图鉴" : ui.Teleport ? "传送按钮" : ui.FPrompt ? "可交互" : "探索中";
+                ui.Book ? "图鉴" : ui.Teleport ? "传送按钮" : ui.FPrompt ? "可交互" :
+                ui.InRealm ? "副本内" : ui.OpenWorld ? "大世界" : "探索中";
             return ui;
         }
 
-        internal bool FindLabel(PixelFrame frame, string label, Rectangle area, int step, double threshold,
-            out Rectangle found)
+        internal bool FindLabel(PixelFrame frame, string label, double threshold, out Rectangle found)
         {
             index.Load(frame);
-            return FindIn(frame, label, area, step, threshold, out found);
+            return FindNear(frame, label, 20, threshold, .70, out found);
         }
 
-        internal List<Rectangle> FindAll(PixelFrame frame, string label, Rectangle area, int step, double threshold)
+        internal List<Rectangle> FindAll(PixelFrame frame, string label, Rectangle area, int step, double threshold,
+            double lightMinimum)
         {
             index.Load(frame);
             var results = new List<Rectangle>();
             foreach (VisualPattern pattern in PatternBank.For(label))
             {
-                for (int y = area.Top; y <= area.Bottom - pattern.Area.Height; y += step)
-                {
-                    for (int x = area.Left; x <= area.Right - pattern.Area.Width; x += step)
+                int width = pattern.Area.Width, height = pattern.Area.Height;
+                Rectangle limit = Rectangle.Intersect(area, new Rectangle(0, 0, frame.Width, frame.Height));
+                if (limit.Width <= width || limit.Height <= height)
+                    continue;
+                var candidates = new List<Candidate>(8);
+                for (int y = limit.Top; y <= limit.Bottom - height; y += step)
+                    for (int x = limit.Left; x <= limit.Right - width; x += step)
                     {
-                        var trial = new Rectangle(x, y, pattern.Area.Width, pattern.Area.Height);
-                        if (pattern.Signature.Similarity(index.Sample(trial)) < threshold)
-                            continue;
-                        var hit = new Rectangle(trial.X + trial.Width / 2, trial.Y + trial.Height / 2, trial.Width, trial.Height);
-                        bool overlaps = false;
-                        foreach (Rectangle existing in results)
-                            if (Math.Abs(existing.X - hit.X) < hit.Width && Math.Abs(existing.Y - hit.Y) < hit.Height)
-                                overlaps = true;
-                        if (!overlaps)
-                            results.Add(hit);
+                        var trial = new Rectangle(x, y, width, height);
+                        double score = pattern.Signature.Similarity(index.Sample(trial));
+                        if (score >= threshold)
+                            Add(candidates, score, trial);
                     }
+                candidates.Sort((left, right) => right.Score.CompareTo(left.Score));
+                foreach (Candidate candidate in candidates)
+                {
+                    if (!PassesLight(frame, pattern, candidate.Rect, lightMinimum))
+                        continue;
+                    if (Overlaps(results, candidate.Rect))
+                        continue;
+                    results.Add(candidate.Rect);
                 }
             }
             results.Sort((left, right) => left.Y.CompareTo(right.Y));
             return results;
         }
 
-        private bool FindNear(PixelFrame frame, string label, int radius, int step, double threshold, out Rectangle found)
+        private bool FindNear(PixelFrame frame, string label, int radius, double threshold, double lightMinimum,
+            out Rectangle found)
         {
             found = Rectangle.Empty;
             foreach (VisualPattern pattern in PatternBank.For(label))
             {
                 Rectangle expected = pattern.Map(frame.Width, 0);
-                double best = 0;
+                var candidates = new List<Candidate>(8);
                 foreach (int dy in Small)
                 {
                     if (Math.Abs(dy) > radius) continue;
@@ -217,47 +230,48 @@ namespace TideCombat
                         var trial = new Rectangle(expected.X + dx, expected.Y + dy, expected.Width, expected.Height);
                         if (!Inside(frame, trial)) continue;
                         double score = pattern.Signature.Similarity(index.Sample(trial));
-                        if (score <= best) continue;
-                        best = score;
-                        found = trial;
-                        if (best >= .99) return true;
+                        if (score >= threshold)
+                            Add(candidates, score, trial);
                     }
                 }
-                if (best >= threshold)
+                candidates.Sort((left, right) => right.Score.CompareTo(left.Score));
+                foreach (Candidate candidate in candidates)
+                {
+                    if (!PassesLight(frame, pattern, candidate.Rect, lightMinimum))
+                        continue;
+                    found = candidate.Rect;
                     return true;
+                }
             }
-            found = Rectangle.Empty;
             return false;
         }
 
-        private bool FindIn(PixelFrame frame, string label, Rectangle area, int step, double threshold, out Rectangle found)
+        private static bool PassesLight(PixelFrame frame, VisualPattern pattern, Rectangle rect, double minimum)
         {
-            found = Rectangle.Empty;
-            double best = 0;
-            foreach (VisualPattern pattern in PatternBank.For(label))
-            {
-                int width = pattern.Area.Width, height = pattern.Area.Height;
-                Rectangle limit = Rectangle.Intersect(area, new Rectangle(0, 0, frame.Width, frame.Height));
-                if (limit.Width <= width || limit.Height <= height)
-                    continue;
-                for (int y = limit.Top; y <= limit.Bottom - height; y += step)
-                {
-                    for (int x = limit.Left; x <= limit.Right - width; x += step)
-                    {
-                        var trial = new Rectangle(x, y, width, height);
-                        double score = pattern.Signature.Similarity(index.Sample(trial));
-                        if (score <= best) continue;
-                        best = score;
-                        found = trial;
-                        if (best >= .995)
-                            return true;
-                    }
-                }
-            }
-            if (best >= threshold)
-                return true;
-            found = Rectangle.Empty;
+            return !pattern.HasLight || pattern.LightSimilarity(frame, rect) >= minimum;
+        }
+
+        private static bool Overlaps(List<Rectangle> existing, Rectangle rect)
+        {
+            foreach (Rectangle item in existing)
+                if (Math.Abs(item.X - rect.X) < rect.Width && Math.Abs(item.Y - rect.Y) < rect.Height)
+                    return true;
             return false;
+        }
+
+        private static void Add(List<Candidate> candidates, double score, Rectangle rect)
+        {
+            if (candidates.Count < 24)
+            {
+                candidates.Add(new Candidate(score, rect));
+                return;
+            }
+            int worst = 0;
+            for (int index = 1; index < candidates.Count; index++)
+                if (candidates[index].Score < candidates[worst].Score)
+                    worst = index;
+            if (score > candidates[worst].Score)
+                candidates[worst] = new Candidate(score, rect);
         }
 
         private static Rectangle Ratio(PixelFrame frame, double left, double top, double right, double bottom)

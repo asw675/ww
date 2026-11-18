@@ -239,11 +239,9 @@ namespace TideCombat
             if (frame.Width <= 0 || frame.Height <= 0 || bounds.Width <= 0)
                 return;
             var size = new Size(frame.Width, frame.Height);
-            var region = new Rectangle((int)(frame.Width * .42), (int)(frame.Height * .42),
-                Math.Max(1, (int)(frame.Width * .55)), Math.Max(1, (int)(frame.Height * .45)));
             Rectangle box;
             Point point;
-            if (vision.FindLabel(frame, "revive_confirm_hcenter_vcenter", region, 4, .84, out box))
+            if (vision.FindLabel(frame, "revive_confirm_hcenter_vcenter", .90, out box))
                 point = new Point(box.X + box.Width / 2, box.Y + box.Height / 2);
             else
                 point = new Point((int)(frame.Width * .78), (int)(frame.Height * .72));

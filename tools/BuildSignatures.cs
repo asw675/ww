@@ -67,7 +67,8 @@ namespace TideCombat
                         if (label.StartsWith("roccia_air_forte", StringComparison.Ordinal) || CombatVision.CloudTargetLabels.Contains(label) ||
                             CombatVision.DesktopTargetLabels.Contains(label) || CombatVision.HotkeyLabels.Contains(label) ||
                             label == "f_break" || label == "f_break_full" || label == "mouse_forte" || label == "e_forte" ||
-                            label == "pick_up_f_hcenter_vcenter" || label == "dialog_3_dots")
+                            label == "pick_up_f_hcenter_vcenter" || label == "dialog_3_dots" ||
+                            FarmIndicators.All.Contains(label))
                             light = EncodeLocalContrast(frame, crop);
                         placement = new Rectangle(x + insetX, y + insetY, crop.Width, crop.Height);
                         if (label == "forte_cartethyia_sword2" || label == "forte_cartethyia_sword3")

@@ -186,6 +186,8 @@ namespace TideCombat
             edgeFloor = unchecked((sbyte)light[lightHigh]) - unchecked((sbyte)light[lightLow]);
         }
 
+        internal bool HasLight { get { return light != null; } }
+
         internal bool HasLightEdge(PixelFrame frame, Rectangle placement)
         {
             return light != null && frame.Light(placement.X + lightHigh % placement.Width, placement.Y + lightHigh / placement.Width) -

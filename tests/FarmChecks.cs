@@ -110,6 +110,59 @@ namespace TideCombat
             Require(kind, "应点击二级分类页签");
         }
 
+        internal static void ClaimRestart()
+        {
+            var farm = new Farm4C(CombatSettings.Defaults(), FarmOptions.Defaults());
+            long now = 1000;
+            Step(farm, null, Ui(), ref now, 100);
+            Step(farm, Hud(false), Ui(), ref now, 100);
+            for (int index = 0; index < 6; index++)
+                Step(farm, Hud(true), Ui(), ref now, 400);
+            for (int index = 0; index < 10; index++)
+                Step(farm, Hud(false), Ui(), ref now, 400);
+            Require(farm.Kills == 1, "应先完成一次击杀");
+
+            var claim = Ui();
+            claim.Claim = true;
+            Step(farm, Hud(false), claim, ref now, 400);
+            FarmDecision escape = Step(farm, Hud(false), claim, ref now, 700);
+            Require(escape.Request == FarmRequest.Key && escape.Key == '\u001b', "领奖弹窗应发 ESC");
+
+            var challenge = Ui();
+            challenge.Challenge = true;
+            bool clicked = false;
+            for (int index = 0; index < 10; index++)
+                if (Step(farm, Hud(false), challenge, ref now, 400).Request == FarmRequest.Click)
+                    clicked = true;
+            Require(clicked, "关闭领奖后应重新点击挑战");
+        }
+
+        internal static void TeleportBossRow()
+        {
+            FarmOptions options = FarmOptions.Defaults();
+            options.Teleport = true;
+            options.BossIndex = 2;
+            var farm = new Farm4C(CombatSettings.Defaults(), options);
+            long now = 1000;
+            Step(farm, Hud(false), Ui(), ref now, 100);
+            Step(farm, Hud(false), Ui(), ref now, 100);
+            var book = Ui();
+            book.Book = true;
+            book.BossRows = new System.Collections.Generic.List<Rectangle>
+            {
+                new Rectangle(1480, 300, 30, 50),
+                new Rectangle(1480, 400, 30, 50)
+            };
+            bool second = false;
+            for (int index = 0; index < 16; index++)
+            {
+                FarmDecision decision = Step(farm, Hud(false), book, ref now, 500);
+                if (decision.Request == FarmRequest.Click && decision.Point.Y > 380)
+                    second = true;
+            }
+            Require(second, "应按序号点击第二个 Boss 行");
+        }
+
         internal static void ReviveFlow()
         {
             var options = FarmOptions.Defaults();

@@ -30,6 +30,8 @@ namespace TideCombat
         internal bool ClaimReward;
         internal bool HasMapMarker;
         internal Rectangle MapMarker;
+        internal bool HasHealPoint;
+        internal Rectangle HealBox;
         internal Rectangle ClaimBox;
         internal double ScrollTop = .1963;
         internal int Evidence;
@@ -49,7 +51,7 @@ namespace TideCombat
             "skip_dialog_check", "skip_dialog_confirm", "revive_confirm_hcenter_vcenter",
             "treasure_icon", "gray_book_boss", "boss_proceed", "gray_teleport",
             "illusive_realm_exit", "world_earth_icon", "monthly_card", "claim_stamina_sign",
-            "boss_check_mark_minimap", "boss_check_mark"
+            "boss_check_mark_minimap", "boss_check_mark", "map_way_point"
         };
     }
 
@@ -176,10 +178,18 @@ namespace TideCombat
             ui.Teleport = FindNear(frame, "gray_teleport", 8, .86, .72, out ui.TeleportBox);
             if (ui.Teleport)
                 ui.Evidence |= 32;
+            ui.HasHealPoint = FindFirst(frame, "map_way_point", Ratio(frame, .25, .20, .75, .80), 5, .86, .74,
+                out Rectangle heal);
+            ui.HealBox = heal;
             List<Rectangle> markers = FindAll(frame, "boss_check_mark", Ratio(frame, .3, .3, .7, .7), 4, .82, .74);
             ui.HasMapMarker = markers.Count > 0;
             if (ui.HasMapMarker)
                 ui.MapMarker = markers[0];
+            ui.Treasure = FindFirst(frame, "treasure_icon", Ratio(frame, .03, .10, .97, .82), 6, .88, .80,
+                out Rectangle treasureBox);
+            ui.TreasureBox = treasureBox;
+            if (ui.Treasure)
+                ui.Evidence |= 8;
             ui.MonthlyCard = FindNear(frame, "monthly_card", 12, .86, .74, out ui.MonthlyCardBox);
             ui.ClaimReward = FindNear(frame, "claim_stamina_sign", 10, .86, .74, out ui.ClaimBox);
             if (ui.Book)

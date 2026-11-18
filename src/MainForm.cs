@@ -525,11 +525,11 @@ namespace TideCombat
             if (!string.IsNullOrEmpty(report.LastAction))
                 lastAction.Text = report.LastAction;
             target.Text = report.Kills > 0 ? "已刷 " + report.Kills : "—";
-            skills.Text = string.Format("{0:F1} 个/小时", report.Rate);
+            skills.Text = string.Format("声骸 {0} · {1:F1} 个/小时", report.Echoes, report.Rate);
             if (report.Finished && report.Failure != null)
                 SetFooter(report.Failure, true);
             else
-                SetFooter(string.Format("{0} 个声骸 · {1:F1} 个/小时 · {2}", report.Kills, report.Rate,
+                SetFooter(string.Format("击杀 {0} · 声骸 {1} · {2:F1} 个/小时 · {3}", report.Kills, report.Echoes, report.Rate,
                     report.Size.Width > 0 ? report.Size.Width + "×" + report.Size.Height : "—"), false);
         }
 

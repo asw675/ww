@@ -127,6 +127,8 @@ namespace TideCombat
         private int layoutKeysSent;
 
         internal string Status { get; private set; }
+        internal int SwitchTimeoutMs { get; set; }
+        internal int LostCombatTimeoutMs { get; set; }
         internal bool Fighting { get { return activeSlot >= 0; } }
         internal bool ShouldScanExecution(long now) { return !executionPending && now - lastBreakCheck > 1000; }
         internal int LucillaTransformSlot
@@ -138,6 +140,8 @@ namespace TideCombat
         {
             this.settings = settings;
             this.cloud = cloud;
+            SwitchTimeoutMs = 5000;
+            LostCombatTimeoutMs = LostCombatMs;
         }
 
         internal BattleAction Observe(HudSnapshot hud, long now)
@@ -534,7 +538,7 @@ namespace TideCombat
                     routineSwitchRequested = action.FollowWithAttack;
                     planningRoutineSwitch = false;
                     bool known = activeSlot >= 0 && roster[activeSlot].Id != null;
-                    switchDeadline = now + (routineSwitchRequested ? 10000 : known ? 5000 : 1050);
+                    switchDeadline = now + (routineSwitchRequested ? 10000 : known ? SwitchTimeoutMs : 1050);
                     switchHudDeadline = now + (known ? 5000 : 1050);
                     retrySwitchAt = now + (routineSwitchRequested ? 100 : known ? 270 : 1050);
                     nextAction = now + (routineSwitchRequested ? 0 : 220);
@@ -574,7 +578,7 @@ namespace TideCombat
 
         private void ExpireBattle(long now)
         {
-            if (activeSlot >= 0 && now - lastLock >= LostCombatMs) FinishBattle();
+            if (activeSlot >= 0 && now - lastLock >= LostCombatTimeoutMs) FinishBattle();
         }
 
         private void ResetRetarget()

@@ -98,7 +98,7 @@ namespace TideCombat
         private const int CombatLostMs = 2500;
         private const int EnterTimeout = 8000;
 
-        private enum Step { WaitGame, BossScript, Approach, Enter, Fight, Loot, Claim, Revive, Teleport, MapTeleport, AimTeleport, Night, Done, Failed }
+        private enum Step { WaitGame, BossScript, Approach, Enter, Fight, Loot, Claim, Revive, Teleport, HealTeleport, MapTeleport, AimTeleport, Night, Done, Failed }
         private enum TeleportStep { OpenBook, PickCategory, PickKind, PickBoss, Travel, Confirm, WaitWorld }
 
         private readonly CombatSettings settings;
@@ -108,9 +108,13 @@ namespace TideCombat
         private TeleportStep teleportStep = TeleportStep.OpenBook;
         private long stepAt, nextAction, lastCombatAt, lastCameraAt;
         private bool forwardHeld, combatSeen, entered;
-        private int teleportAttempts, enterClicks, kills, circleStep, scrollClicks, nightStep, mapStep, aimStep, bossStep;
+        private int teleportAttempts, enterClicks, kills, echoes, retries, circleStep, scrollClicks, nightStep,
+            mapStep, aimStep, bossStep, healStep;
+        private bool healUsed;
         private string aimBoss;
-        private long nextCircleAt, lastNightChange, nightStepAt, nextPopupAt, realmExitAt, lastScrollAt;
+        private long nextCircleAt, lastNightChange, nightStepAt, nextPopupAt, realmExitAt, lastScrollAt, nextPickupAt;
+        private int circleDuration = 800;
+        private bool backedUp;
         private int popupClicks;
         private bool absorbSeen;
         private readonly int combatWaitMs;
@@ -144,6 +148,7 @@ namespace TideCombat
         internal string Failure { get; private set; }
         internal bool Finished { get { return step == Step.Done || step == Step.Failed; } }
         internal int Kills { get { return kills; } }
+        internal int Echoes { get { return echoes; } }
         internal double Hours
         {
             get { return Math.Max((DateTime.UtcNow - startedAt).TotalHours, 1.0 / 3600); }
@@ -154,6 +159,7 @@ namespace TideCombat
         internal BattlePlanner Planner { get { return planner; } }
         internal bool ForwardHeld { get { return forwardHeld; } }
         internal bool WantsLevelScan { get { return step == Step.Enter && enterClicks == 0; } }
+        internal bool NeedsMapMarker { get { return step == Step.MapTeleport && mapStep == 1; } }
         internal bool WantsPickupScan
         {
             get { return (step == Step.Loot || step == Step.Claim) && !absorbSeen; }
@@ -166,6 +172,9 @@ namespace TideCombat
                 return Idle();
             FarmUi ui = frame.Ui ?? new FarmUi();
             HudSnapshot hud = frame.HudValid ? frame.Hud : null;
+            bool realm = InRealm(ui);
+            planner.SwitchTimeoutMs = realm ? 5000 : 3000;
+            planner.LostCombatTimeoutMs = realm ? 3000 : 1200;
             if (!string.IsNullOrEmpty(frame.DialogText) &&
                 (frame.DialogText.Contains("断") || frame.DialogText.Contains("云服务") ||
                  frame.DialogText.Contains("重连")) && now >= nextPopupAt && step != Step.Night)
@@ -215,6 +224,7 @@ namespace TideCombat
                 case Step.Claim: return Claim(frame, hud, ui, now);
                 case Step.Revive: return Revive(frame, ui, now);
                 case Step.Teleport: return Teleport(frame, ui, now);
+                case Step.HealTeleport: return HealTeleport(frame, ui, now);
                 case Step.Night: return Night(frame, now);
                 case Step.MapTeleport: return MapTeleport(frame, ui, now);
                 case Step.AimTeleport: return AimTeleport(frame, ui, now);
@@ -230,6 +240,9 @@ namespace TideCombat
 
         internal void ResetToApproach(long now)
         {
+            backedUp = false;
+            circleStep = 0;
+            circleDuration = 800;
             absorbSeen = false;
             step = Step.Approach;
             stepAt = now;
@@ -407,7 +420,9 @@ namespace TideCombat
                     return Steer(ui, frame, now);
                 if (options.Pickup == FarmPickupMode.Circle && now >= nextCircleAt)
                 {
-                    nextCircleAt = now + 900;
+                    if (circleStep > 0 && circleStep % 2 == 0 && circleDuration < 4000)
+                        circleDuration += 800;
+                    nextCircleAt = now + circleDuration;
                     char direction = "AWDS"[circleStep++ % 4];
                     return Key(direction, now);
                 }
@@ -484,6 +499,12 @@ namespace TideCombat
 
         private FarmDecision Fight(FarmFrame frame, HudSnapshot hud, FarmUi ui, long now)
         {
+            if (!InRealm(ui) && ui.FPrompt && frame.AbsorbText && now >= nextPickupAt)
+            {
+                nextPickupAt = now + 1200;
+                echoes++;
+                return Key('F', now);
+            }
             if (combatSeen && frame.Echoes != null && frame.Echoes.Count > 0)
             {
                 Kill();
@@ -531,7 +552,10 @@ namespace TideCombat
             if (ui.FPrompt)
             {
                 if (frame.AbsorbText && !absorbSeen)
+                {
                     absorbSeen = true;
+                    echoes++;
+                }
                 step = Step.Claim;
                 stepAt = now;
                 nextAction = now + 900;
@@ -543,6 +567,10 @@ namespace TideCombat
                 stepAt = now;
                 return Idle();
             }
+            if (!backedUp && now - stepAt < 1000)
+                return Key('S', now);
+            if (!backedUp)
+                backedUp = true;
             if (now - stepAt > 3500)
             {
                 step = Step.Claim;
@@ -556,7 +584,9 @@ namespace TideCombat
                     return Steer(ui, frame, now);
                 if (options.Pickup == FarmPickupMode.Circle && now >= nextCircleAt)
                 {
-                    nextCircleAt = now + 900;
+                    if (circleStep > 0 && circleStep % 2 == 0 && circleDuration < 4000)
+                        circleDuration += 800;
+                    nextCircleAt = now + circleDuration;
                     char direction = "AWDS"[circleStep++ % 4];
                     return Key(direction, now);
                 }
@@ -653,6 +683,15 @@ namespace TideCombat
                 if (now - stepAt > 2500)
                 {
                     realmExitAt = 0;
+                    if (options.Teleport && !InRealm(ui) && !healUsed)
+                    {
+                        healUsed = true;
+                        healStep = 0;
+                        step = Step.HealTeleport;
+                        stepAt = now;
+                        nextAction = now;
+                        return Idle();
+                    }
                     if (options.Teleport)
                     {
                         step = Step.Teleport;
@@ -691,6 +730,11 @@ namespace TideCombat
             switch (teleportStep)
             {
                 case TeleportStep.OpenBook:
+                    if (ui.Claim || ui.Challenge || ui.TeamStart)
+                    {
+                        nextAction = now + 900;
+                        return Key(0x1B, now);
+                    }
                     if (ui.Book)
                     {
                         teleportStep = TeleportStep.PickCategory;
@@ -948,6 +992,55 @@ namespace TideCombat
             return null;
         }
 
+        private FarmDecision HealTeleport(FarmFrame frame, FarmUi ui, long now)
+        {
+            detail = "传送到回血点";
+            if (now - stepAt > 20000)
+            {
+                step = Step.Teleport;
+                stepAt = now;
+                nextAction = now;
+                return Idle();
+            }
+            if (now < nextAction)
+                return Idle();
+            switch (healStep)
+            {
+                case 0:
+                    healStep = 1;
+                    nextAction = now + 2200;
+                    return Key('M', now);
+                case 1:
+                    if (ui.HasHealPoint)
+                    {
+                        healStep = 2;
+                        nextAction = now + 1500;
+                        return Click(new Point(ui.HealBox.X + ui.HealBox.Width / 2,
+                            ui.HealBox.Y + ui.HealBox.Height / 2), now);
+                    }
+                    if (now - stepAt > 7000) { healStep = 3; nextAction = now + 500; }
+                    return Idle();
+                case 2:
+                    healStep = 3;
+                    nextAction = now + 2000;
+                    if (ui.Teleport)
+                        return Click(new Point(ui.TeleportBox.X + ui.TeleportBox.Width / 2,
+                            ui.TeleportBox.Y + ui.TeleportBox.Height / 2), now);
+                    return Click(At(frame, .89, .92), now);
+                case 3:
+                    healStep = 4;
+                    nextAction = now + 2500;
+                    if (ui.SkipDialog)
+                        return Click(At(frame, .49, .55), now);
+                    return Idle();
+                default:
+                    step = Step.Teleport;
+                    stepAt = now;
+                    nextAction = now;
+                    return Idle();
+            }
+        }
+
         private FarmDecision AimTeleport(FarmFrame frame, FarmUi ui, long now)
         {
             detail = "按名称搜索传送";
@@ -1139,10 +1232,37 @@ namespace TideCombat
 
         private FarmDecision Fail(string reason)
         {
+            if (retries < 3)
+            {
+                retries++;
+                return Retry(reason);
+            }
             step = Step.Failed;
             Failure = reason;
             detail = reason;
             return Idle();
+        }
+
+        private FarmDecision Retry(string reason)
+        {
+            planner.Invalidate(0);
+            step = Step.WaitGame;
+            stepAt = 0;
+            nextAction = 0;
+            teleportAttempts = 0;
+            enterClicks = 0;
+            bossStep = 0;
+            combobulate();
+            detail = "重试 " + retries + "/3：" + reason;
+            return Idle();
+        }
+
+        private void combobulate()
+        {
+            combatSeen = false;
+            absorbSeen = false;
+            forwardHeld = false;
+            realmExitAt = 0;
         }
 
         private FarmDecision Battle(BattleAction action, long now)

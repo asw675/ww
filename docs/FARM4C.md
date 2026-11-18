@@ -35,14 +35,15 @@ Revive / Night / MonthlyCard 为可随时插入的旁路状态。
 
 - **Approach**：小地图有 Boss 标记时按箭头朝向闭环转向（A/D/W + 中键回正）；否则按 W 直线搜索，20 秒超时后按配置走 F2 传送或地图传送。
 - **Enter**：F → 等级行 → 单人挑战 → 跳过「无法获取奖励」提示 → 开始挑战；坐标取自参考实现。
-- **Fight**：复用 `BattlePlanner`；每帧/每 300ms 跑一次 YOLO，看到地面声骸立即结束战斗（对齐 `combat_end_condition`）。
+- **Fight**：复用 `BattlePlanner`；每 300ms 跑一次 YOLO，看到地面声骸立即结束战斗（对齐 `combat_end_condition`）；大世界战斗途中识别到「吸收」文字会按 F 拾取并计数。
 - **Loot**：YOLO 模式朝最近的声骸走，靠近后按 F；绕圈模式按 W/A/S/D 循环；直走模式按 W。F 提示始终优先。
-- **Claim**：领奖弹窗发 ESC，F 提示先滚动再按 F；倒计时结束后按配置进入下一轮。
+- **Claim**：领奖弹窗发 ESC，F 提示先滚动再按 F；倒计时结束后按配置进入下一轮。失败会按参考重试 3 次。
 - **Teleport**：F2 → Boss 图鉴页签 → 二级分类 → 列表行（不足时点滚动条并按公式补滚）→ 传送按钮 → 确认。
 - **MapTeleport**：M 开图 → 中央 40% 找 `boss_check_mark` → 点击 → 传送按钮 → 确认。
 - **AimTeleport**：识别过 Boss 名时改走 F2「全部怪物」图鉴 → 搜索框 → 剪贴板输入中文名 → 搜索 → 第一条 → 传送（对齐 `teleport_to_nearest_boss` 的 `aim_boss` 分支）。
 - **BossScript**：芬里科先循环 F 拾取再传送；无归的谬误先传送再按 D 靠近；无铭探索者先向前跑 8 秒再传送。
-- **Revive**：点击复活；副本内先 ESC 退本回信标再重新传送。
+- **Revive**：点击复活；大世界先传送到回血点再传回 Boss；副本内先 ESC 退本回信标再重新传送。
+- **HealTeleport**：M 开图 → `map_way_point` 回血点 → 传送 → 确认。
 - **Night**：罗蕾莱专属，按参考的点击序列调整昼夜。
 - **MonthlyCard**：识别月卡弹窗并点击两次底部按钮。
 
@@ -78,7 +79,9 @@ Revive / Night / MonthlyCard 为可随时插入的旁路状态。
 | `change_time_to_night` | `Night` | 参考点击序列 |
 | `handle_monthly_card` | 弹窗点击 | 参考坐标 |
 | `manage_boss_parameters` | 构造时计算 | 等待/bypass/赫卡忒 |
-| `init_parameters` | 阈值 0.25/0.65 | 已对齐 |
+| `init_parameters` | YOLO 阈值 0.25/0.65；锁敌超时 3s/1.2s；换人超时 5s/3s | 已对齐（按副本/大世界切换） |
+| `find_boss_check_mark` | 勾选标记 + 未勾选标记 0/90/180 旋转 | 已实现 |
+| `teleport_to_heal` | `map_way_point` 回血点 | 已实现 |
 
 ## 参考截图验证
 

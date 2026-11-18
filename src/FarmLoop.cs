@@ -13,6 +13,7 @@ namespace TideCombat
         internal string State;
         internal string LastAction;
         internal int Kills;
+        internal int Echoes;
         internal double Rate;
         internal Size Size;
         internal HudSnapshot Hud;
@@ -59,6 +60,14 @@ namespace TideCombat
             string bossName = null;
             long lastBossOcr = -1000;
             long lastDialogOcr = -1000;
+            BossMarkerFinder markerFinder = null;
+            try
+            {
+                string markerPath = BossMarkerFinder.DataPath;
+                if (File.Exists(markerPath)) markerFinder = new BossMarkerFinder(markerPath);
+            }
+            catch (Exception) { markerFinder = null; }
+            long lastMarker = -1000;
             MinimapNavigator navigator = null;
             double navTurn = double.NaN;
             long lastNav = -1000;
@@ -146,6 +155,21 @@ namespace TideCombat
                             }
                             else if (!wantEchoes)
                                 echoes = null;
+                            if (markerFinder != null && farm.NeedsMapMarker && ui != null && !ui.HasMapMarker &&
+                                now - lastMarker >= 500)
+                            {
+                                lastMarker = now;
+                                try
+                                {
+                                    Rectangle marker;
+                                    if (markerFinder.TryFind(frame, out marker))
+                                    {
+                                        ui.HasMapMarker = true;
+                                        ui.MapMarker = marker;
+                                    }
+                                }
+                                catch (Exception) { }
+                            }
                             if (navigator != null && now - lastNav >= 150 && !farm.Planner.Fighting)
                             {
                                 lastNav = now;
@@ -219,7 +243,9 @@ namespace TideCombat
                                 progress.Report(new FarmReport
                                 {
                                     State = farm.Failure ?? "刷取完成", Failure = farm.Failure, Finished = true,
-                                    Kills = farm.Kills, Rate = farm.Kills / farm.Hours, Size = bounds.Size, Hud = hud
+                                    Kills = farm.Kills, Echoes = farm.Echoes,
+                                    Rate = (farm.Echoes > 0 ? farm.Echoes : farm.Kills) / farm.Hours,
+                                    Size = bounds.Size, Hud = hud
                                 });
                                 break;
                             }
@@ -243,7 +269,9 @@ namespace TideCombat
                             progress.Report(new FarmReport
                             {
                                 State = state, LastAction = lastAction, Kills = farm.Kills,
-                                Rate = farm.Kills / farm.Hours, Size = bounds.Size, Hud = hud
+                                Echoes = farm.Echoes,
+                                Rate = (farm.Echoes > 0 ? farm.Echoes : farm.Kills) / farm.Hours,
+                                Size = bounds.Size, Hud = hud
                             });
                             lastReport = now;
                         }

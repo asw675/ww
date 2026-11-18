@@ -34,6 +34,7 @@ namespace TideCombat
             string lastAction = "—";
             long lastReport = -500;
             bool forward = false;
+            long lostSince = 0;
             try
             {
                 using (var capture = new BattleLoop.WindowFrames(window))
@@ -80,11 +81,14 @@ namespace TideCombat
                         {
                             farmInput.ReleaseAll();
                             if (forward) { farmInput.KeyUp('W'); forward = false; }
-                            farm.ResetToApproach(now);
+                            if (lostSince == 0) lostSince = now;
+                            if (now - lostSince > 5000)
+                                farm.ResetToApproach(now);
                             state = window.Available() ? "等待画面" : "等待切回游戏";
                         }
                         else
                         {
+                            lostSince = 0;
                             var farmFrame = new FarmFrame(hud, hud != null && hud.Valid, ui,
                                 new Size(frame.Width, frame.Height), bounds);
                             FarmDecision decision = farm.Observe(farmFrame, now);

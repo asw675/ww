@@ -7,7 +7,7 @@
 - 前台窗口模式（`本地客户端 · 前台` 或 `网页云游戏 · 前台`）；后台模式无法可靠点击菜单。
 - 16:9、1280×720 以上、默认 HUD 布局。
 - 游戏与工具权限级别一致（与自动战斗一致）。
-- 模型与运行库已随包提供：`assets/echo_model/echo.onnx`、`assets/minimap/arrow.bin`、`lib/onnxruntime.dll`。
+- 模型与运行库已随包提供：`assets/echo_model/echo.onnx`、`assets/ocr/`（PP-OCRv6）、`assets/minimap/arrow.bin`、`lib/onnxruntime.dll`。
 
 ## 配置
 
@@ -50,7 +50,7 @@ Revive / Night / MonthlyCard 为可随时插入的旁路状态。
 - **ONNX Runtime**：托管库 + Windows x64 原生库随包；`EchoDetector` 直接用 `InferenceSession`。
 - **小地图**：`box_minimap` 区域 + `boss_check_mark_minimap` 签名定位；玩家朝向用 72 个旋转的箭头灰度模板做归一化互相关，算出顺时针转向角。
 - **UI 签名**：22 个标签（F 提示、吸收文字、领奖、挑战、死亡、宝箱、图鉴、传送、月卡、体力、Boss 标记等），全部带「局部亮度对比」列；固定 HUD 只在模板预期位置 ±8 像素内匹配。
-- **OCR 替代**：参考实现用 OCR 选等级、认 Boss 名、读「吸收」文字；本项目改用参考自带的坐标版等级选择、模板匹配吸收提示、地图标记传送，功能等价但不依赖 OCR 模型。
+- **OCR**：内置 PP-OCRv6（det+rec，ONNX Runtime）。等级选择用 OCR 在左侧面板找目标等级文本，拾取用 OCR 读「吸收/Absorb」文字；Boss 名识别未接入（改用地图标记传送）。
 
 ## 与 ok-ww 的逐项对照
 
@@ -71,7 +71,7 @@ Revive / Night / MonthlyCard 为可随时插入的旁路状态。
 | `scroll_and_click_buttons` | `Claim` | 滚轮 + F |
 | `handle_boss_restart_after_treasure` | `Claim → Enter` | 副本内 F 重开 |
 | `revive_action` | `Revive` | 复活点击 + 退本/传送 |
-| `check_boss_name`（OCR） | 地图标记路径 | 功能等价，不读名字 |
+| `check_boss_name`（OCR） | 未接入 | 用地图标记传送替代 |
 | `change_time_to_night` | `Night` | 参考点击序列 |
 | `handle_monthly_card` | 弹窗点击 | 参考坐标 |
 | `manage_boss_parameters` | 构造时计算 | 等待/bypass/赫卡忒 |
@@ -88,9 +88,8 @@ Revive / Night / MonthlyCard 为可随时插入的旁路状态。
 
 ## 已知差异
 
-1. 等级选择用参考自带坐标版，不读 OCR 文本；面板布局改动时会失效。
-2. Boss 名不识别，改用地图标记传送。
+1. Boss 名不识别，改用地图标记传送（`aim_boss` 路径未实现）。
+2. 云游戏断线弹窗未实现。
 3. 芬里科/无归的谬误/无铭探索者的特化交互用通用流程 + 地图传送近似，未逐帧复刻。
-4. 云游戏断线弹窗未实现（依赖 OCR 文案）。
-5. 宽屏 21:9 的居中/右对齐锚点与参考不完全一致，建议 16:9。
-6. 所有阈值与坐标未在真实客户端校准。
+4. 宽屏 21:9 的居中/右对齐锚点与参考不完全一致，建议 16:9。
+5. 所有阈值与坐标未在真实客户端校准。

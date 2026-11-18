@@ -27,11 +27,12 @@ namespace TideCombat
         }
 
         private static FarmDecision Step(Farm4C farm, HudSnapshot hud, FarmUi ui, ref long now, int advance = 300,
-            System.Collections.Generic.List<EchoBox> echoes = null)
+            System.Collections.Generic.List<EchoBox> echoes = null,
+            System.Collections.Generic.List<OcrLine> levels = null, bool absorb = false)
         {
             now += advance;
             return farm.Observe(new FarmFrame(hud, hud != null && hud.Valid, ui, new Size(1600, 900),
-                new Rectangle(0, 0, 1920, 1080), echoes), now);
+                new Rectangle(0, 0, 1920, 1080), echoes, double.NaN, levels, absorb), now);
         }
 
         internal static void Signatures()
@@ -179,6 +180,28 @@ namespace TideCombat
             for (int index = 0; index < 6; index++)
                 Step(farm, Hud(true), Ui(), ref now, 300, echoes);
             Require(farm.Kills == 1, "检测到声骸应立即结束战斗并计数");
+        }
+
+        internal static void LevelOcr()
+        {
+            var farm = new Farm4C(CombatSettings.Defaults(), FarmOptions.Defaults());
+            long now = 1000;
+            Step(farm, null, Ui(), ref now, 100);
+            Step(farm, Hud(false), Ui(), ref now, 100);
+            var prompt = Ui();
+            prompt.FPrompt = true;
+            Step(farm, Hud(false), prompt, ref now, 200);
+            var challenge = Ui();
+            challenge.Challenge = true;
+            var levels = new System.Collections.Generic.List<OcrLine>
+            {
+                new OcrLine { Box = new Rectangle(200, 300, 60, 24), Text = "Lv.60" },
+                new OcrLine { Box = new Rectangle(200, 372, 60, 24), Text = "Lv.80" }
+            };
+            FarmDecision click = Step(farm, Hud(false), challenge, ref now, 400, null, levels);
+            Require(click.Request == FarmRequest.Click, "OCR 命中等级后应点击");
+            Require(Math.Abs(click.Point.Y - 384) <= 2 && Math.Abs(click.Point.X - 230) <= 2,
+                "应点击 OCR 给出的 80 级行");
         }
 
         internal static void ReviveFlow()

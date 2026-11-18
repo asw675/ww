@@ -39,9 +39,13 @@ Copy-Item (Join-Path $runtime 'onnxruntime.dll') $buildFolder -Force
 Copy-Item (Join-Path $runtime 'System.Memory.dll') $buildFolder -Force
 Copy-Item (Join-Path $runtime 'System.Buffers.dll') $buildFolder -Force
 Copy-Item (Join-Path $runtime 'System.Runtime.CompilerServices.Unsafe.dll') $buildFolder -Force
-$modelFolder = Join-Path $buildFolder 'assets\echo_model'
-New-Item -ItemType Directory -Path $modelFolder -Force | Out-Null
-Copy-Item (Join-Path $PSScriptRoot 'assets\echo_model\echo.onnx') $modelFolder -Force
+foreach ($asset in @('echo_model', 'ocr', 'minimap'))
+{
+    $source = Join-Path $PSScriptRoot ('assets\' + $asset)
+    $target = Join-Path $buildFolder ('assets\' + $asset)
+    New-Item -ItemType Directory -Path $target -Force | Out-Null
+    Copy-Item (Join-Path $source '*') $target -Force -Recurse
+}
 Write-Output $application
 
 if ($Test -or $ReferenceDirectory) {

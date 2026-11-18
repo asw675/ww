@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
 using System.IO;
+using System.Linq;
 using System.Threading;
 
 namespace TideCombat
@@ -44,6 +45,16 @@ namespace TideCombat
             }
             long lastDetect = -1000;
             List<EchoBox> echoes = null;
+            OcrReader ocr = null;
+            try
+            {
+                string dir = OcrReader.Directory;
+                if (File.Exists(Path.Combine(dir, "det.onnx"))) ocr = new OcrReader(dir);
+            }
+            catch (Exception) { ocr = null; }
+            long lastOcr = -1000;
+            List<OcrLine> levelLines = null;
+            bool absorbText = false;
             MinimapNavigator navigator = null;
             double navTurn = double.NaN;
             long lastNav = -1000;
@@ -141,8 +152,36 @@ namespace TideCombat
                                 }
                                 catch (Exception) { navTurn = double.NaN; }
                             }
+                            if (ocr != null && now - lastOcr >= 400)
+                            {
+                                if (farm.WantsLevelScan)
+                                {
+                                    lastOcr = now;
+                                    try
+                                    {
+                                        levelLines = ocr.Read(frame, new Rectangle((int)(frame.Width * .03),
+                                            (int)(frame.Height * .113), (int)(frame.Width * .293),
+                                            (int)(frame.Height * .547)));
+                                    }
+                                    catch (Exception) { levelLines = null; }
+                                }
+                                else if (farm.WantsPickupScan && ui != null && ui.FPrompt)
+                                {
+                                    lastOcr = now;
+                                    try
+                                    {
+                                        Rectangle f = ui.FBox;
+                                        var lines = ocr.Read(frame, new Rectangle(f.X + f.Width, f.Y - f.Height,
+                                            Math.Max(80, f.Width * 8), Math.Max(30, f.Height * 4)));
+                                        absorbText = lines.Any(line => line.Text != null &&
+                                            (line.Text.Contains("吸收") || line.Text.IndexOf("Absorb",
+                                                StringComparison.OrdinalIgnoreCase) >= 0));
+                                    }
+                                    catch (Exception) { absorbText = false; }
+                                }
+                            }
                             var farmFrame = new FarmFrame(hud, hud != null && hud.Valid, ui,
-                                new Size(frame.Width, frame.Height), bounds, echoes, navTurn);
+                                new Size(frame.Width, frame.Height), bounds, echoes, navTurn, levelLines, absorbText);
                             FarmDecision decision = farm.Observe(farmFrame, now);
                             state = farm.Status;
                             if (farm.Finished)
@@ -186,6 +225,7 @@ namespace TideCombat
             finally
             {
                 if (detector != null) detector.Dispose();
+                if (ocr != null) ocr.Dispose();
                 try { farmInput.ReleaseAll(); } catch (Exception) { }
                 try { input.ReleaseAll(); } catch (Exception) { }
                 concerto.Save();

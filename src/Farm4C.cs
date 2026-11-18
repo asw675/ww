@@ -67,11 +67,16 @@ namespace TideCombat
         internal readonly bool HudValid;
         internal readonly System.Collections.Generic.List<EchoBox> Echoes;
         internal readonly double NavTurn;
+        internal readonly System.Collections.Generic.List<OcrLine> LevelLines;
+        internal readonly bool AbsorbText;
 
         internal FarmFrame(HudSnapshot hud, bool hudValid, FarmUi ui, Size frameSize, Rectangle bounds,
-            System.Collections.Generic.List<EchoBox> echoes = null, double navTurn = double.NaN)
+            System.Collections.Generic.List<EchoBox> echoes = null, double navTurn = double.NaN,
+            System.Collections.Generic.List<OcrLine> levelLines = null, bool absorbText = false)
         {
             NavTurn = navTurn;
+            LevelLines = levelLines;
+            AbsorbText = absorbText;
             Hud = hud;
             HudValid = hudValid;
             Ui = ui;
@@ -100,6 +105,7 @@ namespace TideCombat
         private int teleportAttempts, enterClicks, kills, circleStep, scrollClicks, nightStep, mapStep;
         private long nextCircleAt, lastNightChange, nightStepAt, nextPopupAt, realmExitAt, lastScrollAt;
         private int popupClicks;
+        private bool absorbSeen;
         private readonly int combatWaitMs;
         private readonly bool bypassEndWait, treatAsNotInRealm;
         private string detail = "等待游戏窗口";
@@ -140,6 +146,11 @@ namespace TideCombat
 
         internal BattlePlanner Planner { get { return planner; } }
         internal bool ForwardHeld { get { return forwardHeld; } }
+        internal bool WantsLevelScan { get { return step == Step.Enter && enterClicks == 0; } }
+        internal bool WantsPickupScan
+        {
+            get { return (step == Step.Loot || step == Step.Claim) && !absorbSeen; }
+        }
 
         internal FarmDecision Observe(FarmFrame frame, long now)
         {
@@ -200,6 +211,7 @@ namespace TideCombat
 
         internal void ResetToApproach(long now)
         {
+            absorbSeen = false;
             step = Step.Approach;
             stepAt = now;
             nextAction = now;
@@ -302,8 +314,8 @@ namespace TideCombat
                 if (elapsed >= 300 && enterClicks == 0)
                 {
                     enterClicks = 1;
-                    return Click(new Point((int)(frame.FrameSize.Width * .15),
-                        (int)(frame.FrameSize.Height * (0.17 + (BossRow() - 1) * 0.08))), now);
+                    Point level = LevelPoint(frame);
+                    return Click(level, now);
                 }
                 if (elapsed >= 900 && enterClicks == 1)
                 {
@@ -394,6 +406,8 @@ namespace TideCombat
             detail = "拾取与重开";
             if (ui.FPrompt)
             {
+                if (frame.AbsorbText && !absorbSeen)
+                    absorbSeen = true;
                 step = Step.Claim;
                 stepAt = now;
                 nextAction = now + 900;
@@ -674,6 +688,22 @@ namespace TideCombat
                 case FarmTeleportMode.SpecialNightmare: return .86;
                 default: return .49;
             }
+        }
+
+        private Point LevelPoint(FarmFrame frame)
+        {
+            string wanted = options.BossLevel.ToString();
+            if (frame.LevelLines != null)
+            {
+                foreach (OcrLine line in frame.LevelLines)
+                {
+                    if (line.Text == null || line.Text.IndexOf(wanted, StringComparison.Ordinal) < 0)
+                        continue;
+                    return new Point(line.Box.X + line.Box.Width / 2, line.Box.Y + line.Box.Height / 2);
+                }
+            }
+            return new Point((int)(frame.FrameSize.Width * .15),
+                (int)(frame.FrameSize.Height * (0.17 + (BossRow() - 1) * 0.08)));
         }
 
         private int BossRow()

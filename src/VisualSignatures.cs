@@ -220,10 +220,10 @@ namespace TideCombat
         internal Rectangle Map(int width, int slot)
         {
             Rectangle region = Area;
-            if (Area.Left > 1120 && Label != "revive_confirm_hcenter_vcenter" ||
-                Label == "box_target_enemy_long" || Label == "target_box_long2")
+            bool centered = Label.IndexOf("_hcenter", StringComparison.Ordinal) >= 0;
+            if (!centered && (Area.Left > 1120 || Label == "box_target_enemy_long" || Label == "target_box_long2"))
                 region.X += width - 1600;
-            else if (Area.Left >= 80)
+            else if (centered || Area.Left >= 80)
                 region.X += (width - 1600) / 2;
             if (Fighter != null)
                 region.Y += 110 * slot;

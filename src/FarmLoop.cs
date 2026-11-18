@@ -55,6 +55,8 @@ namespace TideCombat
             long lastOcr = -1000;
             List<OcrLine> levelLines = null;
             bool absorbText = false;
+            string dialogText = null;
+            long lastDialogOcr = -1000;
             MinimapNavigator navigator = null;
             double navTurn = double.NaN;
             long lastNav = -1000;
@@ -180,8 +182,22 @@ namespace TideCombat
                                     catch (Exception) { absorbText = false; }
                                 }
                             }
+                            if (ocr != null && (hud == null || !hud.Valid) && now - lastDialogOcr >= 1000 &&
+                                !farm.WantsLevelScan)
+                            {
+                                lastDialogOcr = now;
+                                try
+                                {
+                                    var lines = ocr.Read(frame, new Rectangle((int)(frame.Width * .2),
+                                        (int)(frame.Height * .25), (int)(frame.Width * .6),
+                                        (int)(frame.Height * .5)));
+                                    dialogText = string.Join(" ", lines.Select(line => line.Text));
+                                }
+                                catch (Exception) { dialogText = null; }
+                            }
                             var farmFrame = new FarmFrame(hud, hud != null && hud.Valid, ui,
-                                new Size(frame.Width, frame.Height), bounds, echoes, navTurn, levelLines, absorbText);
+                                new Size(frame.Width, frame.Height), bounds, echoes, navTurn, levelLines, absorbText,
+                                dialogText);
                             FarmDecision decision = farm.Observe(farmFrame, now);
                             state = farm.Status;
                             if (farm.Finished)

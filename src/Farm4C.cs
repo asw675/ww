@@ -69,14 +69,17 @@ namespace TideCombat
         internal readonly double NavTurn;
         internal readonly System.Collections.Generic.List<OcrLine> LevelLines;
         internal readonly bool AbsorbText;
+        internal readonly string DialogText;
 
         internal FarmFrame(HudSnapshot hud, bool hudValid, FarmUi ui, Size frameSize, Rectangle bounds,
             System.Collections.Generic.List<EchoBox> echoes = null, double navTurn = double.NaN,
-            System.Collections.Generic.List<OcrLine> levelLines = null, bool absorbText = false)
+            System.Collections.Generic.List<OcrLine> levelLines = null, bool absorbText = false,
+            string dialogText = null)
         {
             NavTurn = navTurn;
             LevelLines = levelLines;
             AbsorbText = absorbText;
+            DialogText = dialogText;
             Hud = hud;
             HudValid = hudValid;
             Ui = ui;
@@ -159,6 +162,13 @@ namespace TideCombat
                 return Idle();
             FarmUi ui = frame.Ui ?? new FarmUi();
             HudSnapshot hud = frame.HudValid ? frame.Hud : null;
+            if (!string.IsNullOrEmpty(frame.DialogText) &&
+                (frame.DialogText.Contains("断") || frame.DialogText.Contains("云服务") ||
+                 frame.DialogText.Contains("重连")) && now >= nextPopupAt && step != Step.Night)
+            {
+                nextPopupAt = now + 3000;
+                return Click(At(frame, .50, .62), now);
+            }
             if (ui.MonthlyCard && now >= nextPopupAt && step != Step.Night)
             {
                 nextPopupAt = now + 2500;

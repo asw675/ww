@@ -80,6 +80,17 @@ WaitGame → Approach → (F) → Enter → Fight → Loot → Claim → Enter �
 
 Windows 上执行 `.\build.ps1 -Test` 会一并运行这些用例；macOS 上可单独编译运行 `FarmChecks`（不启动 WinForms）。
 
+## 参考截图验证
+
+用 ok-ww 的 `tests/images` 截图（缩放到 900 高）验证识别层：
+
+| 截图 | 预期 | 结果 |
+|---|---|---|
+| `absorb.png` | 中心 F 提示 + 吸收文字 | 命中（签名 0.976 / 0.911，均通过亮度校验）；副本图标识别为真 |
+| `in_combat.png` | 大世界战斗，无死亡弹窗 | 世界图标命中；死亡弹窗不误报 |
+| `find_confirm.png` | 确认弹窗 | 未命中领奖/挑战按钮 |
+| `big_map.png` | 地图界面，无图鉴/传送按钮 | 全部不误报 |
+
 ## 已知限制
 
 1. 无 OCR：等级选择、Boss 名识别不可用；等级行坐标基于 16:9 固定布局，宽屏可能有偏移。

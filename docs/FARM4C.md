@@ -1,101 +1,96 @@
 # 刷 4C 声骸（Farm 4C Echo）
 
-本功能复刻 ok-ww 的 `FarmEchoTask`（`🌀 Farm 4C Echo in Dungeon/World`）：自动传送到 Boss、进入挑战、战斗、拾取并循环。实现不复用 ok-ww 框架，只按其行为重写。
+复刻 ok-ww `FarmEchoTask`（`🌀 Farm 4C Echo in Dungeon/World`）的完整流程：传送/寻路到 Boss、进入挑战、战斗、按 YOLO 检测拾取声骸、领奖、重开或再传送，含死亡恢复与弹窗处理。实现不复用 ok-ww 框架，按其行为重写。
 
 ## 使用前提
 
-- 前台窗口模式（`本地客户端 · 前台` 或 `网页云游戏 · 前台`）。后台窗口模式无法可靠点击菜单，工具会直接拒绝启动。
-- 游戏分辨率 1280×720 以上、16:9；HUD 使用默认布局。
-- 若游戏以管理员身份运行，工具需要同等权限（与自动战斗一致）。
-- 传送依赖 F2 图鉴：请确认 F2 是「索拉指南」快捷键，且已解锁对应 Boss 图鉴。
+- 前台窗口模式（`本地客户端 · 前台` 或 `网页云游戏 · 前台`）；后台模式无法可靠点击菜单。
+- 16:9、1280×720 以上、默认 HUD 布局。
+- 游戏与工具权限级别一致（与自动战斗一致）。
+- 模型与运行库已随包提供：`assets/echo_model/echo.onnx`、`assets/minimap/arrow.bin`、`lib/onnxruntime.dll`。
 
 ## 配置
 
 | 项 | 说明 |
 |---|---|
-| 传送方式 | 不使用（手动站到 Boss 前）/ Boss 挑战 / 周常挑战 / 特异梦魇 |
-| Boss 序号 | 图鉴列表中从上到下第几个（1 起） |
-| 挑战等级 | 50/60/70/80/90；使用固定行坐标选择（无 OCR） |
-| 刷取次数 | 击杀次数上限 |
-| 开打前等待（秒） | 每轮开战前的等待，对应 ok-ww 的 `Combat Wait Time` |
-| 拾取方式 | 向前走 / 绕圈（无 YOLO 时的替代） |
+| 传送方式 | 不使用 / Boss 挑战 / 周常挑战 / 特异梦魇；对应 ok-ww 的 `Teleport to Boss` |
+| Boss 序号 | 图鉴列表从上到下第几个（1 起） |
+| 挑战等级 | 50/60/70/80/90，使用参考实现自带的坐标版 `choose_level` |
+| 刷取次数 | 击杀次数上限（`Repeat Farm Count`） |
+| 开打前等待 | `Combat Wait Time`；Boss 档案有默认值（异构武装/荣耀狮像/无归的谬误 5s、海之女 7s） |
+| 拾取方式 | 向前走 / 绕圈 / YOLO 检测 |
+| Boss 档案 | 通用、海之女、无归的谬误、异构武装、罗蕾莱、荣耀狮像、梦魇·赫卡忒、芬里科、无铭探索者 |
 | 战斗设置 | 战斗前后切治疗 |
 
-## 流程与状态机
+Boss 档案会覆盖默认等待时间、`bypass_end_wait` 与 `treat_as_not_in_realm`（梦魇·赫卡忒），并启用罗蕾莱的每 660 秒改夜晚流程。
 
-`Farm4C` 是纯状态机，输入 `FarmFrame`（HUD 快照 + UI 识别结果 + 画面尺寸），输出 `FarmDecision`（点击/按键/长按/战斗动作）。`FarmLoop` 负责截图、识别、发送输入。
+## 状态机
 
 ```
-WaitGame → Approach → (F) → Enter → Fight → Loot → Claim → Enter …
-                ↑                                      ↓
-             Teleport ←──────── 传送开启且不在副本内 ──┘
+WaitGame → Approach（小地图寻路） → (F) → Enter → Fight → Loot → Claim
+                  ↑                                   │        │
+                  └──────── Teleport / MapTeleport ←──┴────────┘
+Revive / Night / MonthlyCard 为可随时插入的旁路状态。
 ```
 
-- **Approach**：按住 W 前进，每 2.6 秒中键回正视角；发现 F 提示或敌人血条即切换。
-- **Enter**：F 打开挑战面板后，按「等级行 → 单人挑战 → 跳过提示 → 开始挑战」的顺序点击。
-- **Fight**：完全复用现有 `BattlePlanner`（角色连招、换人、处决、协奏）。
-- **Loot**：向前走向声骸/宝箱，遇到 F 提示即拾取（不依赖地面掉落物检测）。
-- **Claim**：ESC 关闭领奖弹窗，F 触发重开；副本内直接进入下一轮 Enter，不重复 F2 传送。
-- **Teleport**：F2 → 左侧「Boss 图鉴」→ 二级分类 → 列表行 → 传送按钮 → 确认。
-- **Revive**：检测 `revive_confirm` 并点击复活；副本内不先退本回血（见差异表）。
+- **Approach**：小地图有 Boss 标记时按箭头朝向闭环转向（A/D/W + 中键回正）；否则按 W 直线搜索，20 秒超时后按配置走 F2 传送或地图传送。
+- **Enter**：F → 等级行 → 单人挑战 → 跳过「无法获取奖励」提示 → 开始挑战；坐标取自参考实现。
+- **Fight**：复用 `BattlePlanner`；每帧/每 300ms 跑一次 YOLO，看到地面声骸立即结束战斗（对齐 `combat_end_condition`）。
+- **Loot**：YOLO 模式朝最近的声骸走，靠近后按 F；绕圈模式按 W/A/S/D 循环；直走模式按 W。F 提示始终优先。
+- **Claim**：领奖弹窗发 ESC，F 提示先滚动再按 F；倒计时结束后按配置进入下一轮。
+- **Teleport**：F2 → Boss 图鉴页签 → 二级分类 → 列表行（不足时点滚动条并按公式补滚）→ 传送按钮 → 确认。
+- **MapTeleport**：M 开图 → 中央 40% 找 `boss_check_mark` → 点击 → 传送按钮 → 确认。
+- **Revive**：点击复活；副本内先 ESC 退本回信标再重新传送。
+- **Night**：罗蕾莱专属，按参考的点击序列调整昼夜。
+- **MonthlyCard**：识别月卡弹窗并点击两次底部按钮。
 
-关键时序常量：`ApproachTimeout=20s`、`CombatLostMs=2.5s`、`EnterTimeout=8s`、传送单步超时 `12s`（失败 3 次后报错并停止）。
+## 模型与识别
+
+- **YOLOv8 声骸模型**：`images 1×3×640×640 → output0 1×5×8400`；letterbox 640、RGB/255、NCHW、`cv2.dnn.NMSBoxes` 等价 IoU 0.45。阈值：副本内 0.25、大世界 0.65（对齐 `init_parameters`）。
+- **ONNX Runtime**：托管库 + Windows x64 原生库随包；`EchoDetector` 直接用 `InferenceSession`。
+- **小地图**：`box_minimap` 区域 + `boss_check_mark_minimap` 签名定位；玩家朝向用 72 个旋转的箭头灰度模板做归一化互相关，算出顺时针转向角。
+- **UI 签名**：22 个标签（F 提示、吸收文字、领奖、挑战、死亡、宝箱、图鉴、传送、月卡、体力、Boss 标记等），全部带「局部亮度对比」列；固定 HUD 只在模板预期位置 ±8 像素内匹配。
+- **OCR 替代**：参考实现用 OCR 选等级、认 Boss 名、读「吸收」文字；本项目改用参考自带的坐标版等级选择、模板匹配吸收提示、地图标记传送，功能等价但不依赖 OCR 模型。
 
 ## 与 ok-ww 的逐项对照
 
-| ok-ww | 本项目 | 状态 |
+| ok-ww | 本项目 | 实现方式 |
 |---|---|---|
-| `do_run` 主循环 | `Farm4C.Observe` 状态机 | 已对齐（结构等价） |
-| `teleport_to_configured_boss`（F2 图鉴） | `Step.Teleport` 子步骤 | 已实现，简化了滚动条校准 |
-| `click_on_book_target` 滚动条定位 | `FarmVision.FindAll("boss_proceed")` | 部分：只直接点选可见行（≤4 行），未实现字号/滚动校准 |
-| `walk_after_boss_teleport` | `Approach`（W + 中键） | 已实现 |
-| `enter_configured_boss_realm_from_f` | `Enter` 点击序列 | 部分：等级用固定行坐标，ok-ww 用 OCR |
-| `combat_once` | `BattlePlanner` | 已对齐（沿用现有战斗实现） |
-| `pick_echo` / `walk_find_echo` | `Loot`（F 提示 + 直走/绕圈） | 部分：无 YOLO 声骸检测 |
-| `handle_claim_button` | `Claim` 发 ESC | 已实现 |
-| `handle_boss_restart_after_treasure` | `Claim → Enter`（副本内） | 已实现 |
-| `revive_action` | `Revive` 点击复活 | 部分：未实现「退本回信标回血」与 F2 搜无冠者 |
-| `in_realm()` | `illusive_realm_exit` / `world_earth_icon` 模板 | 已实现 |
-| `check_boss_name`（OCR） | — | 未实现（项目无 OCR 引擎） |
-| 小地图 `go_to_boss_minimap` | — | 未实现（无小地图裁剪与朝向角计算） |
-| 八边形 Boss 图标 | — | 未实现（ok-ww 主流程未调用） |
-| `Echo Count` / 每小时 | `Kills` / `Hours` | 部分：以击杀计，不按实际拾取数 |
-| 月卡/云断线弹窗 | — | 未实现（无对应模板流程） |
-
-## 已实现的新增底层能力
-
-- `FarmInput`：绝对坐标点击（前台 `SendInput`，后台 `PostMessage`）、按键长按、滚轮、鼠标左右中键；带权限提升检测。
-- `FrameIndex`：整帧积分图 + 复用缓冲，支持同一帧内多次模板搜索而不产生 GC 压力。
-- `FarmVision`：基于 `data/Signatures.tsv` 的 UI 定位（F 提示、吸收文字、领奖、挑战、死亡、图鉴、传送按钮）。固定 HUD 元素只在模板预期位置 ±8 像素内匹配；每个命中还要通过第 8 列「局部亮度对比」相关性校验（≥0.70），避免低分辨率签名在暗部误命中。
-- 15 个新 UI 签名由 ok-ww 模板图逐位复刻生成（相似度 1.0000），并已注册进 `BuildSignatures` 的重建列表。
-
-## 离线验证
-
-`tests/FarmChecks.cs` 用合成 HUD/UI 驱动状态机，覆盖：
-
-- 签名完整性（嵌入表包含全部 `FarmIndicators`）
-- Approach → F → 挑战面板点击 → 战斗委派 → 击杀计数 → 拾取
-- 自动传送打开 F2 并点击页签
-- 死亡弹窗点击复活
-
-Windows 上执行 `.\build.ps1 -Test` 会一并运行这些用例；macOS 上可单独编译运行 `FarmChecks`（不启动 WinForms）。
+| `do_run` 主循环 | `Farm4C.Observe` | 状态机 |
+| `teleport_to_configured_boss` | `Step.Teleport` | F2 图鉴 + 滚动条补滚 |
+| `walk_after_boss_teleport` | `Approach` | W/中键，小地图导航 |
+| `go_to_boss_minimap` | `MinimapNavigator` + `Navigate` | 箭头旋转 + 角度闭环 |
+| `teleport_to_nearest_boss` | `Step.MapTeleport` | M 地图 + 标记点击 |
+| `enter_configured_boss_realm_from_f` | `Enter` | 参考坐标序列 |
+| `combat_once` | `BattlePlanner` | 现有战斗实现 |
+| `combat_end_condition=find_echos` | `Fight` 中的 YOLO 判定 | 同阈值、同 NMS |
+| `pick_echo` / `walk_find_echo` | `Loot` + 吸收模板 | 模板替代 OCR |
+| `yolo_find_echo` | `ChaseEcho` | 同模型与阈值 |
+| `run_in_circle_to_find_echo` | `Loot` 绕圈 | 方向循环 |
+| `handle_claim_button` | `Claim` | ESC |
+| `scroll_and_click_buttons` | `Claim` | 滚轮 + F |
+| `handle_boss_restart_after_treasure` | `Claim → Enter` | 副本内 F 重开 |
+| `revive_action` | `Revive` | 复活点击 + 退本/传送 |
+| `check_boss_name`（OCR） | 地图标记路径 | 功能等价，不读名字 |
+| `change_time_to_night` | `Night` | 参考点击序列 |
+| `handle_monthly_card` | 弹窗点击 | 参考坐标 |
+| `manage_boss_parameters` | 构造时计算 | 等待/bypass/赫卡忒 |
+| `init_parameters` | 阈值 0.25/0.65 | 已对齐 |
 
 ## 参考截图验证
 
-用 ok-ww 的 `tests/images` 截图（缩放到 900 高）验证识别层：
-
 | 截图 | 预期 | 结果 |
 |---|---|---|
-| `absorb.png` | 中心 F 提示 + 吸收文字 | 命中（签名 0.976 / 0.911，均通过亮度校验）；副本图标识别为真 |
-| `in_combat.png` | 大世界战斗，无死亡弹窗 | 世界图标命中；死亡弹窗不误报 |
-| `find_confirm.png` | 确认弹窗 | 未命中领奖/挑战按钮 |
-| `big_map.png` | 地图界面，无图鉴/传送按钮 | 全部不误报 |
+| `absorb.png` | F 提示 + 吸收文字 | 命中（0.976 / 0.911，含亮度校验） |
+| `echo2.png` | 有发光特效 | YOLO 检出 1 个框（0.70） |
+| `in_combat.png` | 无死亡弹窗 | 死亡不误报，识别为大世界 |
+| `big_map.png` | 无图鉴/传送按钮 | 全部不误报 |
 
-## 已知限制
+## 已知差异
 
-1. 无 OCR：等级选择、Boss 名识别不可用；等级行坐标基于 16:9 固定布局，宽屏可能有偏移。
-2. 无 YOLO：声骸拾取依赖走近后的 F 提示；远处掉落可能漏捡。
-3. 无小地图导航：大世界模式下依赖传送落点与直线前进；绕路地形可能找不到 Boss。
-4. 传送的图鉴列表只点选当前可见的行；目标序号超出可见范围时会点到错误行。
-5. 不做宝箱/地面掉落物的视觉定位：拾取完全依赖走近后出现的 F 提示，绕过障碍或远距离掉落需要人工调整。
-5. 宽屏（21:9）下居中/右对齐 UI 的锚点与 ok-ww 不完全一致，建议 16:9 使用。
+1. 等级选择用参考自带坐标版，不读 OCR 文本；面板布局改动时会失效。
+2. Boss 名不识别，改用地图标记传送。
+3. 芬里科/无归的谬误/无铭探索者的特化交互用通用流程 + 地图传送近似，未逐帧复刻。
+4. 云游戏断线弹窗未实现（依赖 OCR 文案）。
+5. 宽屏 21:9 的居中/右对齐锚点与参考不完全一致，建议 16:9。
+6. 所有阈值与坐标未在真实客户端校准。

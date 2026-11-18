@@ -13,6 +13,8 @@ namespace TideCombat
         private readonly NumericUpDown repeat = Number(1, 100000, 10000);
         private readonly NumericUpDown wait = Number(0, 60, 0);
         private readonly ComboBox pickup = Theme.Select("向前走", "绕圈", "YOLO 检测");
+        private readonly ComboBox bossProfile = Theme.Select("通用 / 其它", "海之女", "无归的谬误", "异构武装",
+            "罗蕾莱", "荣耀狮像", "梦魇·赫卡忒", "芬里科", "无铭探索者");
         private readonly CheckBox healer = new CheckBox { Text = "战斗前后切换到治疗", AutoSize = true };
         private readonly Label hint = Theme.Text("自动传送会打开 F2 图鉴，需要游戏窗口可见。", Theme.Muted);
 
@@ -28,7 +30,7 @@ namespace TideCombat
             ForeColor = Theme.Ink;
             AutoScaleMode = AutoScaleMode.Dpi;
             AutoScaleDimensions = new SizeF(96, 96);
-            ClientSize = new Size(438, 372);
+            ClientSize = new Size(438, 404);
 
             var layout = new TableLayoutPanel
             {
@@ -45,11 +47,12 @@ namespace TideCombat
             Add(layout, "刷取次数", repeat, 3);
             Add(layout, "开打前等待（秒）", wait, 4);
             Add(layout, "拾取方式", pickup, 5);
-            Add(layout, "战斗设置", healer, 6);
+            Add(layout, "Boss 档案", bossProfile, 6);
+            Add(layout, "战斗设置", healer, 7);
             hint.AutoSize = false;
             hint.Height = 34;
             hint.Dock = DockStyle.Fill;
-            layout.Controls.Add(hint, 1, 7);
+            layout.Controls.Add(hint, 1, 8);
 
             var actions = new FlowLayoutPanel
             {
@@ -62,7 +65,7 @@ namespace TideCombat
             ok.Click += delegate { DialogResult = DialogResult.OK; Close(); };
             actions.Controls.Add(cancel);
             actions.Controls.Add(ok);
-            layout.Controls.Add(actions, 0, 8);
+            layout.Controls.Add(actions, 0, 9);
             layout.SetColumnSpan(actions, 2);
 
             teleport.SelectedIndex = options.Teleport ? Math.Max(1, (int)options.TeleportMode) : 0;
@@ -71,6 +74,7 @@ namespace TideCombat
             repeat.Value = Math.Max(1, Math.Min(100000, options.RepeatCount));
             wait.Value = Math.Max(0, Math.Min(60, options.WaitSeconds));
             pickup.SelectedIndex = (int)options.Pickup;
+            bossProfile.SelectedIndex = (int)options.Boss;
             healer.Checked = options.SwitchHealer;
             AcceptButton = ok;
             CancelButton = cancel;
@@ -91,6 +95,7 @@ namespace TideCombat
                     RepeatCount = (int)repeat.Value,
                     WaitSeconds = (int)wait.Value,
                     Pickup = (FarmPickupMode)pickup.SelectedIndex,
+                    Boss = (FarmBoss)bossProfile.SelectedIndex,
                     SwitchHealer = healer.Checked
                 };
                 try { Result.Validate(); }

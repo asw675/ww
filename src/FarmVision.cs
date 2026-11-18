@@ -23,6 +23,13 @@ namespace TideCombat
         internal bool OpenWorld;
         internal bool Teleport;
         internal Rectangle TeleportBox;
+        internal bool MonthlyCard;
+        internal Rectangle MonthlyCardBox;
+        internal bool ClaimReward;
+        internal bool HasMapMarker;
+        internal Rectangle MapMarker;
+        internal Rectangle ClaimBox;
+        internal double ScrollTop = .1963;
         internal int Evidence;
         internal string Detail = "等待画面";
     }
@@ -39,7 +46,8 @@ namespace TideCombat
             "team_start_challenge", "gray_button_challenge", "gray_start_battle",
             "skip_dialog_check", "skip_dialog_confirm", "revive_confirm_hcenter_vcenter",
             "treasure_icon", "gray_book_boss", "boss_proceed", "gray_teleport",
-            "illusive_realm_exit", "world_earth_icon"
+            "illusive_realm_exit", "world_earth_icon", "monthly_card", "claim_stamina_sign",
+            "boss_check_mark_minimap", "boss_check_mark"
         };
     }
 
@@ -165,8 +173,17 @@ namespace TideCombat
             ui.Teleport = FindNear(frame, "gray_teleport", 8, .86, .72, out ui.TeleportBox);
             if (ui.Teleport)
                 ui.Evidence |= 32;
+            List<Rectangle> markers = FindAll(frame, "boss_check_mark", Ratio(frame, .3, .3, .7, .7), 4, .82, .74);
+            ui.HasMapMarker = markers.Count > 0;
+            if (ui.HasMapMarker)
+                ui.MapMarker = markers[0];
+            ui.MonthlyCard = FindNear(frame, "monthly_card", 12, .86, .74, out ui.MonthlyCardBox);
+            ui.ClaimReward = FindNear(frame, "claim_stamina_sign", 10, .86, .74, out ui.ClaimBox);
             if (ui.Book)
+            {
                 ui.BossRows = FindAll(frame, "boss_proceed", Ratio(frame, .86, .18, 1, .90), 4, .90, .76);
+                ui.ScrollTop = ScrollBarTop(frame);
+            }
             ui.Detail = ui.Death ? "死亡" : ui.Claim ? "领奖弹窗" : ui.Challenge ? "挑战界面" :
                 ui.Book ? "图鉴" : ui.Teleport ? "传送按钮" : ui.FPrompt ? "可交互" :
                 ui.InRealm ? "副本内" : ui.OpenWorld ? "大世界" : "探索中";
@@ -177,6 +194,14 @@ namespace TideCombat
         {
             index.Load(frame);
             return FindNear(frame, label, 20, threshold, .70, out found);
+        }
+
+        internal bool FindFirst(PixelFrame frame, string label, Rectangle area, int step, double threshold,
+            double lightMinimum, out Rectangle found)
+        {
+            List<Rectangle> all = FindAll(frame, label, area, step, threshold, lightMinimum);
+            found = all.Count > 0 ? all[0] : Rectangle.Empty;
+            return all.Count > 0;
         }
 
         internal List<Rectangle> FindAll(PixelFrame frame, string label, Rectangle area, int step, double threshold,
@@ -272,6 +297,21 @@ namespace TideCombat
                     worst = index;
             if (score > candidates[worst].Score)
                 candidates[worst] = new Candidate(score, rect);
+        }
+
+        private double ScrollBarTop(PixelFrame frame)
+        {
+            Rectangle area = Ratio(frame, .969, .191, .978, .271);
+            for (int y = area.Top; y <= area.Bottom; y++)
+            {
+                int white = 0;
+                for (int x = area.Left; x <= area.Right; x++)
+                    if (frame.Pale(x, y, 190, 25))
+                        white++;
+                if (white >= 3)
+                    return (double)y / frame.Height;
+            }
+            return .1963;
         }
 
         private static Rectangle Ratio(PixelFrame frame, double left, double top, double right, double bottom)

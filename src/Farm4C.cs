@@ -5,6 +5,11 @@ namespace TideCombat
 {
     public enum FarmTeleportMode { Off, BossChallenge, WeeklyChallenge, SpecialNightmare }
     public enum FarmPickupMode { Walk, Circle, Yolo }
+    public enum FarmBoss
+    {
+        Other, Hyvatia, FallacyOfNoReturn, SentryConstruct, Lorelei, LionessOfGlory,
+        NightmareHecate, Fenrico, NamelessExplorer
+    }
 
     public sealed class FarmOptions
     {
@@ -16,6 +21,7 @@ namespace TideCombat
         public int WaitSeconds { get; set; }
         public bool SwitchHealer { get; set; }
         public FarmPickupMode Pickup { get; set; }
+        public FarmBoss Boss { get; set; }
 
         public static FarmOptions Defaults()
         {
@@ -23,13 +29,14 @@ namespace TideCombat
             {
                 Teleport = false, TeleportMode = FarmTeleportMode.BossChallenge, BossIndex = 1,
                 BossLevel = 80, RepeatCount = 10000, WaitSeconds = 0, SwitchHealer = true,
-                Pickup = FarmPickupMode.Walk
+                Pickup = FarmPickupMode.Walk, Boss = FarmBoss.Other
             };
         }
 
         public void Validate()
         {
-            if (!Enum.IsDefined(typeof(FarmTeleportMode), TeleportMode) ||
+            if (!Enum.IsDefined(typeof(FarmBoss), Boss) ||
+                !Enum.IsDefined(typeof(FarmTeleportMode), TeleportMode) ||
                 !Enum.IsDefined(typeof(FarmPickupMode), Pickup) ||
                 BossIndex < 1 || BossIndex > 20 || RepeatCount < 1 || RepeatCount > 100000 ||
                 WaitSeconds < 0 || WaitSeconds > 60)
@@ -59,10 +66,12 @@ namespace TideCombat
         internal readonly Rectangle Bounds;
         internal readonly bool HudValid;
         internal readonly System.Collections.Generic.List<EchoBox> Echoes;
+        internal readonly double NavTurn;
 
         internal FarmFrame(HudSnapshot hud, bool hudValid, FarmUi ui, Size frameSize, Rectangle bounds,
-            System.Collections.Generic.List<EchoBox> echoes = null)
+            System.Collections.Generic.List<EchoBox> echoes = null, double navTurn = double.NaN)
         {
+            NavTurn = navTurn;
             Hud = hud;
             HudValid = hudValid;
             Ui = ui;
@@ -78,7 +87,7 @@ namespace TideCombat
         private const int CombatLostMs = 2500;
         private const int EnterTimeout = 8000;
 
-        private enum Step { WaitGame, Approach, Enter, Fight, Loot, Claim, Revive, Teleport, Done, Failed }
+        private enum Step { WaitGame, Approach, Enter, Fight, Loot, Claim, Revive, Teleport, MapTeleport, Night, Done, Failed }
         private enum TeleportStep { OpenBook, PickCategory, PickKind, PickBoss, Travel, Confirm, WaitWorld }
 
         private readonly CombatSettings settings;
@@ -88,8 +97,11 @@ namespace TideCombat
         private TeleportStep teleportStep = TeleportStep.OpenBook;
         private long stepAt, nextAction, lastCombatAt, lastCameraAt;
         private bool forwardHeld, combatSeen, entered;
-        private int teleportAttempts, enterClicks, kills, circleStep;
-        private long nextCircleAt;
+        private int teleportAttempts, enterClicks, kills, circleStep, scrollClicks, nightStep, mapStep;
+        private long nextCircleAt, lastNightChange, nightStepAt, nextPopupAt, realmExitAt, lastScrollAt;
+        private int popupClicks;
+        private readonly int combatWaitMs;
+        private readonly bool bypassEndWait, treatAsNotInRealm;
         private string detail = "等待游戏窗口";
 
         internal Farm4C(CombatSettings settings, FarmOptions options, bool cloud = false)
@@ -97,6 +109,22 @@ namespace TideCombat
             this.settings = settings;
             this.options = options;
             planner = new BattlePlanner(settings, cloud);
+            combatWaitMs = options.WaitSeconds > 0 ? options.WaitSeconds * 1000 : DefaultWait(options.Boss);
+            bypassEndWait = options.Boss == FarmBoss.Fenrico || options.Boss == FarmBoss.FallacyOfNoReturn ||
+                options.Boss == FarmBoss.NamelessExplorer;
+            treatAsNotInRealm = options.Boss == FarmBoss.NightmareHecate;
+        }
+
+        private static int DefaultWait(FarmBoss boss)
+        {
+            switch (boss)
+            {
+                case FarmBoss.Hyvatia: return 7000;
+                case FarmBoss.SentryConstruct:
+                case FarmBoss.LionessOfGlory:
+                case FarmBoss.FallacyOfNoReturn: return 5000;
+                default: return 0;
+            }
         }
 
         internal string Status { get { return detail; } }
@@ -118,11 +146,28 @@ namespace TideCombat
             detail = Describe();
             if (step == Step.Done || step == Step.Failed)
                 return Idle();
-
             FarmUi ui = frame.Ui ?? new FarmUi();
             HudSnapshot hud = frame.HudValid ? frame.Hud : null;
+            if (ui.MonthlyCard && now >= nextPopupAt && step != Step.Night)
+            {
+                nextPopupAt = now + 2500;
+                popupClicks++;
+                return popupClicks <= 2 ? Click(At(frame, .50, .89), now) : Key(0x1B, now);
+            }
+            if (!ui.MonthlyCard && step != Step.Night)
+                popupClicks = 0;
 
-            if (ui.Death && step != Step.Revive && step != Step.Teleport)
+            if (step != Step.Night && options.Boss == FarmBoss.Lorelei && !ui.Death &&
+                now - lastNightChange > 660000 && hud == null && step != Step.Teleport)
+            {
+                lastNightChange = now;
+                nightStep = 0;
+                nightStepAt = now;
+                step = Step.Night;
+                ReleaseForward(now);
+                return Idle();
+            }
+            if (ui.Death && step != Step.Revive && step != Step.Teleport && step != Step.Night)
             {
                 step = Step.Revive;
                 stepAt = now;
@@ -141,6 +186,8 @@ namespace TideCombat
                 case Step.Claim: return Claim(frame, hud, ui, now);
                 case Step.Revive: return Revive(frame, ui, now);
                 case Step.Teleport: return Teleport(frame, ui, now);
+                case Step.Night: return Night(frame, now);
+                case Step.MapTeleport: return MapTeleport(frame, ui, now);
                 default: return Idle();
             }
         }
@@ -190,6 +237,15 @@ namespace TideCombat
                     teleportAttempts++;
                     return Idle();
                 }
+                if (!options.Teleport && teleportAttempts < 1)
+                {
+                    teleportAttempts++;
+                    mapStep = 0;
+                    step = Step.MapTeleport;
+                    stepAt = now;
+                    nextAction = now;
+                    return Idle();
+                }
                 return Fail("20 秒内没有找到可交互目标或敌人。请确认已站在 Boss 前。");
             }
             if (ui.FPrompt)
@@ -219,6 +275,8 @@ namespace TideCombat
                     char direction = "AWDS"[circleStep++ % 4];
                     return Key(direction, now);
                 }
+                if (!double.IsNaN(frame.NavTurn) && !options.Teleport)
+                    return Navigate(frame.NavTurn, now);
                 if (now - lastCameraAt > 2600)
                 {
                     lastCameraAt = now;
@@ -308,7 +366,7 @@ namespace TideCombat
                     return Idle();
                 return Battle(action, now);
             }
-            if (now - stepAt < options.WaitSeconds * 1000)
+            if (now - stepAt < combatWaitMs)
                 return Idle();
             if (ui.Claim)
             {
@@ -402,6 +460,11 @@ namespace TideCombat
                 if (now >= nextAction)
                 {
                     nextAction = now + 1200;
+                    if (now - lastScrollAt > 5000)
+                    {
+                        lastScrollAt = now;
+                        return Scroll(now);
+                    }
                     return Key('F', now);
                 }
                 return Idle();
@@ -413,9 +476,9 @@ namespace TideCombat
                 enterClicks = 0;
                 return Idle();
             }
-            if (now - stepAt > 2600)
+            if (now - stepAt > (bypassEndWait ? 1200 : 2600))
             {
-                if (options.Teleport && !ui.InRealm && teleportAttempts < 3)
+                if (options.Teleport && !InRealm(ui) && teleportAttempts < 3)
                 {
                     teleportAttempts++;
                     step = Step.Teleport;
@@ -442,8 +505,16 @@ namespace TideCombat
             detail = "角色倒下，等待复活";
             if (!ui.Death)
             {
+                if (options.Teleport && InRealm(ui) && realmExitAt == 0)
+                {
+                    realmExitAt = now;
+                    return Key(0x1B, now);
+                }
+                if (realmExitAt > 0 && now - realmExitAt < 3000)
+                    return Idle();
                 if (now - stepAt > 2500)
                 {
+                    realmExitAt = 0;
                     if (options.Teleport)
                     {
                         step = Step.Teleport;
@@ -525,12 +596,25 @@ namespace TideCombat
                 case TeleportStep.PickBoss:
                     if (now >= nextAction)
                     {
+                        int wanted = options.BossIndex - 1;
+                        if (ui.BossRows != null && ui.BossRows.Count > 0 && wanted < ui.BossRows.Count)
+                        {
+                            nextAction = now + 2000;
+                            teleportStep = TeleportStep.Travel;
+                            Rectangle row = ui.BossRows[wanted];
+                            return Click(new Point(row.X + row.Width / 2, row.Y + row.Height / 2), now);
+                        }
+                        if (ui.BossRows != null && scrollClicks < 2 && (ui.BossRows.Count == 0 || wanted >= ui.BossRows.Count))
+                        {
+                            scrollClicks++;
+                            nextAction = now + 1500;
+                            return Click(At(frame, .973, ScrollY(ui)), now);
+                        }
                         nextAction = now + 2000;
                         teleportStep = TeleportStep.Travel;
                         if (ui.BossRows != null && ui.BossRows.Count > 0)
                         {
-                            int index = Math.Max(0, Math.Min(ui.BossRows.Count - 1, options.BossIndex - 1));
-                            Rectangle row = ui.BossRows[index];
+                            Rectangle row = ui.BossRows[ui.BossRows.Count - 1];
                             return Click(new Point(row.X + row.Width / 2, row.Y + row.Height / 2), now);
                         }
                         return Idle();
@@ -599,6 +683,42 @@ namespace TideCombat
             return start;
         }
 
+        private FarmDecision Navigate(double turn, long now)
+        {
+            if (turn > 45) return Key('D', now);
+            if (turn < -45) return Key('A', now);
+            if (turn > 8) return Key('D', now);
+            if (turn < -8) return Key('A', now);
+            if (!forwardHeld)
+            {
+                forwardHeld = true;
+                return KeyDown('W', now);
+            }
+            if (now - lastCameraAt > 1200)
+            {
+                lastCameraAt = now;
+                return Middle(now);
+            }
+            return Idle();
+        }
+
+        private bool InRealm(FarmUi ui)
+        {
+            return ui != null && ui.InRealm && !treatAsNotInRealm;
+        }
+
+        private double ScrollY(FarmUi ui)
+        {
+            double top = ui.ScrollTop > 0 ? ui.ScrollTop : .1963;
+            double bottom = .8806;
+            int total = options.TeleportMode == FarmTeleportMode.WeeklyChallenge ? 9 :
+                options.TeleportMode == FarmTeleportMode.BossChallenge ? 20 : 15;
+            int header = options.TeleportMode == FarmTeleportMode.SpecialNightmare ? 1 : 0;
+            double item = (bottom - top - header * .028) / total;
+            double y = top + item * options.BossIndex + header * .028;
+            return Math.Min(bottom, y);
+        }
+
         private string TeleportDetail()
         {
             switch (teleportStep)
@@ -662,6 +782,109 @@ namespace TideCombat
                 return KeyDown('W', now);
             }
             return Idle();
+        }
+
+        private FarmDecision MapTeleport(FarmFrame frame, FarmUi ui, long now)
+        {
+            detail = "地图传送到 Boss";
+            if (now - stepAt > 20000)
+            {
+                step = Step.Approach;
+                stepAt = now;
+                nextAction = now;
+                return Idle();
+            }
+            if (now < nextAction)
+                return Idle();
+            switch (mapStep)
+            {
+                case 0:
+                    mapStep = 1;
+                    nextAction = now + 2200;
+                    return Key('M', now);
+                case 1:
+                    if (ui.HasMapMarker)
+                    {
+                        mapStep = 2;
+                        nextAction = now + 1200;
+                        return Click(new Point(ui.MapMarker.X + ui.MapMarker.Width / 2,
+                            ui.MapMarker.Y + ui.MapMarker.Height / 2), now);
+                    }
+                    if (now - stepAt > 6000)
+                    {
+                        mapStep = 4;
+                        nextAction = now + 500;
+                    }
+                    return Idle();
+                case 2:
+                    mapStep = 3;
+                    nextAction = now + 2000;
+                    if (ui.Teleport)
+                        return Click(new Point(ui.TeleportBox.X + ui.TeleportBox.Width / 2,
+                            ui.TeleportBox.Y + ui.TeleportBox.Height / 2), now);
+                    return Click(At(frame, .89, .92), now);
+                case 3:
+                    mapStep = 4;
+                    nextAction = now + 2500;
+                    if (ui.SkipDialog)
+                        return Click(At(frame, .49, .55), now);
+                    return Idle();
+                default:
+                    step = Step.Approach;
+                    stepAt = now;
+                    nextAction = now;
+                    combatSeen = false;
+                    return Idle();
+            }
+        }
+
+        private FarmDecision Night(FarmFrame frame, long now)
+        {
+            long elapsed = now - nightStepAt;
+            detail = "切换昼夜";
+            switch (nightStep)
+            {
+                case 0:
+                    nightStep++;
+                    nightStepAt = now;
+                    return Key(0x1B, now);
+                case 1 when elapsed >= 900:
+                    nightStep++;
+                    return Click(At(frame, .71, .96), now);
+                case 2 when elapsed >= 1900:
+                    nightStep++;
+                    return Click(At(frame, .19, .14), now);
+                case 3 when elapsed >= 2900:
+                    nightStep++;
+                    return Click(At(frame, .82, .53), now);
+                case 4 when elapsed >= 3900:
+                    nightStep++;
+                    return Click(At(frame, .82, .53), now);
+                case 5 when elapsed >= 4900:
+                    nightStep++;
+                    return Click(At(frame, .82, .53), now);
+                case 6 when elapsed >= 5900:
+                    nightStep++;
+                    return Click(At(frame, .52, .90), now);
+                case 7 when elapsed >= 7400:
+                    nightStep++;
+                    return Key(0x1B, now);
+                case 8 when elapsed >= 8900:
+                    nightStep++;
+                    return Key(0x1B, now);
+                case 9 when elapsed >= 10000:
+                    nightStep = 0;
+                    step = Step.Approach;
+                    stepAt = now;
+                    nextAction = now;
+                    return Idle();
+            }
+            return Idle();
+        }
+
+        private static Point At(FarmFrame frame, double x, double y)
+        {
+            return new Point((int)(frame.FrameSize.Width * x), (int)(frame.FrameSize.Height * y));
         }
 
         private FarmDecision Steer(FarmUi ui, FarmFrame frame, long now)
@@ -729,6 +952,11 @@ namespace TideCombat
         private FarmDecision KeyDown(char key, long now)
         {
             return new FarmDecision { Request = FarmRequest.KeyDown, Key = key };
+        }
+
+        private FarmDecision Scroll(long now)
+        {
+            return new FarmDecision { Request = FarmRequest.Scroll };
         }
 
         private FarmDecision Middle(long now)

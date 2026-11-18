@@ -44,6 +44,15 @@ namespace TideCombat
             }
             long lastDetect = -1000;
             List<EchoBox> echoes = null;
+            MinimapNavigator navigator = null;
+            double navTurn = double.NaN;
+            long lastNav = -1000;
+            try
+            {
+                string arrow = MinimapNavigator.ArrowPath;
+                if (File.Exists(arrow)) navigator = new MinimapNavigator(arrow);
+            }
+            catch (Exception) { navigator = null; }
             var timer = Stopwatch.StartNew();
             string lastAction = "—";
             long lastReport = -500;
@@ -122,8 +131,18 @@ namespace TideCombat
                             }
                             else if (!wantEchoes)
                                 echoes = null;
+                            if (navigator != null && now - lastNav >= 150 && !farm.Planner.Fighting)
+                            {
+                                lastNav = now;
+                                try
+                                {
+                                    if (!navigator.TryTurn(frame, out navTurn))
+                                        navTurn = double.NaN;
+                                }
+                                catch (Exception) { navTurn = double.NaN; }
+                            }
                             var farmFrame = new FarmFrame(hud, hud != null && hud.Valid, ui,
-                                new Size(frame.Width, frame.Height), bounds, echoes);
+                                new Size(frame.Width, frame.Height), bounds, echoes, navTurn);
                             FarmDecision decision = farm.Observe(farmFrame, now);
                             state = farm.Status;
                             if (farm.Finished)

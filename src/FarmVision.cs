@@ -18,6 +18,8 @@ namespace TideCombat
         internal Rectangle TreasureBox { get; set; }
         internal bool Book;
         internal Rectangle BookBox;
+        internal bool BookMonsters;
+        internal Rectangle BookMonstersBox;
         internal List<Rectangle> BossRows = new List<Rectangle>();
         internal bool InRealm;
         internal bool OpenWorld;
@@ -168,6 +170,7 @@ namespace TideCombat
             ui.InRealm = FindNear(frame, "illusive_realm_exit", 8, .86, .72, out Rectangle realm);
             ui.OpenWorld = !ui.InRealm && FindNear(frame, "world_earth_icon", 8, .86, .72, out Rectangle world);
             ui.Book = FindNear(frame, "gray_book_boss", 8, .86, .72, out ui.BookBox);
+            ui.BookMonsters = FindNear(frame, "gray_book_all_monsters", 10, .86, .72, out ui.BookMonstersBox);
             if (ui.Book)
                 ui.Evidence |= 16;
             ui.Teleport = FindNear(frame, "gray_teleport", 8, .86, .72, out ui.TeleportBox);

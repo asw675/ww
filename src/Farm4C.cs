@@ -45,7 +45,7 @@ namespace TideCombat
         }
     }
 
-    internal enum FarmRequest { None, Click, Key, KeyDown, KeyUp, Middle, Scroll, Battle }
+    internal enum FarmRequest { None, Click, Key, KeyDown, KeyUp, Middle, Scroll, Battle, Text }
 
     internal struct FarmDecision
     {
@@ -54,6 +54,7 @@ namespace TideCombat
         internal char Key;
         internal ushort VirtualKey;
         internal BattleAction Battle;
+        internal string Text;
 
         internal static FarmDecision None() { return new FarmDecision { Request = FarmRequest.None }; }
     }
@@ -70,12 +71,14 @@ namespace TideCombat
         internal readonly System.Collections.Generic.List<OcrLine> LevelLines;
         internal readonly bool AbsorbText;
         internal readonly string DialogText;
+        internal readonly string BossName;
 
         internal FarmFrame(HudSnapshot hud, bool hudValid, FarmUi ui, Size frameSize, Rectangle bounds,
             System.Collections.Generic.List<EchoBox> echoes = null, double navTurn = double.NaN,
             System.Collections.Generic.List<OcrLine> levelLines = null, bool absorbText = false,
-            string dialogText = null)
+            string dialogText = null, string bossName = null)
         {
+            BossName = bossName;
             NavTurn = navTurn;
             LevelLines = levelLines;
             AbsorbText = absorbText;
@@ -95,7 +98,7 @@ namespace TideCombat
         private const int CombatLostMs = 2500;
         private const int EnterTimeout = 8000;
 
-        private enum Step { WaitGame, Approach, Enter, Fight, Loot, Claim, Revive, Teleport, MapTeleport, Night, Done, Failed }
+        private enum Step { WaitGame, BossScript, Approach, Enter, Fight, Loot, Claim, Revive, Teleport, MapTeleport, AimTeleport, Night, Done, Failed }
         private enum TeleportStep { OpenBook, PickCategory, PickKind, PickBoss, Travel, Confirm, WaitWorld }
 
         private readonly CombatSettings settings;
@@ -105,7 +108,8 @@ namespace TideCombat
         private TeleportStep teleportStep = TeleportStep.OpenBook;
         private long stepAt, nextAction, lastCombatAt, lastCameraAt;
         private bool forwardHeld, combatSeen, entered;
-        private int teleportAttempts, enterClicks, kills, circleStep, scrollClicks, nightStep, mapStep;
+        private int teleportAttempts, enterClicks, kills, circleStep, scrollClicks, nightStep, mapStep, aimStep, bossStep;
+        private string aimBoss;
         private long nextCircleAt, lastNightChange, nightStepAt, nextPopupAt, realmExitAt, lastScrollAt;
         private int popupClicks;
         private bool absorbSeen;
@@ -188,7 +192,10 @@ namespace TideCombat
                 ReleaseForward(now);
                 return Idle();
             }
-            if (ui.Death && step != Step.Revive && step != Step.Teleport && step != Step.Night)
+            if (aimBoss == null && !string.IsNullOrEmpty(frame.BossName))
+                aimBoss = MatchBoss(frame.BossName);
+            if (ui.Death && step != Step.Revive && step != Step.Teleport && step != Step.Night &&
+                step != Step.AimTeleport && step != Step.MapTeleport)
             {
                 step = Step.Revive;
                 stepAt = now;
@@ -200,6 +207,7 @@ namespace TideCombat
             switch (step)
             {
                 case Step.WaitGame: return WaitGame(hud, now);
+                case Step.BossScript: return BossScript(frame, hud, ui, now);
                 case Step.Approach: return Approach(frame, hud, ui, now);
                 case Step.Enter: return Enter(frame, ui, now);
                 case Step.Fight: return Fight(frame, hud, ui, now);
@@ -209,6 +217,7 @@ namespace TideCombat
                 case Step.Teleport: return Teleport(frame, ui, now);
                 case Step.Night: return Night(frame, now);
                 case Step.MapTeleport: return MapTeleport(frame, ui, now);
+                case Step.AimTeleport: return AimTeleport(frame, ui, now);
                 default: return Idle();
             }
         }
@@ -235,7 +244,8 @@ namespace TideCombat
             detail = "等待进入游戏世界";
             if (hud != null && hud.Valid)
             {
-                step = options.Teleport ? Step.Teleport : Step.Approach;
+                step = options.Teleport ? Step.Teleport : HasBossScript ? Step.BossScript : Step.Approach;
+                bossStep = 0;
                 stepAt = now;
                 nextAction = now;
                 if (options.Teleport)
@@ -244,6 +254,100 @@ namespace TideCombat
                     teleportAttempts = 0;
                 }
             }
+            return Idle();
+        }
+
+        private bool HasBossScript
+        {
+            get
+            {
+                return options.Boss == FarmBoss.Fenrico || options.Boss == FarmBoss.FallacyOfNoReturn ||
+                    options.Boss == FarmBoss.NamelessExplorer;
+            }
+        }
+
+        private FarmDecision BossScript(FarmFrame frame, HudSnapshot hud, FarmUi ui, long now)
+        {
+            detail = "Boss 特化流程";
+            if (ui.Death) { step = Step.Revive; stepAt = now; return Idle(); }
+            if (hud != null && (hud.EnemyHealth || hud.Locked))
+            {
+                step = Step.Fight;
+                stepAt = now;
+                lastCombatAt = now;
+                combatSeen = true;
+                return Idle();
+            }
+            if (now < nextAction)
+                return Idle();
+            if (options.Boss == FarmBoss.Fenrico)
+            {
+                if (bossStep == 0)
+                {
+                    if (ui.FPrompt) { nextAction = now + 1000; return Key('F', now); }
+                    bossStep = 1;
+                    nextAction = now + 500;
+                    return Idle();
+                }
+                if (bossStep == 1)
+                {
+                    bossStep = 2;
+                    nextAction = now + 2500;
+                    return TeleportOrMap(frame, ui, now);
+                }
+                step = Step.Approach;
+                stepAt = now;
+                nextAction = now;
+                return Idle();
+            }
+            if (options.Boss == FarmBoss.FallacyOfNoReturn)
+            {
+                if (bossStep == 0)
+                {
+                    if (ui.FPrompt) { step = Step.Enter; stepAt = now; nextAction = now; return Key('F', now); }
+                    bossStep = 1;
+                    nextAction = now + 2500;
+                    return TeleportOrMap(frame, ui, now);
+                }
+                if (bossStep == 1) { bossStep = 2; nextAction = now + 400; return Key('D', now); }
+                step = Step.Approach;
+                stepAt = now;
+                nextAction = now;
+                return Key('W', now);
+            }
+            if (bossStep == 0)
+            {
+                bossStep = 1;
+                nextAction = now + 8000;
+                forwardHeld = true;
+                return KeyDown('W', now);
+            }
+            if (bossStep == 1)
+            {
+                bossStep = 2;
+                nextAction = now + 2500;
+                return TeleportOrMap(frame, ui, now);
+            }
+            step = Step.Approach;
+            stepAt = now;
+            nextAction = now;
+            return Idle();
+        }
+
+        private FarmDecision TeleportOrMap(FarmFrame frame, FarmUi ui, long now)
+        {
+            if (aimBoss != null)
+            {
+                aimStep = 0;
+                step = Step.AimTeleport;
+            }
+            else
+            {
+                mapStep = 0;
+                step = Step.MapTeleport;
+            }
+            stepAt = now;
+            nextAction = now;
             return Idle();
         }
 
@@ -259,13 +363,23 @@ namespace TideCombat
                     teleportAttempts++;
                     return Idle();
                 }
-                if (!options.Teleport && teleportAttempts < 1)
+                bool mapFirst = !options.Teleport || options.Boss == FarmBoss.FallacyOfNoReturn ||
+                    options.Boss == FarmBoss.Fenrico || options.Boss == FarmBoss.NamelessExplorer;
+                if (mapFirst && teleportAttempts < 2)
                 {
                     teleportAttempts++;
-                    mapStep = 0;
-                    step = Step.MapTeleport;
                     stepAt = now;
                     nextAction = now;
+                    if (aimBoss != null)
+                    {
+                        aimStep = 0;
+                        step = Step.AimTeleport;
+                    }
+                    else
+                    {
+                        mapStep = 0;
+                        step = Step.MapTeleport;
+                    }
                     return Idle();
                 }
                 return Fail("20 秒内没有找到可交互目标或敌人。请确认已站在 Boss 前。");
@@ -822,6 +936,78 @@ namespace TideCombat
                 return KeyDown('W', now);
             }
             return Idle();
+        }
+
+        private string MatchBoss(string text)
+        {
+            if (text == null) return null;
+            if (text.Contains("伪作的神王")) return "伪作的神王";
+            if (text.Contains("异构武装") || text.Contains("加尔古耶")) return "异构武装";
+            if (text.Contains("狮像") || text.Contains("亚狮诺索")) return "荣耀狮像";
+            if (text.Contains("罗蕾莱") || text.Contains("夜之女皇")) return "罗蕾莱";
+            return null;
+        }
+
+        private FarmDecision AimTeleport(FarmFrame frame, FarmUi ui, long now)
+        {
+            detail = "按名称搜索传送";
+            if (now - stepAt > 30000)
+            {
+                aimStep = 0;
+                mapStep = 0;
+                step = Step.MapTeleport;
+                stepAt = now;
+                nextAction = now;
+                return Idle();
+            }
+            if (now < nextAction)
+                return Idle();
+            switch (aimStep)
+            {
+                case 0:
+                    aimStep = 1;
+                    nextAction = now + 4000;
+                    return Function(2);
+                case 1:
+                    if (ui.BookMonsters)
+                    {
+                        aimStep = 2;
+                        nextAction = now + 1600;
+                        Rectangle box = ui.BookMonstersBox;
+                        return Click(new Point(box.X + box.Width / 2, box.Y + box.Height / 2), now);
+                    }
+                    return Idle();
+                case 2:
+                    aimStep = 3;
+                    nextAction = now + 900;
+                    return Click(At(frame, .13, .14), now);
+                case 3:
+                    aimStep = 4;
+                    nextAction = now + 900;
+                    return new FarmDecision { Request = FarmRequest.Text, Text = aimBoss ?? "异构武装" };
+                case 4:
+                    aimStep = 5;
+                    nextAction = now + 1200;
+                    return Click(At(frame, .39, .13), now);
+                case 5:
+                    aimStep = 6;
+                    nextAction = now + 1200;
+                    return Click(At(frame, .13, .24), now);
+                case 6:
+                    aimStep = 7;
+                    nextAction = now + 1200;
+                    return Click(At(frame, .89, .92), now);
+                case 7:
+                    aimStep = 8;
+                    nextAction = now + 2500;
+                    return Click(At(frame, .89, .92), now);
+                default:
+                    step = Step.Approach;
+                    stepAt = now;
+                    nextAction = now;
+                    combatSeen = false;
+                    return Idle();
+            }
         }
 
         private FarmDecision MapTeleport(FarmFrame frame, FarmUi ui, long now)

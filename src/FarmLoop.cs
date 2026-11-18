@@ -56,6 +56,8 @@ namespace TideCombat
             List<OcrLine> levelLines = null;
             bool absorbText = false;
             string dialogText = null;
+            string bossName = null;
+            long lastBossOcr = -1000;
             long lastDialogOcr = -1000;
             MinimapNavigator navigator = null;
             double navTurn = double.NaN;
@@ -195,9 +197,21 @@ namespace TideCombat
                                 }
                                 catch (Exception) { dialogText = null; }
                             }
+                            if (ocr != null && !farm.Planner.Fighting && now - lastBossOcr >= 3000)
+                            {
+                                lastBossOcr = now;
+                                try
+                                {
+                                    var lines = ocr.Read(frame, new Rectangle((int)(frame.Width * .3305),
+                                        (int)(frame.Height * .0046), (int)(frame.Width * .3291),
+                                        (int)(frame.Height * .0602)));
+                                    bossName = string.Join(" ", lines.Select(line => line.Text));
+                                }
+                                catch (Exception) { bossName = null; }
+                            }
                             var farmFrame = new FarmFrame(hud, hud != null && hud.Valid, ui,
                                 new Size(frame.Width, frame.Height), bounds, echoes, navTurn, levelLines, absorbText,
-                                dialogText);
+                                dialogText, bossName);
                             FarmDecision decision = farm.Observe(farmFrame, now);
                             state = farm.Status;
                             if (farm.Finished)
@@ -278,6 +292,8 @@ namespace TideCombat
                     if (decision.Key == 'W') forward = false;
                     farmInput.KeyUp(decision.Key);
                     return null;
+                case FarmRequest.Text:
+                    return farmInput.TypeText(decision.Text, token) ? "输入文字" : null;
                 case FarmRequest.Scroll:
                     return farmInput.Scroll(1, new Point(size.Width / 2, size.Height / 2), size, bounds, token) ? "滚动" : null;
                 default:

@@ -204,6 +204,28 @@ namespace TideCombat
                 "应点击 OCR 给出的 80 级行");
         }
 
+        internal static void BossScripts()
+        {
+            var fenrico = FarmOptions.Defaults();
+            fenrico.Boss = FarmBoss.Fenrico;
+            var farm = new Farm4C(CombatSettings.Defaults(), fenrico);
+            long now = 1000;
+            Step(farm, Hud(false), Ui(), ref now, 100);
+            var prompt = Ui();
+            prompt.FPrompt = true;
+            FarmDecision press = Step(farm, Hud(false), prompt, ref now, 200);
+            Require(press.Request == FarmRequest.Key && press.Key == 'F', "芬里科应先按 F 清理拾取");
+
+            var fallacy = FarmOptions.Defaults();
+            fallacy.Boss = FarmBoss.FallacyOfNoReturn;
+            var second = new Farm4C(CombatSettings.Defaults(), fallacy);
+            long clock = 1000;
+            Step(second, Hud(false), Ui(), ref clock, 100);
+            Step(second, Hud(false), Ui(), ref clock, 100);
+            FarmDecision map = Step(second, Hud(false), Ui(), ref clock, 300);
+            Require(map.Request == FarmRequest.Key && map.Key == 'M', "无归的谬误应先开地图传送");
+        }
+
         internal static void ReviveFlow()
         {
             var options = FarmOptions.Defaults();

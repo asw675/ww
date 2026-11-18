@@ -25,6 +25,16 @@ namespace TideCombat
         private const uint WmMButtonDown = 0x0207, WmMButtonUp = 0x0208, WmMouseWheel = 0x020A;
         private const uint WmKeyDown = 0x0100, WmKeyUp = 0x0101;
         private static readonly int InputSize = Marshal.SizeOf(typeof(Native.Input));
+        private const uint GmemMoveable = 0x0002;
+        private const uint CfUnicodeText = 13;
+
+        [DllImport("user32.dll", SetLastError = true)] private static extern bool OpenClipboard(IntPtr owner);
+        [DllImport("user32.dll", SetLastError = true)] private static extern bool CloseClipboard();
+        [DllImport("user32.dll", SetLastError = true)] private static extern bool EmptyClipboard();
+        [DllImport("user32.dll", SetLastError = true)] private static extern IntPtr SetClipboardData(uint format, IntPtr data);
+        [DllImport("kernel32.dll")] private static extern IntPtr GlobalAlloc(uint flags, UIntPtr bytes);
+        [DllImport("kernel32.dll")] private static extern IntPtr GlobalLock(IntPtr memory);
+        [DllImport("kernel32.dll")] private static extern bool GlobalUnlock(IntPtr memory);
 
         private readonly GameWindow window;
         private readonly bool background;
@@ -125,6 +135,44 @@ namespace TideCombat
             held.Remove(key);
             Send(release);
             return true;
+        }
+
+        internal bool TypeText(string text, CancellationToken token)
+        {
+            if (string.IsNullOrEmpty(text) || token.IsCancellationRequested || !Available())
+                return false;
+            if (!SetClipboard(text))
+                return false;
+            if (!KeyCode(0x11, 40, token))
+                return false;
+            if (!KeyCode(0x56, 40, token))
+                return false;
+            KeyCode(0x11, 20, token);
+            return true;
+        }
+
+        private static bool SetClipboard(string text)
+        {
+            if (!OpenClipboard(IntPtr.Zero))
+                return false;
+            try
+            {
+                EmptyClipboard();
+                byte[] bytes = System.Text.Encoding.Unicode.GetBytes(text + "\0");
+                IntPtr memory = GlobalAlloc(GmemMoveable, (UIntPtr)bytes.Length);
+                if (memory == IntPtr.Zero)
+                    return false;
+                IntPtr target = GlobalLock(memory);
+                if (target == IntPtr.Zero)
+                    return false;
+                Marshal.Copy(bytes, 0, target, bytes.Length);
+                GlobalUnlock(memory);
+                return SetClipboardData(CfUnicodeText, memory) != IntPtr.Zero;
+            }
+            finally
+            {
+                CloseClipboard();
+            }
         }
 
         internal bool Scroll(int clicks, Point frame, Size frameSize, Rectangle bounds, CancellationToken token)

@@ -40,6 +40,8 @@ Revive / Night / MonthlyCard 为可随时插入的旁路状态。
 - **Claim**：领奖弹窗发 ESC，F 提示先滚动再按 F；倒计时结束后按配置进入下一轮。
 - **Teleport**：F2 → Boss 图鉴页签 → 二级分类 → 列表行（不足时点滚动条并按公式补滚）→ 传送按钮 → 确认。
 - **MapTeleport**：M 开图 → 中央 40% 找 `boss_check_mark` → 点击 → 传送按钮 → 确认。
+- **AimTeleport**：识别过 Boss 名时改走 F2「全部怪物」图鉴 → 搜索框 → 剪贴板输入中文名 → 搜索 → 第一条 → 传送（对齐 `teleport_to_nearest_boss` 的 `aim_boss` 分支）。
+- **BossScript**：芬里科先循环 F 拾取再传送；无归的谬误先传送再按 D 靠近；无铭探索者先向前跑 8 秒再传送。
 - **Revive**：点击复活；副本内先 ESC 退本回信标再重新传送。
 - **Night**：罗蕾莱专属，按参考的点击序列调整昼夜。
 - **MonthlyCard**：识别月卡弹窗并点击两次底部按钮。
@@ -51,7 +53,7 @@ Revive / Night / MonthlyCard 为可随时插入的旁路状态。
 - **小地图**：`box_minimap` 区域 + `boss_check_mark_minimap` 签名定位；玩家朝向用 72 个旋转的箭头灰度模板做归一化互相关，算出顺时针转向角。
 - **宽屏锚点**：标签名含 `_hcenter` 的按屏幕中心锚定，其余按参考的右/左/中心规则；16:9 下等价。
 - **UI 签名**：22 个标签（F 提示、吸收文字、领奖、挑战、死亡、宝箱、图鉴、传送、月卡、体力、Boss 标记等），全部带「局部亮度对比」列；固定 HUD 只在模板预期位置 ±8 像素内匹配。
-- **OCR**：内置 PP-OCRv6（det+rec，ONNX Runtime）。等级选择用 OCR 在左侧面板找目标等级文本，拾取用 OCR 读「吸收/Absorb」文字；Boss 名识别未接入（改用地图标记传送）。
+- **OCR**：内置 PP-OCRv6（det+rec，ONNX Runtime）。等级选择用 OCR 找目标等级文本，拾取用 OCR 读「吸收/Absorb」文字，Boss 名用 OCR 识别后走名称搜索传送。
 
 ## 与 ok-ww 的逐项对照
 
@@ -72,7 +74,7 @@ Revive / Night / MonthlyCard 为可随时插入的旁路状态。
 | `scroll_and_click_buttons` | `Claim` | 滚轮 + F |
 | `handle_boss_restart_after_treasure` | `Claim → Enter` | 副本内 F 重开 |
 | `revive_action` | `Revive` | 复活点击 + 退本/传送 |
-| `check_boss_name`（OCR） | 未接入 | 用地图标记传送替代 |
+| `check_boss_name`（OCR） | `MatchBoss` + OCR | 识别后用于名称搜索 |
 | `change_time_to_night` | `Night` | 参考点击序列 |
 | `handle_monthly_card` | 弹窗点击 | 参考坐标 |
 | `manage_boss_parameters` | 构造时计算 | 等待/bypass/赫卡忒 |
@@ -91,8 +93,7 @@ Revive / Night / MonthlyCard 为可随时插入的旁路状态。
 
 ## 已知差异
 
-1. Boss 名不识别，改用地图标记传送（`aim_boss` 路径未实现，中文文本输入未接）。
-2. 云端断线弹窗用 OCR 关键词识别并点击确认，文案变化时需补关键词。
-3. 芬里科/无归的谬误/无铭探索者的特化交互用通用流程 + 地图传送近似，未逐帧复刻。
-4. 宽屏 21:9 的居中/右对齐锚点与参考不完全一致，建议 16:9。
-5. 所有阈值与坐标未在真实客户端校准。
+1. 云端断线弹窗用 OCR 关键词识别并点击确认，文案变化时需补关键词。
+2. 中文搜索输入依赖剪贴板粘贴，输入框不接受粘贴时需改为逐字输入。
+3. 宽屏 21:9 已按 `_hcenter` 规则锚定，其余面板仍按参考的右/左规则。
+4. 所有阈值与坐标未在真实客户端校准。

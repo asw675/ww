@@ -1,0 +1,7 @@
+/bin/
+/obj/
+/.vs/
+/CombatSettings.json
+/CombatConcerto.json
+*.user
+*.tmp

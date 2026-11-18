@@ -1,0 +1,556 @@
+using System;
+using System.Drawing;
+using System.Collections.Generic;
+
+namespace TideCombat
+{
+    internal struct PixelFrame
+    {
+        private readonly byte[] pixels;
+        internal readonly int Width, Height, SourceWidth, SourceHeight;
+        internal readonly CloudTargetColors TargetColors;
+        internal readonly CamellyaColors Camellya;
+        internal readonly FramePatch Concerto;
+
+        internal PixelFrame(byte[] pixels, int width, int height, CloudTargetColors targetColors = null, int sourceWidth = 0,
+            CamellyaColors camellya = null, FramePatch concerto = null, int sourceHeight = 0)
+        {
+            this.pixels = pixels;
+            Width = width;
+            Height = height;
+            SourceWidth = sourceWidth == 0 ? width : sourceWidth;
+            SourceHeight = sourceHeight == 0 ? height : sourceHeight;
+            TargetColors = targetColors;
+            Camellya = camellya;
+            Concerto = concerto;
+        }
+
+        internal void Rgb(int x, int y, out int red, out int green, out int blue)
+        {
+            int offset = (y * Width + x) * 4;
+            blue = pixels[offset];
+            green = pixels[offset + 1];
+            red = pixels[offset + 2];
+        }
+
+        internal int Light(int x, int y)
+        {
+            int red, green, blue;
+            Rgb(x, y, out red, out green, out blue);
+            return (3 * red + 6 * green + blue) / 10;
+        }
+
+        internal bool Pale(int x, int y, int minimum, int saturation)
+        {
+            int red, green, blue;
+            Rgb(x, y, out red, out green, out blue);
+            int low = Math.Min(red, Math.Min(green, blue));
+            return low >= minimum && Math.Max(red, Math.Max(green, blue)) - low <= saturation;
+        }
+    }
+
+    internal sealed class HudSnapshot
+    {
+        internal bool Valid, Locked, EnemyHealth, ConcertoFull;
+        internal int Current = -1;
+        internal int PartySize;
+        internal readonly SkillState[] Skills = new SkillState[3];
+        internal readonly double[] Cooldowns = { double.NaN, double.NaN, double.NaN };
+        internal readonly bool[] SkillLit = new bool[3];
+        internal readonly char[] Keys = new char[3];
+        internal readonly double[] Health = new double[3];
+        internal readonly CharacterProfile[] Profiles = new CharacterProfile[3];
+        internal readonly string[] Fighters = new string[3];
+        internal readonly HashSet<string> Indicators = new HashSet<string>(StringComparer.Ordinal);
+        internal double Concerto, Forte, EchoWhiteRatio, ResonanceWhiteRatio;
+        internal double ChallengeSeconds = double.NaN;
+        internal double Blazes, CharacterCharge = -1, BuddingCharge = -1;
+        internal double ZaniNightfallCharge, ZaniForteCharge;
+        internal bool EnhancedColor, ForteFullColor, PhoebeConfessionReady;
+        internal int ChargeMode, ZaniForm;
+        internal int AirCharges, GuaCount, LockOffset, ForteSegments, PhoebeLightForte, PhoebeBlueForte;
+        internal int LongActionLayout;
+        internal string RoverForm;
+        internal bool Airborne, LevitatorKnown, Countdown, BreakPrompt, OrdinaryBreakSampled, InChallenge;
+        internal bool ChallengePrompt, ChallengeMarker, OpenWorld, InRealm, Dead;
+        internal bool TeamHudHidden, LucillaTransform, BearTargetShifted;
+        internal bool XigelikaForte, LinnaiAccelerating, LinnaiColorFull, CantarellaForte;
+        internal bool LuhesiLiberation;
+        internal bool Shows(string indicator) { return Indicators.Contains(indicator); }
+        internal string LayoutText = "未识别";
+        internal string Detail = "等待队伍与技能栏";
+    }
+
+    internal sealed class HudVision
+    {
+        private readonly CombatSettings settings;
+        private readonly CombatVision combatVision;
+        private char detectedEcho, detectedLiberation;
+        private bool skillKeysVerified;
+
+        internal HudVision(CombatSettings settings, ConcertoMeter concerto = null)
+        {
+            this.settings = settings;
+            combatVision = new CombatVision(settings, concerto);
+        }
+
+        internal HudSnapshot Read(PixelFrame frame, bool allowShortEnemyBar = false, bool cloud = false, int lucillaSlot = -1,
+            bool scanExecutionPrompt = true)
+        {
+            var snapshot = new HudSnapshot();
+            if (frame.Height != FrameReader.StandardHeight || frame.Width < 1565 || frame.Width > 2232)
+                return snapshot;
+
+            bool party = PartyHud.Read(frame, snapshot);
+            Badge left = Badge.Find(frame, frame.Width - 251, 847, 30, 10, settings.ResonanceKey);
+            string skillGlyphs = "EQRT" + settings.EchoKey + settings.LiberationKey;
+            Badge middle = Badge.Find(frame, frame.Width - 168, 847, 23, 10, skillGlyphs);
+            Badge right = Badge.Find(frame, frame.Width - 87, 847, 16, 10, skillGlyphs);
+            if (!party)
+            {
+                snapshot.Detail = left.Found ? "技能栏可见，队伍栏未确认" : "未确认队伍栏和技能栏";
+                if (allowShortEnemyBar)
+                {
+                    snapshot.Dead = combatVision.HasDeathPrompt(frame);
+                    if (!snapshot.Dead && lucillaSlot >= 0 && !left.Found && !middle.Found && !right.Found &&
+                        combatVision.ReadLucillaTransform(frame, snapshot, lucillaSlot, cloud))
+                        return snapshot;
+                    snapshot.TeamHudHidden = !snapshot.Dead && !left.Found && !middle.Found && !right.Found && HasSceneContents(frame);
+                }
+                return snapshot;
+            }
+            if (!left.Found || !middle.Found || !right.Found)
+            {
+                snapshot.Detail = "队伍栏可见，技能栏未确认";
+                if (allowShortEnemyBar)
+                    combatVision.ReadTransformation(frame, snapshot, cloud);
+                return snapshot;
+            }
+
+            ReadSkill(frame, left, Skill.Resonance, snapshot);
+            ReadSkill(frame, middle, Skill.Echo, snapshot);
+            ReadSkill(frame, right, Skill.Liberation, snapshot);
+            combatVision.ReadParty(frame, snapshot);
+            if (cloud) snapshot.LockOffset = combatVision.CloudLockOffset(frame, out snapshot.LongActionLayout);
+            else
+            {
+                bool recognized;
+                snapshot.LockOffset = combatVision.DesktopLockOffset(frame, out recognized, out snapshot.BearTargetShifted,
+                    out snapshot.LongActionLayout);
+                if (!recognized) snapshot.LockOffset = EnemyHud.LockOffset(frame, left.Y);
+            }
+            bool shortAction = !cloud && (snapshot.LockOffset == 0 || !skillKeysVerified && settings.DetectSkillKeys) &&
+                combatVision.HasShortTarget(frame);
+            if (snapshot.LockOffset == 0 && shortAction && snapshot.Fighters[snapshot.Current] == "Lucilla")
+            {
+                snapshot.LockOffset = 329;
+                snapshot.BearTargetShifted = false;
+            }
+            snapshot.Locked = snapshot.LockOffset > 0;
+            snapshot.EnemyHealth = EnemyHud.HasHealth(frame, allowShortEnemyBar, cloud, !snapshot.Locked) || combatVision.HasBossMarker(frame);
+            if (settings.DetectSkillKeys && !skillKeysVerified && (snapshot.Locked || snapshot.EnemyHealth || allowShortEnemyBar))
+            {
+                if (!shortAction)
+                {
+                    detectedEcho = CombatVision.ReadSkillKey(frame, middle);
+                    detectedLiberation = CombatVision.ReadSkillKey(frame, right);
+                    char echo = settings.KeyFor(Skill.Echo), liberation = settings.KeyFor(Skill.Liberation);
+                    if (echo != liberation)
+                    {
+                        if (detectedEcho == '\0' && detectedLiberation == echo) detectedEcho = liberation;
+                        if (detectedLiberation == '\0' && detectedEcho == liberation) detectedLiberation = echo;
+                    }
+                }
+                skillKeysVerified = true;
+            }
+            snapshot.Keys[(int)Skill.Resonance] = settings.KeyFor(Skill.Resonance);
+            snapshot.Keys[(int)Skill.Echo] = settings.DetectSkillKeys && detectedEcho != '\0' ? detectedEcho : settings.KeyFor(Skill.Echo);
+            snapshot.Keys[(int)Skill.Liberation] = settings.DetectSkillKeys && detectedLiberation != '\0' ? detectedLiberation : settings.KeyFor(Skill.Liberation);
+            snapshot.LayoutText = LabelKey(snapshot.Keys[0]) + " " + LabelKey(snapshot.Keys[1]) + " " + LabelKey(snapshot.Keys[2]);
+            if (settings.Characters.Count > 0)
+                PortraitReader.Identify(frame, snapshot, settings.Characters);
+            combatVision.Read(frame, snapshot, allowShortEnemyBar, scanExecutionPrompt);
+            combatVision.ReadScene(frame, snapshot);
+            snapshot.Valid = true;
+            snapshot.Detail = Array.IndexOf(snapshot.Keys, '\0') >= 0
+                ? "部分技能键未确认，可手动指定按键" : "已确认游戏 HUD";
+            return snapshot;
+        }
+
+        private static string LabelKey(char key) { return key != '\0' ? key.ToString() : "？"; }
+
+        private static void ReadSkill(PixelFrame frame, Badge badge, Skill skill, HudSnapshot snapshot)
+        {
+            int index = (int)skill;
+            snapshot.Skills[index] = SkillHud.Read(frame, badge, out snapshot.Cooldowns[index], out snapshot.SkillLit[index]);
+            if ((skill == Skill.Echo || skill == Skill.Resonance) && badge.Found)
+            {
+                int left = badge.X + (skill == Skill.Echo ? -27 : -22);
+                int height = skill == Skill.Echo ? 49 : 48;
+                int white = 0;
+                for (int y = badge.Y - 65; y < badge.Y - 65 + height; y++)
+                for (int x = left; x < left + 56; x++)
+                    if (frame.Pale(x, y, 244, 11)) white++;
+                if (skill == Skill.Echo) snapshot.EchoWhiteRatio = white / (56.0 * height);
+                else snapshot.ResonanceWhiteRatio = white / (56.0 * height);
+            }
+        }
+
+        private static bool HasSceneContents(PixelFrame frame)
+        {
+            int low = 255, high = 0, visible = 0;
+            for (int y = 140; y <= 710; y += 57)
+                for (int x = frame.Width / 5; x <= frame.Width * 4 / 5; x += 71)
+                {
+                    int light = frame.Light(x, y);
+                    low = Math.Min(low, light);
+                    high = Math.Max(high, light);
+                    if (light >= 14) visible++;
+                }
+            return visible >= 12 && high - low >= 24;
+        }
+    }
+
+    internal static class PartyHud
+    {
+        internal static bool Read(PixelFrame frame, HudSnapshot snapshot)
+        {
+            var candidates = new bool[3];
+            int count = 0;
+            int alive = 0;
+            bool gap = false;
+            for (int slot = 0; slot < 3; slot++)
+            {
+                int fill = ReadHealthStrip(frame, slot);
+                Badge key = Badge.Find(frame, frame.Width - 146, 185 + slot * 110, 9, 9,
+                    ((char)('1' + slot)).ToString());
+                bool present = fill > 0 || (key.Found && key.Glyph != '\0');
+                if (!present)
+                {
+                    gap = true;
+                    continue;
+                }
+                if (gap)
+                    return false;
+                count++;
+                snapshot.Health[slot] = Math.Min(1.0, fill / 65.0);
+                if (fill > 0)
+                {
+                    alive++;
+                    candidates[slot] = !key.Found;
+                }
+            }
+            if (count == 0 || alive == 0)
+                return false;
+            for (int slot = 0; slot < count; slot++)
+            {
+                if (!candidates[slot])
+                    continue;
+                if (snapshot.Current >= 0)
+                {
+                    snapshot.Current = -1;
+                    return false;
+                }
+                snapshot.Current = slot;
+            }
+            if (snapshot.Current < 0 || !OwnHealthVisible(frame)) return false;
+            snapshot.PartySize = count;
+            return true;
+        }
+
+        private static int ReadHealthStrip(PixelFrame frame, int slot)
+        {
+            int left = frame.Width - 136;
+            int y = 241 + slot * 110;
+            int best = 0;
+            for (int row = y - 5; row <= y + 6; row++)
+            {
+                for (int x = left - 5; x <= left + 6; x++)
+                {
+                    if (!frame.Pale(x, row, 147, 52))
+                        continue;
+                    int end = x + 1;
+                    while (end < left + 69 && frame.Pale(end, row, 147, 52))
+                        end++;
+                    int length = end - x;
+                    if (length > best && length >= 6 && HasLowerBorder(frame, x, row, length))
+                        best = length;
+                    x = end;
+                }
+            }
+            return best;
+        }
+
+        private static bool HasLowerBorder(PixelFrame frame, int left, int row, int length)
+        {
+            for (int offset = 1; offset <= 4; offset++)
+            {
+                int contrast = 0;
+                for (int segment = 1; segment <= 4; segment++)
+                {
+                    int x = left + segment * length / 5;
+                    if (frame.Light(x, row + offset) < frame.Light(x, row) - 45)
+                        contrast++;
+                }
+                if (contrast >= 3)
+                    return true;
+            }
+            return false;
+        }
+
+        private static bool OwnHealthVisible(PixelFrame frame)
+        {
+            int left = frame.Width / 2 - 132;
+            for (int y = 853; y <= 872; y++)
+            {
+                int bright = 0;
+                for (int x = left; x < left + 110; x++)
+                {
+                    bright = frame.Pale(x, y, 165, 49) ? bright + 1 : 0;
+                    if (bright >= 14 && frame.Light(x - 5, y + 5) < frame.Light(x - 5, y) - 30)
+                        return true;
+                }
+            }
+            return false;
+        }
+
+    }
+
+    internal static class EnemyHud
+    {
+        private static readonly int[] LockOffsets = { 390, 442, 472, 521, 560, 644 };
+
+        internal static bool HasLock(PixelFrame frame, int skillKeyY)
+        {
+            return LockOffset(frame, skillKeyY) > 0;
+        }
+
+        internal static int LockOffset(PixelFrame frame, int skillKeyY)
+        {
+            // The lock symbol moves horizontally when extra actions are present.
+            foreach (int offset in LockOffsets)
+            {
+                int match = SearchLock(frame, offset, skillKeyY);
+                if (match > 0) return match;
+            }
+            return 0;
+        }
+
+        internal static int ShortLockOffset(PixelFrame frame) { return SearchLock(frame, 329, 847); }
+
+        internal static bool HasDesktopLockColor(PixelFrame frame, int centerX, int centerY)
+        {
+            for (int y = centerY - 5; y <= centerY + 5; y++)
+                for (int x = centerX - 6; x <= centerX + 6; x++)
+                    if (IsLockIcon(frame, x, y)) return true;
+            return false;
+        }
+
+        private static int SearchLock(PixelFrame frame, int offset, int skillKeyY)
+        {
+            for (int x = frame.Width - offset - 19; x <= frame.Width - offset + 19; x++)
+            {
+                for (int y = skillKeyY - 43; y <= skillKeyY - 29; y++)
+                {
+                    if (!Gold(frame, x - 9, y) && !Gold(frame, x + 9, y) &&
+                        !Gold(frame, x, y + 9) && !Gold(frame, x, y - 9))
+                        continue;
+                    if (IsLockIcon(frame, x, y)) return frame.Width - x;
+                }
+            }
+            return 0;
+        }
+
+        private static bool IsLockIcon(PixelFrame frame, int x, int y)
+        {
+            int goldLeft = 0, goldRight = 0, goldBottom = 0, goldTop = 0, white = 0, upperWhite = 0;
+            for (int dy = -11; dy <= 11; dy++)
+            {
+                for (int dx = -11; dx <= 11; dx++)
+                {
+                    int square = dx * dx + dy * dy;
+                    if (square < 67 && frame.Pale(x + dx, y + dy, 183, 58))
+                    {
+                        white++;
+                        if (dy < 0)
+                            upperWhite++;
+                    }
+                    if (square < 50 || square > 143 || !Gold(frame, x + dx, y + dy))
+                        continue;
+                    if (dx < -3) goldLeft++;
+                    if (dx > 3) goldRight++;
+                    if (dy > 4) goldBottom++;
+                    if (dy < -5) goldTop++;
+                }
+            }
+            if (white < 32 || white > 147 || upperWhite < 9 ||
+                goldLeft < 1 || goldRight < 1 || goldLeft + goldRight < 4 ||
+                (goldBottom < 3 && goldTop < 4))
+                return false;
+            return LocateMouseBadge(frame, x, y + 28) || LocateMouseBadge(frame, x, y + 33) ||
+                LocateMouseBadge(frame, x, y + 37);
+        }
+
+        private static bool LocateMouseBadge(PixelFrame frame, int x, int y)
+        {
+            for (int dy = -2; dy <= 2; dy++)
+            {
+                int left = 0, right = 0;
+                for (int step = -5; step <= 5; step++)
+                {
+                    if (frame.Pale(x - 3, y + dy + step, 176, 67)) left++;
+                    if (frame.Pale(x + 3, y + dy + step, 176, 67)) right++;
+                }
+                int edges = (frame.Light(x - 3, y + dy) + frame.Light(x + 3, y + dy)) / 2;
+                if (left >= 6 && right >= 6 && frame.Light(x, y + dy) + 21 < edges)
+                    return true;
+            }
+            return false;
+        }
+
+        private static bool Gold(PixelFrame frame, int x, int y)
+        {
+            int red, green, blue;
+            frame.Rgb(x, y, out red, out green, out blue);
+            return red >= 136 && green >= 107 && green <= red + 8 &&
+                red - green < 86 && green - blue >= 27;
+        }
+
+        internal static bool HasHealth(PixelFrame frame, bool allowShort, bool cloud = false, bool searchFullFrame = true)
+        {
+            int center = frame.Width / 2;
+            return ScanBars(frame, center - 256, center + 256, 33, 98, allowShort ? 31 : 75, true, cloud) ||
+                ScanBars(frame, (int)(frame.Width * 0.17), (int)(frame.Width * 0.83), 95, 693,
+                    allowShort ? (cloud ? 14 : 19) : 36, false, cloud) || searchFullFrame &&
+                (FindColorStrip(frame, new Rectangle(0, 0, frame.Width, frame.Height), allowShort, cloud, false) ||
+                    FindColorStrip(frame, new Rectangle(center - 271, 24, 527, 60), allowShort, cloud, true));
+        }
+
+        private sealed class ColorStrip
+        {
+            internal int Left, Right, Top, LastRow, Pixels;
+        }
+
+        private static bool FindColorStrip(PixelFrame frame, Rectangle area, bool active, bool cloud, bool boss)
+        {
+            int minWidth = active ? Math.Max(1, frame.Width * 12 / 3840) : frame.Width * 100 / 3840;
+            int minHeight = boss ? 5 : 4;
+            double fill = cloud ? (boss ? .85 : .60) : .95;
+            var strips = new List<ColorStrip>();
+            int valid = 0;
+            for (int y = area.Top; y <= area.Bottom; y++)
+            {
+                if (y < area.Bottom)
+                {
+                    for (int x = area.Left; x < area.Right;)
+                    {
+                        if (!ReferenceHealthColor(frame, x, y, boss)) { x++; continue; }
+                        int left = x++;
+                        while (x < area.Right && ReferenceHealthColor(frame, x, y, boss)) x++;
+                        if (x - left < 3) continue;
+                        ColorStrip strip = null;
+                        foreach (ColorStrip candidate in strips)
+                        {
+                            if (candidate.LastRow < y - 1 || candidate.Right < left || x < candidate.Left) continue;
+                            strip = candidate;
+                            break;
+                        }
+                        if (strip == null)
+                        {
+                            strip = new ColorStrip { Left = left, Right = x, Top = y };
+                            strips.Add(strip);
+                        }
+                        strip.Left = Math.Min(strip.Left, left);
+                        strip.Right = Math.Max(strip.Right, x);
+                        strip.LastRow = y;
+                        strip.Pixels += x - left;
+                    }
+                }
+                for (int index = strips.Count - 1; index >= 0; index--)
+                {
+                    ColorStrip strip = strips[index];
+                    if (strip.LastRow == y) continue;
+                    strips.RemoveAt(index);
+                    int width = strip.Right - strip.Left, height = strip.LastRow - strip.Top + 1;
+                    if (width < minWidth || height < minHeight || (!boss && height > 12) ||
+                        (!boss && cloud && width < height * 3) || strip.Pixels < width * height * fill) continue;
+                    if (!boss) return true;
+                    valid++;
+                }
+            }
+            return boss && valid == 1;
+        }
+
+        private static bool ReferenceHealthColor(PixelFrame frame, int x, int y, bool boss)
+        {
+            int r, g, b;
+            frame.Rgb(x, y, out r, out g, out b);
+            return boss ? r >= 245 && g >= 30 && g <= 185 && b >= 4 && b <= 75 :
+                r >= 174 && r <= 225 && g >= 55 && g <= 85 && b >= 55 && b <= 76;
+        }
+
+        private static bool ScanBars(PixelFrame frame, int left, int right, int top, int bottom, int minWidth,
+            bool boss, bool cloud)
+        {
+            for (int y = top; y <= bottom; y++)
+            {
+                int start = left;
+                int last = left - 5;
+                for (int x = left; x <= right; x++)
+                {
+                    bool color = x < right && IsHealthColor(frame, x, y, boss);
+                    if (color)
+                    {
+                        if (x - last > 3)
+                            start = x;
+                        last = x;
+                    }
+                    else if ((x - last == 3 || x == right) && last - start >= minWidth &&
+                        IsStrip(frame, start, last, y, boss, cloud))
+                        return true;
+                }
+            }
+            return false;
+        }
+
+        private static bool IsStrip(PixelFrame frame, int start, int end, int y, bool boss, bool cloud)
+        {
+            int width = end - start;
+            int samples = Math.Min(20, width / 2);
+            int fill = 0, outline = 0, thick = 0, border = 0, text = 0;
+            for (int index = 0; index < samples; index++)
+            {
+                int x = start + (index + 1) * width / (samples + 1);
+                if (IsHealthColor(frame, x, y, boss) && IsHealthColor(frame, x, y + 2, boss))
+                    fill++;
+                if (IsHealthColor(frame, x, y - 4, boss) && IsHealthColor(frame, x, y + 8, boss))
+                    thick++;
+                if (!IsHealthColor(frame, x, y - 3, boss) || !IsHealthColor(frame, x, y + 6, boss))
+                    outline++;
+                if (frame.Light(x, y - 3) + 26 < frame.Light(x, y) ||
+                    frame.Light(x, y + 5) + 26 < frame.Light(x, y))
+                    border++;
+                for (int height = 10; height <= 25; height += 3)
+                {
+                    if (!frame.Pale(x, y - height, 179, 63))
+                        continue;
+                    text++;
+                    break;
+                }
+            }
+            return fill >= samples * (cloud ? 0.60 : 0.75) && thick < samples / 3 && outline >= samples * 0.55 &&
+                (border >= samples * 0.55 || text >= samples * 0.20);
+        }
+
+        private static bool IsHealthColor(PixelFrame frame, int x, int y, bool boss)
+        {
+            int red, green, blue;
+            frame.Rgb(x, y, out red, out green, out blue);
+            if (boss)
+                return red >= 218 && green >= 35 && green <= 192 && blue <= 102 &&
+                    red - green >= 53 && red - blue >= 120;
+            return red >= 154 && red <= 250 && green >= 33 && green <= 112 && blue >= 32 && blue <= 108 &&
+                red - Math.Max(green, blue) >= 80 && Math.Abs(green - blue) <= 43;
+        }
+    }
+}

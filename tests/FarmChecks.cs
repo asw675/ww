@@ -26,11 +26,12 @@ namespace TideCombat
             return hud;
         }
 
-        private static FarmDecision Step(Farm4C farm, HudSnapshot hud, FarmUi ui, ref long now, int advance = 300)
+        private static FarmDecision Step(Farm4C farm, HudSnapshot hud, FarmUi ui, ref long now, int advance = 300,
+            System.Collections.Generic.List<EchoBox> echoes = null)
         {
             now += advance;
             return farm.Observe(new FarmFrame(hud, hud != null && hud.Valid, ui, new Size(1600, 900),
-                new Rectangle(0, 0, 1920, 1080)), now);
+                new Rectangle(0, 0, 1920, 1080), echoes), now);
         }
 
         internal static void Signatures()
@@ -161,6 +162,23 @@ namespace TideCombat
                     second = true;
             }
             Require(second, "应按序号点击第二个 Boss 行");
+        }
+
+        internal static void EchoEndsCombat()
+        {
+            var farm = new Farm4C(CombatSettings.Defaults(), FarmOptions.Defaults());
+            long now = 1000;
+            Step(farm, null, Ui(), ref now, 100);
+            Step(farm, Hud(false), Ui(), ref now, 100);
+            for (int index = 0; index < 6; index++)
+                Step(farm, Hud(true), Ui(), ref now, 400, null);
+            var echoes = new System.Collections.Generic.List<EchoBox>
+            {
+                new EchoBox { Box = new Rectangle(780, 640, 40, 30), Score = .8f }
+            };
+            for (int index = 0; index < 6; index++)
+                Step(farm, Hud(true), Ui(), ref now, 300, echoes);
+            Require(farm.Kills == 1, "检测到声骸应立即结束战斗并计数");
         }
 
         internal static void ReviveFlow()

@@ -53,6 +53,7 @@ namespace TideCombat
             Check("4C farm revive clicks the death prompt", FarmChecks.ReviveFlow);
             Check("4C farm closes claim popups and restarts the challenge", FarmChecks.ClaimRestart);
             Check("4C farm teleport clicks the configured boss row", FarmChecks.TeleportBossRow);
+            Check("4C farm ends combat as soon as an echo is visible", FarmChecks.EchoEndsCombat);
             Check("input cannot run without a verified foreground window", MissingWindow);
             Check("local game window is recognized without a readable title or installation path", LocalWindowIdentity);
             Check("input privilege preflight detects elevated clients and reads native process tokens", InputPrivilegePreflight);

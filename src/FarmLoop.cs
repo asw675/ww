@@ -1,6 +1,8 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
+using System.IO;
 using System.Threading;
 
 namespace TideCombat
@@ -30,6 +32,18 @@ namespace TideCombat
             settings.SupportOpener = options.SwitchHealer;
             bool cloudStream = settings.Source == GameSource.Cloud || settings.Source == GameSource.ManagedCloud;
             var farm = new Farm4C(settings, options, cloudStream);
+            EchoDetector detector = null;
+            try
+            {
+                string model = EchoModel.ModelPath;
+                if (File.Exists(model)) detector = new EchoDetector(model);
+            }
+            catch (Exception)
+            {
+                detector = null;
+            }
+            long lastDetect = -1000;
+            List<EchoBox> echoes = null;
             var timer = Stopwatch.StartNew();
             string lastAction = "—";
             long lastReport = -500;
@@ -89,8 +103,27 @@ namespace TideCombat
                         else
                         {
                             lostSince = 0;
+                            bool wantEchoes = detector != null && (farm.Planner.Fighting ||
+                                options.Pickup == FarmPickupMode.Yolo);
+                            if (wantEchoes && now - lastDetect >= 300)
+                            {
+                                lastDetect = now;
+                                try
+                                {
+                                    float threshold = ui != null && ui.InRealm ? .25f : .65f;
+                                    echoes = detector.Detect(frame, threshold);
+                                }
+                                catch (Exception)
+                                {
+                                    echoes = null;
+                                    detector.Dispose();
+                                    detector = null;
+                                }
+                            }
+                            else if (!wantEchoes)
+                                echoes = null;
                             var farmFrame = new FarmFrame(hud, hud != null && hud.Valid, ui,
-                                new Size(frame.Width, frame.Height), bounds);
+                                new Size(frame.Width, frame.Height), bounds, echoes);
                             FarmDecision decision = farm.Observe(farmFrame, now);
                             state = farm.Status;
                             if (farm.Finished)
@@ -133,6 +166,7 @@ namespace TideCombat
             }
             finally
             {
+                if (detector != null) detector.Dispose();
                 try { farmInput.ReleaseAll(); } catch (Exception) { }
                 try { input.ReleaseAll(); } catch (Exception) { }
                 concerto.Save();

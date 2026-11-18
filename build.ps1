@@ -14,8 +14,12 @@ if (-not (Test-Path -LiteralPath $compiler -PathType Leaf)) {
 $buildFolder = (New-Item -ItemType Directory -Path $OutputDirectory -Force).FullName
 $sources = @(Get-ChildItem -LiteralPath (Join-Path $PSScriptRoot 'src') -Filter '*.cs' -File |
     Sort-Object Name | ForEach-Object FullName)
+$runtime = Join-Path $PSScriptRoot 'lib'
 $common = @('/nologo', '/warn:4', '/warnaserror+', '/utf8output', '/codepage:65001', '/optimize+', '/platform:x64',
-    '/r:System.Drawing.dll', '/r:System.Windows.Forms.dll', '/r:System.Runtime.Serialization.dll', '/r:System.Web.Extensions.dll')
+    '/r:System.Drawing.dll', '/r:System.Windows.Forms.dll', '/r:System.Runtime.Serialization.dll', '/r:System.Web.Extensions.dll',
+    ('/r:' + (Join-Path $runtime 'Microsoft.ML.OnnxRuntime.dll')), ('/r:' + (Join-Path $runtime 'netstandard.dll')),
+    ('/r:' + (Join-Path $runtime 'System.Memory.dll')), ('/r:' + (Join-Path $runtime 'System.Buffers.dll')),
+    ('/r:' + (Join-Path $runtime 'System.Runtime.CompilerServices.Unsafe.dll')))
 $signatures = Join-Path $PSScriptRoot 'data\Signatures.tsv'
 if ($RebuildSignatures) {
     if (-not $ReferenceDirectory) { throw 'Specify a local reference directory to regenerate signatures.' }
@@ -31,6 +35,13 @@ $resource = "/resource:$signatures,TideCombat.Signatures.tsv"
 $application = Join-Path $buildFolder 'TideCombat.exe'
 & $compiler @common '/target:winexe' "/out:$application" $resource @sources
 if ($LASTEXITCODE -ne 0) { throw "Application compilation failed ($LASTEXITCODE)." }
+Copy-Item (Join-Path $runtime 'onnxruntime.dll') $buildFolder -Force
+Copy-Item (Join-Path $runtime 'System.Memory.dll') $buildFolder -Force
+Copy-Item (Join-Path $runtime 'System.Buffers.dll') $buildFolder -Force
+Copy-Item (Join-Path $runtime 'System.Runtime.CompilerServices.Unsafe.dll') $buildFolder -Force
+$modelFolder = Join-Path $buildFolder 'assets\echo_model'
+New-Item -ItemType Directory -Path $modelFolder -Force | Out-Null
+Copy-Item (Join-Path $PSScriptRoot 'assets\echo_model\echo.onnx') $modelFolder -Force
 Write-Output $application
 
 if ($Test -or $ReferenceDirectory) {

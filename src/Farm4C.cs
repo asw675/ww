@@ -4,7 +4,7 @@ using System.Drawing;
 namespace TideCombat
 {
     public enum FarmTeleportMode { Off, BossChallenge, WeeklyChallenge, SpecialNightmare }
-    public enum FarmPickupMode { Walk, Circle }
+    public enum FarmPickupMode { Walk, Circle, Yolo }
 
     public sealed class FarmOptions
     {
@@ -58,14 +58,17 @@ namespace TideCombat
         internal readonly Size FrameSize;
         internal readonly Rectangle Bounds;
         internal readonly bool HudValid;
+        internal readonly System.Collections.Generic.List<EchoBox> Echoes;
 
-        internal FarmFrame(HudSnapshot hud, bool hudValid, FarmUi ui, Size frameSize, Rectangle bounds)
+        internal FarmFrame(HudSnapshot hud, bool hudValid, FarmUi ui, Size frameSize, Rectangle bounds,
+            System.Collections.Generic.List<EchoBox> echoes = null)
         {
             Hud = hud;
             HudValid = hudValid;
             Ui = ui;
             FrameSize = frameSize;
             Bounds = bounds;
+            Echoes = echoes;
         }
     }
 
@@ -287,6 +290,14 @@ namespace TideCombat
 
         private FarmDecision Fight(FarmFrame frame, HudSnapshot hud, FarmUi ui, long now)
         {
+            if (combatSeen && frame.Echoes != null && frame.Echoes.Count > 0)
+            {
+                Kill();
+                step = Step.Loot;
+                stepAt = now;
+                nextAction = now;
+                return Idle();
+            }
             if (hud != null && (hud.EnemyHealth || hud.Locked))
             {
                 lastCombatAt = now;
@@ -353,6 +364,8 @@ namespace TideCombat
                     char direction = "AWDS"[circleStep++ % 4];
                     return Key(direction, now);
                 }
+                if (options.Pickup == FarmPickupMode.Yolo)
+                    return ChaseEcho(frame, now);
                 if (!forwardHeld && options.Pickup != FarmPickupMode.Circle)
                 {
                     forwardHeld = true;
@@ -598,6 +611,57 @@ namespace TideCombat
                 case TeleportStep.Confirm: return "确认传送";
                 default: return "等待传送完成";
             }
+        }
+
+        private FarmDecision ChaseEcho(FarmFrame frame, long now)
+        {
+            if (frame.Echoes == null || frame.Echoes.Count == 0)
+            {
+                if (!forwardHeld)
+                {
+                    forwardHeld = true;
+                    return KeyDown('W', now);
+                }
+                return Idle();
+            }
+            EchoBox best = frame.Echoes[0];
+            int center = frame.FrameSize.Width / 2;
+            float distance = Math.Abs(best.Box.X + best.Box.Width / 2 - center);
+            foreach (EchoBox echo in frame.Echoes)
+            {
+                float candidate = Math.Abs(echo.Box.X + echo.Box.Width / 2 - center);
+                if (candidate < distance) { best = echo; distance = candidate; }
+            }
+            int dx = best.Box.X + best.Box.Width / 2 - center;
+            int bottom = best.Box.Y + best.Box.Height;
+            if (bottom > frame.FrameSize.Height * .72 && Math.Abs(dx) < frame.FrameSize.Width * .10)
+            {
+                if (frame.Ui != null && frame.Ui.FPrompt)
+                    return Key('F', now);
+                if (!forwardHeld)
+                {
+                    forwardHeld = true;
+                    return KeyDown('W', now);
+                }
+                return Idle();
+            }
+            if (bottom > frame.FrameSize.Height * .65 && Math.Abs(dx) < frame.FrameSize.Width * .16)
+            {
+                if (!forwardHeld)
+                {
+                    forwardHeld = true;
+                    return KeyDown('W', now);
+                }
+                return KeyDown('S', now);
+            }
+            if (dx > frame.FrameSize.Width * .05) return Key('D', now);
+            if (dx < -frame.FrameSize.Width * .05) return Key('A', now);
+            if (!forwardHeld)
+            {
+                forwardHeld = true;
+                return KeyDown('W', now);
+            }
+            return Idle();
         }
 
         private FarmDecision Steer(FarmUi ui, FarmFrame frame, long now)

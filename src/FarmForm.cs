@@ -12,7 +12,7 @@ namespace TideCombat
         private readonly ComboBox level = Theme.Select("50", "60", "70", "80", "90");
         private readonly NumericUpDown repeat = Number(1, 100000, 10000);
         private readonly NumericUpDown wait = Number(0, 60, 0);
-        private readonly ComboBox pickup = Theme.Select("向前走", "绕圈");
+        private readonly ComboBox pickup = Theme.Select("向前走", "绕圈", "YOLO 检测");
         private readonly CheckBox healer = new CheckBox { Text = "战斗前后切换到治疗", AutoSize = true };
         private readonly Label hint = Theme.Text("自动传送会打开 F2 图鉴，需要游戏窗口可见。", Theme.Muted);
 

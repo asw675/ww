@@ -69,7 +69,7 @@ namespace TideCombat
         private const int HotkeyMessage = 0x0312;
 
         private readonly Button start = Theme.Button("启动战斗", true);
-        private readonly ComboBox taskSelect = Theme.Select("刷 4C 声骸", "批量强化声骸", "无音区", "材料本", "模拟领域", "梦魇巢穴", "周常乐园", "合并声骸", "改主属性", "一条龙");
+        private readonly ComboBox taskSelect = Theme.Select("刷 4C 声骸", "批量强化声骸", "无音区", "材料本", "模拟领域", "梦魇巢穴", "周常乐园", "合并声骸", "改主属性", "一条龙", "多账号日常", "多账号配置");
         private readonly Button runTask = Theme.Button("运行任务", true);
         private readonly Button preview = Theme.Button("仅检测");
         private readonly Button stop = Theme.Button("停止");
@@ -103,7 +103,11 @@ namespace TideCombat
         private CombatSettings settings;
         private readonly ConcertoMeter concertoMeter;
         private CancellationTokenSource work;
-        private enum WorkMode { Battle, Preview, Farm, Enhance, Domain, Nightmare, Garden, Merge, Change, Daily }
+        private enum WorkMode
+        {
+            Battle, Preview, Farm, Enhance, Domain, Nightmare, Garden, Merge, Change, Daily,
+            MultiDaily, MultiConfig
+        }
 
         private bool toggleInstalled, closing, inPreview, hasReadout;
         private string persistenceError;
@@ -448,7 +452,9 @@ namespace TideCombat
                 case 6: BeginGarden(); break;
                 case 7: BeginMerge(); break;
                 case 8: BeginChange(); break;
-                default: BeginDaily(); break;
+                case 9: BeginDaily(); break;
+                case 10: BeginMultiAccount(MultiAccountMode.Sequential); break;
+                default: BeginMultiAccount(MultiAccountMode.Config); break;
             }
         }
 
@@ -502,6 +508,35 @@ namespace TideCombat
                 current.Nightmare = dialog.Result;
             }
             await StartWork(current, WorkMode.Nightmare);
+        }
+
+        private async void BeginMultiAccount(MultiAccountMode accountMode)
+        {
+            if (work != null || closing)
+                return;
+            CombatSettings current;
+            try { current = ReadControls(); }
+            catch (InvalidDataException error)
+            {
+                SetFooter(error.Message, true);
+                return;
+            }
+            if (current.Source == GameSource.Background || current.Source == GameSource.ManagedCloud)
+            {
+                SetFooter("多账号任务需要「前台」来源：本地客户端·前台或网页云游戏·前台。", true);
+                return;
+            }
+            if (accountMode == MultiAccountMode.Config)
+            {
+                string folder = System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "configs");
+                using (var form = new AccountConfigForm(new AccountStore(folder)))
+                {
+                    if (form.ShowDialog(this) != DialogResult.OK)
+                        return;
+                }
+            }
+            await StartWork(current, accountMode == MultiAccountMode.Config
+                ? WorkMode.MultiConfig : WorkMode.MultiDaily);
         }
 
         private async void BeginDaily()
@@ -686,6 +721,11 @@ namespace TideCombat
                 if (!cancellation.IsCancellationRequested && ReferenceEquals(work, cancellation))
                     RenderDaily(report);
             });
+            var multiProgress = new Progress<MultiAccountReport>(report =>
+            {
+                if (!cancellation.IsCancellationRequested && ReferenceEquals(work, cancellation))
+                    RenderMulti(report);
+            });
             bool needsElevation = false;
             string failure = null;
             try
@@ -735,6 +775,22 @@ namespace TideCombat
                         await Task.Run(delegate
                         {
                             using (var runner = new DailyRunner(settings, settings.Daily, cancellation.Token, dailyProgress))
+                                runner.Run();
+                        });
+                        break;
+                    case WorkMode.MultiDaily:
+                        await Task.Run(delegate
+                        {
+                            using (var runner = new MultiAccountRunner(settings, MultiAccountMode.Sequential,
+                                cancellation.Token, multiProgress))
+                                runner.Run();
+                        });
+                        break;
+                    case WorkMode.MultiConfig:
+                        await Task.Run(delegate
+                        {
+                            using (var runner = new MultiAccountRunner(settings, MultiAccountMode.Config,
+                                cancellation.Token, multiProgress))
                                 runner.Run();
                         });
                         break;
@@ -812,6 +868,8 @@ namespace TideCombat
                 case WorkMode.Merge: return "合并声骸";
                 case WorkMode.Change: return "改主属性";
                 case WorkMode.Daily: return "一条龙";
+                case WorkMode.MultiDaily: return "多账号日常";
+                case WorkMode.MultiConfig: return "多账号配置";
                 default: return "已待命";
             }
         }
@@ -828,9 +886,25 @@ namespace TideCombat
                 case WorkMode.Merge: return "准备合并弃置声骸";
                 case WorkMode.Change: return "准备修改声骸主属性";
                 case WorkMode.Daily: return "准备执行一条龙";
+                case WorkMode.MultiDaily: return "准备切换账号执行日常";
+                case WorkMode.MultiConfig: return "准备执行多账号配置任务";
                 case WorkMode.Preview: return "等待切回《鸣潮》客户端";
                 default: return "等待切回《鸣潮》客户端";
             }
+        }
+
+        private void RenderMulti(MultiAccountReport report)
+        {
+            mode.Text = report.Finished ? "任务结束" : "多账号";
+            state.Text = report.State;
+            target.Text = "已完成 " + report.Completed;
+            skills.Text = "—";
+            lastAction.Text = report.Finished ? "已停止" : "运行中";
+            if (report.Failure != null)
+                SetFooter(report.Failure, true);
+            else
+                SetFooter(string.Format("已完成 {0} 个账号 · {1}", report.Completed,
+                    report.Size.Width > 0 ? report.Size.Width + "×" + report.Size.Height : "—"), false);
         }
 
         private void RenderDaily(DailyReport report)

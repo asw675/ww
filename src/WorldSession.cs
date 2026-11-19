@@ -87,6 +87,13 @@ namespace TideCombat
                 FarmMouse.Left, hold, Token);
         }
 
+        internal bool Click(Point point, int hold = 60)
+        {
+            if (!Tick())
+                return false;
+            return Input.Click(point, new Size(Frame.Width, Frame.Height), Bounds, FarmMouse.Left, hold, Token);
+        }
+
         internal bool Click(Rectangle box, int hold = 60)
         {
             if (box.IsEmpty || !Tick())

@@ -51,7 +51,8 @@ namespace TideCombat
             "skip_dialog_check", "skip_dialog_confirm", "revive_confirm_hcenter_vcenter",
             "treasure_icon", "gray_book_boss", "boss_proceed", "gray_teleport",
             "illusive_realm_exit", "world_earth_icon", "monthly_card", "claim_stamina_sign",
-            "boss_check_mark_minimap", "boss_check_mark", "map_way_point"
+            "boss_check_mark_minimap", "boss_check_mark", "map_way_point", "remove_custom", "team_close",
+            "fast_travel_custom", "gem_add_stamina", "gray_confirm_exit_button"
         };
     }
 

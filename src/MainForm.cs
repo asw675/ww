@@ -69,7 +69,7 @@ namespace TideCombat
         private const int HotkeyMessage = 0x0312;
 
         private readonly Button start = Theme.Button("启动战斗", true);
-        private readonly ComboBox taskSelect = Theme.Select("刷 4C 声骸", "批量强化声骸", "无音区", "材料本", "模拟领域");
+        private readonly ComboBox taskSelect = Theme.Select("刷 4C 声骸", "批量强化声骸", "无音区", "材料本", "模拟领域", "梦魇巢穴");
         private readonly Button runTask = Theme.Button("运行任务", true);
         private readonly Button preview = Theme.Button("仅检测");
         private readonly Button stop = Theme.Button("停止");
@@ -378,7 +378,8 @@ namespace TideCombat
                 SupportOpener = supportOpener.Checked, IunoC6 = settings.IunoC6, RocciaC6 = settings.RocciaC6,
                 Source = (GameSource)source.SelectedIndex, CheckLevitator = checkLevitator.Checked,
                 ChisaDps = settings.ChisaDps, SuomingDps = settings.SuomingDps, Farm = settings.Farm,
-                Enhance = settings.Enhance, Domain = settings.Domain, PartyCharacters = new string[3],
+                Enhance = settings.Enhance, Domain = settings.Domain, Nightmare = settings.Nightmare,
+                PartyCharacters = new string[3],
                 DetectSkillKeys = detectKeys.Checked, ResonanceKey = keys[0].Text, EchoKey = keys[1].Text,
                 LiberationKey = keys[2].Text, ToolKey = keys[3].Text, Slots = new Rotation[3], Characters = settings.Characters
             };
@@ -440,7 +441,8 @@ namespace TideCombat
                 case 1: BeginEnhance(); break;
                 case 2: BeginDomain(DomainKind.Tacet); break;
                 case 3: BeginDomain(DomainKind.Forgery); break;
-                default: BeginDomain(DomainKind.Simulation); break;
+                case 4: BeginDomain(DomainKind.Simulation); break;
+                default: BeginNightmare(); break;
             }
         }
 
@@ -471,6 +473,31 @@ namespace TideCombat
             await StartWork(current, false, false, false, true);
         }
 
+        private async void BeginNightmare()
+        {
+            if (work != null || closing)
+                return;
+            CombatSettings current;
+            try { current = ReadControls(); }
+            catch (InvalidDataException error)
+            {
+                SetFooter(error.Message, true);
+                return;
+            }
+            if (current.Source == GameSource.Background || current.Source == GameSource.ManagedCloud)
+            {
+                SetFooter("梦魇巢穴需要「前台」来源：本地客户端·前台或网页云游戏·前台。", true);
+                return;
+            }
+            using (var dialog = new NightmareForm(current.Nightmare ?? NightmareOptions.Defaults()))
+            {
+                if (dialog.ShowDialog(this) != DialogResult.OK || dialog.Result == null)
+                    return;
+                current.Nightmare = dialog.Result;
+            }
+            await StartWork(current, false, false, false, false, true);
+        }
+
         private async void BeginEnhance()
         {
             if (work != null || closing)
@@ -497,7 +524,7 @@ namespace TideCombat
         }
 
         private async Task StartWork(CombatSettings current, bool isPreview, bool isFarm, bool isEnhance = false,
-            bool isDomain = false)
+            bool isDomain = false, bool isNightmare = false)
         {
             settings = current;
             SaveSettings();
@@ -514,9 +541,9 @@ namespace TideCombat
             target.Text = character.Text = skills.Text = lastAction.Text = "—";
             SetRunning(true);
             mode.Text = isPreview ? "仅检测" : isFarm ? "刷4C" : isEnhance ? "强化声骸" :
-                isDomain ? "体力本" : "已待命";
+                isDomain ? "体力本" : isNightmare ? "梦魇巢穴" : "已待命";
             state.Text = isFarm ? "准备刷取 4C 声骸" : isEnhance ? "准备强化声骸" :
-                isDomain ? "准备刷取体力本" : "等待切回《鸣潮》客户端";
+                isDomain ? "准备刷取体力本" : isNightmare ? "准备清理梦魇巢穴" : "等待切回《鸣潮》客户端";
             var progress = new Progress<FarmReport>(report =>
             {
                 if (!cancellation.IsCancellationRequested && ReferenceEquals(work, cancellation))
@@ -537,6 +564,11 @@ namespace TideCombat
                 if (!cancellation.IsCancellationRequested && ReferenceEquals(work, cancellation))
                     RenderDomain(report);
             });
+            var nightmareProgress = new Progress<NightmareReport>(report =>
+            {
+                if (!cancellation.IsCancellationRequested && ReferenceEquals(work, cancellation))
+                    RenderNightmare(report);
+            });
             bool needsElevation = false;
             string failure = null;
             try
@@ -547,6 +579,13 @@ namespace TideCombat
                     await Task.Run(delegate
                     {
                         using (var runner = new DomainRunner(settings, settings.Domain, cancellation.Token, domainProgress))
+                            runner.Run();
+                    });
+                else if (isNightmare)
+                    await Task.Run(delegate
+                    {
+                        using (var runner = new NightmareNestRunner(settings, settings.Nightmare, cancellation.Token,
+                            nightmareProgress))
                             runner.Run();
                     });
                 else if (isFarm)
@@ -605,6 +644,20 @@ namespace TideCombat
             {
                 SetFooter(error.NativeErrorCode == 1223 ? "已取消管理员授权，暂未开始战斗。" : FriendlyError(error), true);
             }
+        }
+
+        private void RenderNightmare(NightmareReport report)
+        {
+            mode.Text = report.Finished ? "任务结束" : "梦魇巢穴";
+            state.Text = report.State;
+            target.Text = "已处理 " + report.Nests;
+            skills.Text = "—";
+            lastAction.Text = report.Finished ? "已停止" : "运行中";
+            if (report.Failure != null)
+                SetFooter(report.Failure, true);
+            else
+                SetFooter(string.Format("已处理 {0} 个巢穴 · {1}", report.Nests,
+                    report.Size.Width > 0 ? report.Size.Width + "×" + report.Size.Height : "—"), false);
         }
 
         private void RenderDomain(DomainReport report)

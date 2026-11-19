@@ -152,8 +152,8 @@ namespace TideCombat
                 Report("进入战斗");
                 WalkUntilF(4000);
                 PickF(true);
-                CombatResult combat = CombatOnce();
-                if (combat != CombatResult.Finished)
+                CombatOutcome combat = CombatRunner.Engage(world, settings, token);
+                if (combat != CombatOutcome.Finished)
                 {
                     EnsureWorld();
                     return false;
@@ -181,42 +181,6 @@ namespace TideCombat
                 world.Sleep(1000);
             }
             return false;
-        }
-
-        private enum CombatResult { Finished, Dead, Timeout }
-
-        private CombatResult CombatOnce()
-        {
-            var planner = new BattlePlanner(settings);
-            var watch = Stopwatch.StartNew();
-            long lastSeen = -1;
-            while (!token.IsCancellationRequested)
-            {
-                long now = watch.ElapsedMilliseconds;
-                if (!world.Tick())
-                {
-                    world.Sleep(120);
-                    continue;
-                }
-                HudSnapshot hud = world.Hud;
-                if (hud != null && hud.Dead)
-                    return CombatResult.Dead;
-                if (hud != null && (hud.EnemyHealth || hud.Locked))
-                {
-                    lastSeen = now;
-                    BattleAction action = planner.Observe(hud, now);
-                    if (planner.TakeReleaseRequest())
-                        try { world.BattleInput.ReleaseAll(); } catch (Exception) { }
-                    if (action.Kind != ActionKind.Wait && world.Send(action))
-                        planner.Sent(action, now);
-                }
-                else if (lastSeen >= 0 && now - lastSeen > 2500)
-                    return CombatResult.Finished;
-                if (now > 120000)
-                    return CombatResult.Timeout;
-                token.WaitHandle.WaitOne(50);
-            }
-            return CombatResult.Timeout;
         }
 
         private bool OpenBookAndStamina(out int current, out int backup, out int total)

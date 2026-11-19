@@ -70,6 +70,7 @@ namespace TideCombat
             Check("nightmare options require a selection", NightmareChecks.Options);
             Check("garden progress detection", GardenChecks.Progress);
             Check("task indicator signatures load", GardenChecks.Signatures);
+            Check("merge full-batch detection", MergeChecks.FullBatch);
             Check("input cannot run without a verified foreground window", MissingWindow);
             Check("local game window is recognized without a readable title or installation path", LocalWindowIdentity);
             Check("input privilege preflight detects elevated clients and reads native process tokens", InputPrivilegePreflight);

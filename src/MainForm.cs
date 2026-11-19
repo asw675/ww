@@ -69,7 +69,7 @@ namespace TideCombat
         private const int HotkeyMessage = 0x0312;
 
         private readonly Button start = Theme.Button("启动战斗", true);
-        private readonly ComboBox taskSelect = Theme.Select("刷 4C 声骸", "批量强化声骸", "无音区", "材料本", "模拟领域", "梦魇巢穴", "周常乐园");
+        private readonly ComboBox taskSelect = Theme.Select("刷 4C 声骸", "批量强化声骸", "无音区", "材料本", "模拟领域", "梦魇巢穴", "周常乐园", "合并声骸");
         private readonly Button runTask = Theme.Button("运行任务", true);
         private readonly Button preview = Theme.Button("仅检测");
         private readonly Button stop = Theme.Button("停止");
@@ -103,6 +103,8 @@ namespace TideCombat
         private CombatSettings settings;
         private readonly ConcertoMeter concertoMeter;
         private CancellationTokenSource work;
+        private enum WorkMode { Battle, Preview, Farm, Enhance, Domain, Nightmare, Garden, Merge }
+
         private bool toggleInstalled, closing, inPreview, hasReadout;
         private string persistenceError;
 
@@ -405,7 +407,7 @@ namespace TideCombat
                 SetFooter(error.Message, true);
                 return;
             }
-            await StartWork(current, isPreview, false);
+            await StartWork(current, isPreview ? WorkMode.Preview : WorkMode.Battle);
         }
 
         private async void BeginFarm()
@@ -430,7 +432,7 @@ namespace TideCombat
                     return;
                 current.Farm = dialog.Result;
             }
-            await StartWork(current, false, true);
+            await StartWork(current, WorkMode.Farm);
         }
 
         private void BeginTask()
@@ -443,7 +445,8 @@ namespace TideCombat
                 case 3: BeginDomain(DomainKind.Forgery); break;
                 case 4: BeginDomain(DomainKind.Simulation); break;
                 case 5: BeginNightmare(); break;
-                default: BeginGarden(); break;
+                case 6: BeginGarden(); break;
+                default: BeginMerge(); break;
             }
         }
 
@@ -471,7 +474,7 @@ namespace TideCombat
                     return;
                 current.Domain = dialog.Result;
             }
-            await StartWork(current, false, false, false, true);
+            await StartWork(current, WorkMode.Domain);
         }
 
         private async void BeginNightmare()
@@ -496,7 +499,26 @@ namespace TideCombat
                     return;
                 current.Nightmare = dialog.Result;
             }
-            await StartWork(current, false, false, false, false, true);
+            await StartWork(current, WorkMode.Nightmare);
+        }
+
+        private async void BeginMerge()
+        {
+            if (work != null || closing)
+                return;
+            CombatSettings current;
+            try { current = ReadControls(); }
+            catch (InvalidDataException error)
+            {
+                SetFooter(error.Message, true);
+                return;
+            }
+            if (current.Source == GameSource.Background || current.Source == GameSource.ManagedCloud)
+            {
+                SetFooter("合并声骸需要「前台」来源：本地客户端·前台或网页云游戏·前台。", true);
+                return;
+            }
+            await StartWork(current, WorkMode.Merge);
         }
 
         private async void BeginGarden()
@@ -515,7 +537,7 @@ namespace TideCombat
                 SetFooter("周常乐园需要「前台」来源：本地客户端·前台或网页云游戏·前台。", true);
                 return;
             }
-            await StartWork(current, false, false, false, false, false, true);
+            await StartWork(current, WorkMode.Garden);
         }
 
         private async void BeginEnhance()
@@ -540,12 +562,12 @@ namespace TideCombat
                     return;
                 current.Enhance = dialog.Result;
             }
-            await StartWork(current, false, false, true);
+            await StartWork(current, WorkMode.Enhance);
         }
 
-        private async Task StartWork(CombatSettings current, bool isPreview, bool isFarm, bool isEnhance = false,
-            bool isDomain = false, bool isNightmare = false, bool isGarden = false)
+        private async Task StartWork(CombatSettings current, WorkMode workMode)
         {
+            bool isPreview = workMode == WorkMode.Preview;
             settings = current;
             SaveSettings();
             if (!isPreview && (settings.Source == GameSource.Foreground || settings.Source == GameSource.Background) &&
@@ -560,11 +582,8 @@ namespace TideCombat
             hasReadout = false;
             target.Text = character.Text = skills.Text = lastAction.Text = "—";
             SetRunning(true);
-            mode.Text = isPreview ? "仅检测" : isFarm ? "刷4C" : isEnhance ? "强化声骸" :
-                isDomain ? "体力本" : isNightmare ? "梦魇巢穴" : isGarden ? "周常乐园" : "已待命";
-            state.Text = isFarm ? "准备刷取 4C 声骸" : isEnhance ? "准备强化声骸" :
-                isDomain ? "准备刷取体力本" : isNightmare ? "准备清理梦魇巢穴" :
-                isGarden ? "准备执行周常乐园" : "等待切回《鸣潮》客户端";
+            mode.Text = ModeLabel(workMode);
+            state.Text = ModeStartup(workMode);
             var progress = new Progress<FarmReport>(report =>
             {
                 if (!cancellation.IsCancellationRequested && ReferenceEquals(work, cancellation))
@@ -595,35 +614,56 @@ namespace TideCombat
                 if (!cancellation.IsCancellationRequested && ReferenceEquals(work, cancellation))
                     RenderGarden(report);
             });
+            var mergeProgress = new Progress<MergeReport>(report =>
+            {
+                if (!cancellation.IsCancellationRequested && ReferenceEquals(work, cancellation))
+                    RenderMerge(report);
+            });
             bool needsElevation = false;
             string failure = null;
             try
             {
-                if (isEnhance)
-                    await Task.Run(() => EnhanceLoop.Run(settings, settings.Enhance, enhanceProgress, cancellation.Token));
-                else if (isDomain)
-                    await Task.Run(delegate
-                    {
-                        using (var runner = new DomainRunner(settings, settings.Domain, cancellation.Token, domainProgress))
-                            runner.Run();
-                    });
-                else if (isNightmare)
-                    await Task.Run(delegate
-                    {
-                        using (var runner = new NightmareNestRunner(settings, settings.Nightmare, cancellation.Token,
-                            nightmareProgress))
-                            runner.Run();
-                    });
-                else if (isGarden)
-                    await Task.Run(delegate
-                    {
-                        using (var runner = new GardenRunner(settings, cancellation.Token, gardenProgress))
-                            runner.Run();
-                    });
-                else if (isFarm)
-                    await Task.Run(() => FarmLoop.Run(settings, settings.Farm, progress, cancellation.Token, concertoMeter));
-                else
-                    await Task.Run(() => BattleLoop.Run(settings, isPreview, battleProgress, cancellation.Token, concertoMeter));
+                switch (workMode)
+                {
+                    case WorkMode.Enhance:
+                        await Task.Run(() => EnhanceLoop.Run(settings, settings.Enhance, enhanceProgress, cancellation.Token));
+                        break;
+                    case WorkMode.Domain:
+                        await Task.Run(delegate
+                        {
+                            using (var runner = new DomainRunner(settings, settings.Domain, cancellation.Token, domainProgress))
+                                runner.Run();
+                        });
+                        break;
+                    case WorkMode.Nightmare:
+                        await Task.Run(delegate
+                        {
+                            using (var runner = new NightmareNestRunner(settings, settings.Nightmare, cancellation.Token,
+                                nightmareProgress))
+                                runner.Run();
+                        });
+                        break;
+                    case WorkMode.Garden:
+                        await Task.Run(delegate
+                        {
+                            using (var runner = new GardenRunner(settings, cancellation.Token, gardenProgress))
+                                runner.Run();
+                        });
+                        break;
+                    case WorkMode.Merge:
+                        await Task.Run(delegate
+                        {
+                            using (var runner = new MergeRunner(settings, cancellation.Token, mergeProgress))
+                                runner.Run();
+                        });
+                        break;
+                    case WorkMode.Farm:
+                        await Task.Run(() => FarmLoop.Run(settings, settings.Farm, progress, cancellation.Token, concertoMeter));
+                        break;
+                    default:
+                        await Task.Run(() => BattleLoop.Run(settings, isPreview, battleProgress, cancellation.Token, concertoMeter));
+                        break;
+                }
             }
             catch (InputElevationRequiredException)
             {
@@ -676,6 +716,50 @@ namespace TideCombat
             {
                 SetFooter(error.NativeErrorCode == 1223 ? "已取消管理员授权，暂未开始战斗。" : FriendlyError(error), true);
             }
+        }
+
+        private static string ModeLabel(WorkMode workMode)
+        {
+            switch (workMode)
+            {
+                case WorkMode.Preview: return "仅检测";
+                case WorkMode.Farm: return "刷4C";
+                case WorkMode.Enhance: return "强化声骸";
+                case WorkMode.Domain: return "体力本";
+                case WorkMode.Nightmare: return "梦魇巢穴";
+                case WorkMode.Garden: return "周常乐园";
+                case WorkMode.Merge: return "合并声骸";
+                default: return "已待命";
+            }
+        }
+
+        private static string ModeStartup(WorkMode workMode)
+        {
+            switch (workMode)
+            {
+                case WorkMode.Farm: return "准备刷取 4C 声骸";
+                case WorkMode.Enhance: return "准备强化声骸";
+                case WorkMode.Domain: return "准备刷取体力本";
+                case WorkMode.Nightmare: return "准备清理梦魇巢穴";
+                case WorkMode.Garden: return "准备执行周常乐园";
+                case WorkMode.Merge: return "准备合并弃置声骸";
+                case WorkMode.Preview: return "等待切回《鸣潮》客户端";
+                default: return "等待切回《鸣潮》客户端";
+            }
+        }
+
+        private void RenderMerge(MergeReport report)
+        {
+            mode.Text = report.Finished ? "任务结束" : "合并声骸";
+            state.Text = report.State;
+            target.Text = "已合成 " + report.Batches + " 批";
+            skills.Text = "—";
+            lastAction.Text = report.Finished ? "已停止" : "运行中";
+            if (report.Failure != null)
+                SetFooter(report.Failure, true);
+            else
+                SetFooter(string.Format("已合成 {0} 批 · {1}", report.Batches,
+                    report.Size.Width > 0 ? report.Size.Width + "×" + report.Size.Height : "—"), false);
         }
 
         private void RenderGarden(GardenReport report)

@@ -13,7 +13,7 @@ namespace TideCombat
             "garden_start_game", "garden_tip_close", "garden_unpause", "gray_book_quest",
             "map_way_point", "gray_confirm_exit_button", "gem_add_stamina", "fast_travel_custom",
             "remove_custom", "team_close", "echo_dropped", "echo_not_dropped", "echo_locked",
-            "echo_not_locked", "echo_enhance_btn"
+            "echo_not_locked", "echo_enhance_btn", "echo_select_all"
         };
     }
 }

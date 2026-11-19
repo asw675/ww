@@ -60,6 +60,9 @@ namespace TideCombat
             Check("4C farm ends combat as soon as an echo is visible", FarmChecks.EchoEndsCombat);
             Check("4C farm clicks the OCR-matched boss level", FarmChecks.LevelOcr);
             Check("4C farm runs the Fenrico and Fallacy special flows", FarmChecks.BossScripts);
+            Check("echo enhancement rules match the reference", EnhanceChecks.Rules);
+            Check("echo enhancement parses OCR stats", EnhanceChecks.Parsing);
+            Check("echo enhancement state machine starts from the bag", EnhanceChecks.Flow);
             Check("input cannot run without a verified foreground window", MissingWindow);
             Check("local game window is recognized without a readable title or installation path", LocalWindowIdentity);
             Check("input privilege preflight detects elevated clients and reads native process tokens", InputPrivilegePreflight);

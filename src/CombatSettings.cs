@@ -70,6 +70,7 @@ namespace TideCombat
             AutoRevive = true;
             ToolKey = "T";
             Farm = FarmOptions.Defaults();
+            Enhance = EnhanceOptions.Defaults();
         }
 
         public bool AutoTarget { get; set; }
@@ -91,6 +92,7 @@ namespace TideCombat
         public GameSource Source { get; set; }
         public bool CheckLevitator { get; set; }
         public FarmOptions Farm { get; set; }
+        public EnhanceOptions Enhance { get; set; }
         public string[] PartyCharacters { get; set; }
         public Rotation[] Slots { get; set; }
         public List<CharacterProfile> Characters { get; set; }
@@ -113,6 +115,7 @@ namespace TideCombat
                 SupportOpener = true,
                 CheckLevitator = true,
                 Farm = FarmOptions.Defaults(),
+                Enhance = EnhanceOptions.Defaults(),
                 PartyCharacters = new string[3],
                 Slots = new[] { Rotation.ForRole(BattleRole.Main), Rotation.ForRole(BattleRole.Secondary),
                     Rotation.ForRole(BattleRole.Support) },
@@ -136,6 +139,7 @@ namespace TideCombat
             }
             if (Farm == null)
                 Farm = FarmOptions.Defaults();
+            Enhance = EnhanceOptions.Defaults();
             Farm.Validate();
             if (Slots == null || Slots.Length != 3 || PartyCharacters.Length != 3 ||
                 Slots.Any(slot => slot == null) || Characters == null || !Enum.IsDefined(typeof(GameSource), Source))

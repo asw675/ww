@@ -25,6 +25,24 @@ namespace TideCombat
             Concerto = concerto;
         }
 
+        internal void CopyBgra(Rectangle area, byte[] destination)
+        {
+            Rectangle clipped = Rectangle.Intersect(area, new Rectangle(0, 0, Width, Height));
+            int offset = 0;
+            for (int y = clipped.Top; y < clipped.Bottom; y++)
+            {
+                for (int x = clipped.Left; x < clipped.Right; x++)
+                {
+                    int red, green, blue;
+                    Rgb(x, y, out red, out green, out blue);
+                    destination[offset++] = (byte)blue;
+                    destination[offset++] = (byte)green;
+                    destination[offset++] = (byte)red;
+                    destination[offset++] = 255;
+                }
+            }
+        }
+
         internal void Rgb(int x, int y, out int red, out int green, out int blue)
         {
             int offset = (y * Width + x) * 4;

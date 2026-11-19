@@ -74,6 +74,7 @@ namespace TideCombat
             Domain = DomainOptions.Defaults();
             Nightmare = NightmareOptions.Defaults();
             Change = ChangeOptions.Defaults();
+            Daily = DailyOptions.Defaults();
         }
 
         public bool AutoTarget { get; set; }
@@ -99,6 +100,7 @@ namespace TideCombat
         public DomainOptions Domain { get; set; }
         public NightmareOptions Nightmare { get; set; }
         public ChangeOptions Change { get; set; }
+        public DailyOptions Daily { get; set; }
         public string[] PartyCharacters { get; set; }
         public Rotation[] Slots { get; set; }
         public List<CharacterProfile> Characters { get; set; }
@@ -125,6 +127,7 @@ namespace TideCombat
                 Domain = DomainOptions.Defaults(),
                 Nightmare = NightmareOptions.Defaults(),
                 Change = ChangeOptions.Defaults(),
+                Daily = DailyOptions.Defaults(),
                 PartyCharacters = new string[3],
                 Slots = new[] { Rotation.ForRole(BattleRole.Main), Rotation.ForRole(BattleRole.Secondary),
                     Rotation.ForRole(BattleRole.Support) },
@@ -152,6 +155,7 @@ namespace TideCombat
             Domain = DomainOptions.Defaults();
             Nightmare = NightmareOptions.Defaults();
             Change = ChangeOptions.Defaults();
+            Daily = DailyOptions.Defaults();
             Farm.Validate();
             if (Slots == null || Slots.Length != 3 || PartyCharacters.Length != 3 ||
                 Slots.Any(slot => slot == null) || Characters == null || !Enum.IsDefined(typeof(GameSource), Source))

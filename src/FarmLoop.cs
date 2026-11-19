@@ -286,7 +286,7 @@ namespace TideCombat
                 if (ocr != null) ocr.Dispose();
                 try { farmInput.ReleaseAll(); } catch (Exception) { }
                 try { input.ReleaseAll(); } catch (Exception) { }
-                concerto.Save();
+                if (concerto != null) concerto.Save();
             }
         }
 

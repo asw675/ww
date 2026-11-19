@@ -321,6 +321,9 @@ namespace TideCombat
             {
                 case ' ': return 0x20;
                 case '\u001b': return 0x1B;
+                case '\u0010': return 0x10;
+                case '\u0011': return 0x11;
+                case '\u0012': return 0x12;
                 default: return 0;
             }
         }

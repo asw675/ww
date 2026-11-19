@@ -69,7 +69,7 @@ namespace TideCombat
         private const int HotkeyMessage = 0x0312;
 
         private readonly Button start = Theme.Button("启动战斗", true);
-        private readonly ComboBox taskSelect = Theme.Select("刷 4C 声骸", "批量强化声骸", "无音区", "材料本", "模拟领域", "梦魇巢穴", "周常乐园", "合并声骸", "改主属性");
+        private readonly ComboBox taskSelect = Theme.Select("刷 4C 声骸", "批量强化声骸", "无音区", "材料本", "模拟领域", "梦魇巢穴", "周常乐园", "合并声骸", "改主属性", "一条龙");
         private readonly Button runTask = Theme.Button("运行任务", true);
         private readonly Button preview = Theme.Button("仅检测");
         private readonly Button stop = Theme.Button("停止");
@@ -103,7 +103,7 @@ namespace TideCombat
         private CombatSettings settings;
         private readonly ConcertoMeter concertoMeter;
         private CancellationTokenSource work;
-        private enum WorkMode { Battle, Preview, Farm, Enhance, Domain, Nightmare, Garden, Merge, Change }
+        private enum WorkMode { Battle, Preview, Farm, Enhance, Domain, Nightmare, Garden, Merge, Change, Daily }
 
         private bool toggleInstalled, closing, inPreview, hasReadout;
         private string persistenceError;
@@ -381,7 +381,7 @@ namespace TideCombat
                 Source = (GameSource)source.SelectedIndex, CheckLevitator = checkLevitator.Checked,
                 ChisaDps = settings.ChisaDps, SuomingDps = settings.SuomingDps, Farm = settings.Farm,
                 Enhance = settings.Enhance, Domain = settings.Domain, Nightmare = settings.Nightmare,
-                Change = settings.Change, PartyCharacters = new string[3],
+                Change = settings.Change, Daily = settings.Daily, PartyCharacters = new string[3],
                 DetectSkillKeys = detectKeys.Checked, ResonanceKey = keys[0].Text, EchoKey = keys[1].Text,
                 LiberationKey = keys[2].Text, ToolKey = keys[3].Text, Slots = new Rotation[3], Characters = settings.Characters
             };
@@ -447,7 +447,8 @@ namespace TideCombat
                 case 5: BeginNightmare(); break;
                 case 6: BeginGarden(); break;
                 case 7: BeginMerge(); break;
-                default: BeginChange(); break;
+                case 8: BeginChange(); break;
+                default: BeginDaily(); break;
             }
         }
 
@@ -501,6 +502,36 @@ namespace TideCombat
                 current.Nightmare = dialog.Result;
             }
             await StartWork(current, WorkMode.Nightmare);
+        }
+
+        private async void BeginDaily()
+        {
+            if (work != null || closing)
+                return;
+            CombatSettings current;
+            try { current = ReadControls(); }
+            catch (InvalidDataException error)
+            {
+                SetFooter(error.Message, true);
+                return;
+            }
+            if (current.Source == GameSource.Background || current.Source == GameSource.ManagedCloud)
+            {
+                SetFooter("一条龙需要「前台」来源：本地客户端·前台或网页云游戏·前台。", true);
+                return;
+            }
+            using (var dialog = new DailyForm(current.Daily ?? DailyOptions.Defaults()))
+            {
+                if (dialog.ShowDialog(this) != DialogResult.OK || dialog.Result == null)
+                    return;
+                if (dialog.Result.Farm4C && (current.Farm == null || !current.Farm.Teleport))
+                {
+                    SetFooter("「刷 4C 声骸」需要先在刷 4C 设置里开启自动传送。", true);
+                    return;
+                }
+                current.Daily = dialog.Result;
+            }
+            await StartWork(current, WorkMode.Daily);
         }
 
         private async void BeginChange()
@@ -650,6 +681,11 @@ namespace TideCombat
                 if (!cancellation.IsCancellationRequested && ReferenceEquals(work, cancellation))
                     RenderChange(report);
             });
+            var dailyProgress = new Progress<DailyReport>(report =>
+            {
+                if (!cancellation.IsCancellationRequested && ReferenceEquals(work, cancellation))
+                    RenderDaily(report);
+            });
             bool needsElevation = false;
             string failure = null;
             try
@@ -692,6 +728,13 @@ namespace TideCombat
                         await Task.Run(delegate
                         {
                             using (var runner = new ChangeRunner(settings, settings.Change, cancellation.Token, changeProgress))
+                                runner.Run();
+                        });
+                        break;
+                    case WorkMode.Daily:
+                        await Task.Run(delegate
+                        {
+                            using (var runner = new DailyRunner(settings, settings.Daily, cancellation.Token, dailyProgress))
                                 runner.Run();
                         });
                         break;
@@ -768,6 +811,7 @@ namespace TideCombat
                 case WorkMode.Garden: return "周常乐园";
                 case WorkMode.Merge: return "合并声骸";
                 case WorkMode.Change: return "改主属性";
+                case WorkMode.Daily: return "一条龙";
                 default: return "已待命";
             }
         }
@@ -783,9 +827,24 @@ namespace TideCombat
                 case WorkMode.Garden: return "准备执行周常乐园";
                 case WorkMode.Merge: return "准备合并弃置声骸";
                 case WorkMode.Change: return "准备修改声骸主属性";
+                case WorkMode.Daily: return "准备执行一条龙";
                 case WorkMode.Preview: return "等待切回《鸣潮》客户端";
                 default: return "等待切回《鸣潮》客户端";
             }
+        }
+
+        private void RenderDaily(DailyReport report)
+        {
+            mode.Text = report.Finished ? "任务结束" : "一条龙";
+            state.Text = report.State;
+            target.Text = "体力 " + report.UsedStamina + "/180";
+            skills.Text = "积分 " + report.Points;
+            lastAction.Text = report.Finished ? "已停止" : "运行中";
+            if (report.Failure != null)
+                SetFooter(report.Failure, true);
+            else
+                SetFooter(string.Format("体力 {0}/180 · 积分 {1} · {2}", report.UsedStamina, report.Points,
+                    report.Size.Width > 0 ? report.Size.Width + "×" + report.Size.Height : "—"), false);
         }
 
         private void RenderChange(ChangeReport report)

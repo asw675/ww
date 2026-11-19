@@ -11,6 +11,7 @@ namespace TideCombat
     {
         public bool TacetNest { get; set; }
         public bool Purification { get; set; }
+        public bool CaptureOnce { get; set; }
 
         public static NightmareOptions Defaults()
         {
@@ -257,6 +258,16 @@ namespace TideCombat
                     return;
                 }
                 bool dropped = CollectEcho();
+                if (dropped && options.CaptureOnce)
+                {
+                    Report("已捕获声骸，结束梦魇巢穴任务");
+                    progress.Report(new NightmareReport
+                    {
+                        State = "已捕获声骸", Nests = nests, Finished = true,
+                        Size = world.Captured ? new Size(world.Frame.Width, world.Frame.Height) : Size.Empty
+                    });
+                    return;
+                }
                 if (!dropped && !team)
                     dropped = RetryAfterTeleport(target);
                 world.Sleep(3000);

@@ -73,6 +73,8 @@ namespace TideCombat
             Check("merge full-batch detection", MergeChecks.FullBatch);
             Check("echo change OCR text fixes", ChangeChecks.TextFixes);
             Check("echo change options validate", ChangeChecks.Options);
+            Check("daily plan decisions", DailyChecks.Plan);
+            Check("daily options validate", DailyChecks.Options);
             Check("input cannot run without a verified foreground window", MissingWindow);
             Check("local game window is recognized without a readable title or installation path", LocalWindowIdentity);
             Check("input privilege preflight detects elevated clients and reads native process tokens", InputPrivilegePreflight);

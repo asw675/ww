@@ -9,6 +9,7 @@
 - 交接快照用同一份参考源码完成了构建和回放，`--reference` 套件 112 项通过。独立的真实浏览器用例另见未完成项。
 - 新增 4C 声骸刷取（`src/Farm4C.cs`、`src/FarmLoop.cs`、`src/FarmVision.cs`、`src/FarmInput.cs`、`src/EchoDetector.cs`、`src/MinimapNavigator.cs`）：复刻 `FarmEchoTask` 的传送、寻路、进本、战斗、YOLO 拾取、重开与复活循环；随包携带 `echo.onnx`、`arrow.bin` 与 ONNX Runtime。`tests/FarmChecks.cs` 用合成状态机验证流程。逐项差异见 `docs/FARM4C.md`。
 - 自动战斗新增「角色倒下后自动点击复活」，替代原先的手动恢复等待。
+- 新增一条龙（`src/DailyRunner.cs`、`src/DailyForm.cs`）：进度/积分 OCR、体力预算、梦魇捕获模式、日常/邮件/战令、附加任务编排；决策逻辑有离线测试。
 - 新增批量改主属性（`src/ChangeRunner.cs`、`src/ChangeForm.cs`）：OCR 驱动的主属性重构流程；文本纠错与配置校验有离线测试。
 - 新增合并弃置声骸（`src/MergeRunner.cs`）：满批 OCR 判定、全选与确认循环；满批正则与工作模式枚举有离线测试。
 - 新增周常乐园（`src/GardenRunner.cs`）：事件按钮优先级、领奖/祝福/结束判定；积分判定有离线测试。

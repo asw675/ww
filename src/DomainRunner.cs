@@ -14,6 +14,7 @@ namespace TideCombat
         public DomainKind Kind { get; set; }
         public int Index { get; set; }
         public string Material { get; set; }
+        public int MaxStamina { get; set; }
 
         public static readonly string[] Materials = { "共鸣者经验", "武器经验", "贝币" };
 
@@ -409,7 +410,9 @@ namespace TideCombat
             total -= used;
             mustUse -= used;
             usedStamina += used;
-            if (total < once)
+            if (options.MaxStamina > 0 && usedStamina >= options.MaxStamina)
+                canContinue = false;
+            else if (total < once)
                 canContinue = false;
             else if (mustUse <= 0 && current < once)
                 canContinue = false;

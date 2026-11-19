@@ -63,6 +63,8 @@ namespace TideCombat
             var add = Theme.Button("添加");
             var update = Theme.Button("更新");
             var remove = Theme.Button("删除");
+            var up = Theme.Button("上移");
+            var down = Theme.Button("下移");
             add.Click += delegate { list.Items.Add(new ListViewItem(new[] { key.Text, task.SelectedItem.ToString() }) { Checked = true }); };
             update.Click += delegate
             {
@@ -71,9 +73,13 @@ namespace TideCombat
                 list.SelectedItems[0].SubItems[1].Text = task.SelectedItem.ToString();
             };
             remove.Click += delegate { if (list.SelectedItems.Count > 0) list.Items.Remove(list.SelectedItems[0]); };
+            up.Click += delegate { MoveItem(-1); };
+            down.Click += delegate { MoveItem(1); };
             editor.Controls.Add(add);
             editor.Controls.Add(update);
             editor.Controls.Add(remove);
+            editor.Controls.Add(up);
+            editor.Controls.Add(down);
             layout.Controls.Add(editor, 0, 1);
             hint.AutoSize = false;
             hint.Height = 30;
@@ -105,6 +111,21 @@ namespace TideCombat
                 string taskName = account.task == null ? "None" : account.task.@class;
                 list.Items.Add(new ListViewItem(new[] { account.account_key, taskName }) { Checked = account.enabled });
             }
+        }
+
+        private void MoveItem(int delta)
+        {
+            if (list.SelectedItems.Count == 0)
+                return;
+            ListViewItem item = list.SelectedItems[0];
+            int index = item.Index;
+            int target = index + delta;
+            if (target < 0 || target >= list.Items.Count)
+                return;
+            list.Items.RemoveAt(index);
+            list.Items.Insert(target, item);
+            item.Selected = true;
+            item.Focused = true;
         }
 
         private void LoadSelected()

@@ -15,6 +15,7 @@ namespace TideCombat
         private readonly CheckBox garden = Option("检查并执行周常乐园", true);
         private readonly CheckBox merge = Option("弃置声骸超过 1000 时合并", false);
         private readonly CheckBox farm4C = Option("结束后刷 4C 声骸（需开启 4C 传送）", false);
+        private readonly CheckBox exitAfter = Option("完成后退出游戏与程序", false);
         private readonly Label hint = Theme.Text(
             "一条龙：读取日常进度 → 补梦魇/体力 → 领日常/邮件/战令 → 可选附加任务。", Theme.Muted);
 
@@ -50,10 +51,11 @@ namespace TideCombat
             layout.Controls.Add(garden, 1, 6);
             layout.Controls.Add(merge, 1, 7);
             layout.Controls.Add(farm4C, 1, 8);
+            layout.Controls.Add(exitAfter, 1, 9);
             hint.AutoSize = false;
             hint.Height = 38;
             hint.Dock = DockStyle.Fill;
-            layout.Controls.Add(hint, 1, 9);
+            layout.Controls.Add(hint, 1, 10);
 
             var actions = new FlowLayoutPanel
             {
@@ -66,7 +68,7 @@ namespace TideCombat
             ok.Click += delegate { DialogResult = DialogResult.OK; Close(); };
             actions.Controls.Add(cancel);
             actions.Controls.Add(ok);
-            layout.Controls.Add(actions, 0, 10);
+            layout.Controls.Add(actions, 0, 11);
             layout.SetColumnSpan(actions, 2);
 
             farm.SelectedIndex = (int)options.Farm;
@@ -79,6 +81,7 @@ namespace TideCombat
             garden.Checked = options.CheckGarden;
             merge.Checked = options.MergeIfNeeded;
             farm4C.Checked = options.Farm4C;
+            exitAfter.Checked = options.ExitAfterTask;
             AcceptButton = ok;
             CancelButton = cancel;
         }
@@ -100,7 +103,8 @@ namespace TideCombat
                     AutoNightmare = autoNightmare.Checked,
                     CheckGarden = garden.Checked,
                     MergeIfNeeded = merge.Checked,
-                    Farm4C = farm4C.Checked
+                    Farm4C = farm4C.Checked,
+                    ExitAfterTask = exitAfter.Checked
                 };
                 try { Result.Validate(); }
                 catch (Exception error)

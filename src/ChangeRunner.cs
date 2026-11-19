@@ -106,6 +106,9 @@ namespace TideCombat
                 if (!ChangeOne(cultivate))
                     return;
                 changed++;
+                if (world.Tick())
+                    Screenshots.Save(world.Frame, "success", string.Empty,
+                        new Rectangle(144, 81, 448, 414));
                 Report("已修改 " + changed + " 个");
                 if (!ReturnToBag())
                 {
@@ -268,6 +271,8 @@ namespace TideCombat
 
         private void Fail(string message)
         {
+            if (world.Tick())
+                Screenshots.Save(world.Frame, "failed", message, new Rectangle(144, 81, 448, 414));
             progress.Report(new ChangeReport
             {
                 State = message, Failure = message, Changed = changed, Finished = true,

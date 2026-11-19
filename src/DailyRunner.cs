@@ -17,6 +17,7 @@ namespace TideCombat
         public bool CheckGarden { get; set; }
         public bool MergeIfNeeded { get; set; }
         public bool Farm4C { get; set; }
+        public bool ExitAfterTask { get; set; }
 
         public static DailyOptions Defaults()
         {

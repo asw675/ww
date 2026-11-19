@@ -71,6 +71,7 @@ namespace TideCombat
         private readonly Button start = Theme.Button("启动战斗", true);
         private readonly ComboBox taskSelect = Theme.Select("刷 4C 声骸", "批量强化声骸", "无音区", "材料本", "模拟领域", "梦魇巢穴", "周常乐园", "合并声骸", "改主属性", "一条龙", "多账号日常", "多账号配置");
         private readonly Button runTask = Theme.Button("运行任务", true);
+        private readonly Button resume = Theme.Button("继续");
         private readonly Button preview = Theme.Button("仅检测");
         private readonly Button stop = Theme.Button("停止");
         private readonly Button profiles = Theme.Button("角色档案");
@@ -110,6 +111,7 @@ namespace TideCombat
         }
 
         private bool toggleInstalled, closing, inPreview, hasReadout;
+        private ManualResetEventSlim enhanceGate;
         private string persistenceError;
 
         internal MainForm() : this(SettingsFile.Location) { }
@@ -139,6 +141,13 @@ namespace TideCombat
             LoadControls();
             start.Click += delegate { BeginRun(false); };
             runTask.Click += delegate { BeginTask(); };
+            resume.Enabled = false;
+            resume.Click += delegate
+            {
+                if (enhanceGate == null) return;
+                enhanceGate.Set();
+                resume.Enabled = false;
+            };
             preview.Click += delegate { BeginRun(true); };
             stop.Click += delegate { EndRun(); };
             profiles.Click += delegate { OpenProfiles(); };
@@ -184,6 +193,7 @@ namespace TideCombat
             actions.Controls.Add(start);
             actions.Controls.Add(taskSelect);
             actions.Controls.Add(runTask);
+            actions.Controls.Add(resume);
             actions.Controls.Add(preview);
             actions.Controls.Add(stop);
             stop.Enabled = false;
@@ -733,8 +743,21 @@ namespace TideCombat
                 switch (workMode)
                 {
                     case WorkMode.Enhance:
-                        await Task.Run(() => EnhanceLoop.Run(settings, settings.Enhance, enhanceProgress, cancellation.Token));
+                    {
+                        var gate = new ManualResetEventSlim(false);
+                        enhanceGate = gate;
+                        try
+                        {
+                            await Task.Run(() => EnhanceLoop.Run(settings, settings.Enhance, enhanceProgress,
+                                cancellation.Token, gate));
+                        }
+                        finally
+                        {
+                            enhanceGate = null;
+                            gate.Dispose();
+                        }
                         break;
+                    }
                     case WorkMode.Domain:
                         await Task.Run(delegate
                         {
@@ -821,6 +844,12 @@ namespace TideCombat
                 if (closing)
                     Close();
             }
+            bool exitAfter = !cancellation.IsCancellationRequested &&
+                ((workMode == WorkMode.Farm && settings.Farm != null && settings.Farm.ExitAfterTask) ||
+                 ((workMode == WorkMode.Daily || workMode == WorkMode.MultiDaily) &&
+                  settings.Daily != null && settings.Daily.ExitAfterTask));
+            if (exitAfter && !closing)
+                ExitGameAndProgram();
             if (needsElevation && !closing) OfferAdministratorRestart();
         }
 
@@ -891,6 +920,23 @@ namespace TideCombat
                 case WorkMode.Preview: return "等待切回《鸣潮》客户端";
                 default: return "等待切回《鸣潮》客户端";
             }
+        }
+
+        private void ExitGameAndProgram()
+        {
+            try
+            {
+                var window = new GameWindow(settings.Source);
+                Rectangle bounds;
+                string reason;
+                if (window.TryLocate(out bounds, out reason) && window.Handle != IntPtr.Zero)
+                {
+                    Native.PostMessageW(window.Handle, 0x0010, IntPtr.Zero, IntPtr.Zero);
+                    System.Threading.Thread.Sleep(3000);
+                }
+            }
+            catch (Exception) { }
+            Application.Exit();
         }
 
         private void RenderMulti(MultiAccountReport report)
@@ -993,6 +1039,8 @@ namespace TideCombat
 
         private void RenderEnhance(EnhanceReport report)
         {
+            if (report.Paused)
+                resume.Enabled = true;
             mode.Text = report.Finished ? "强化结束" : report.Paused ? "已暂停" : "强化声骸";
             state.Text = report.State;
             target.Text = "成功 " + report.Enhanced;

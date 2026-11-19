@@ -320,6 +320,14 @@ namespace TideCombat
         internal string Failure { get; private set; }
         internal bool Finished { get { return step == Step.Done || step == Step.Failed; } }
         internal bool Paused { get; private set; }
+
+        internal void Resume()
+        {
+            Paused = false;
+            step = Step.Escaping;
+            stepAt = 0;
+            nextAction = 0;
+        }
         internal int Enhanced { get; private set; }
         internal int Discarded { get; private set; }
         internal string ScreenshotKind { get; private set; }

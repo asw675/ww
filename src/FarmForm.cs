@@ -16,6 +16,7 @@ namespace TideCombat
         private readonly ComboBox bossProfile = Theme.Select("通用 / 其它", "海之女", "无归的谬误", "异构武装",
             "罗蕾莱", "荣耀狮像", "梦魇·赫卡忒", "芬里科", "无铭探索者");
         private readonly CheckBox healer = new CheckBox { Text = "战斗前后切换到治疗", AutoSize = true };
+        private readonly CheckBox exitAfter = new CheckBox { Text = "完成后退出游戏与程序", AutoSize = true };
         private readonly Label hint = Theme.Text("自动传送会打开 F2 图鉴，需要游戏窗口可见。", Theme.Muted);
 
         internal FarmForm(FarmOptions options)
@@ -52,7 +53,7 @@ namespace TideCombat
             hint.AutoSize = false;
             hint.Height = 34;
             hint.Dock = DockStyle.Fill;
-            layout.Controls.Add(hint, 1, 8);
+            layout.Controls.Add(hint, 1, 9);
 
             var actions = new FlowLayoutPanel
             {
@@ -65,7 +66,7 @@ namespace TideCombat
             ok.Click += delegate { DialogResult = DialogResult.OK; Close(); };
             actions.Controls.Add(cancel);
             actions.Controls.Add(ok);
-            layout.Controls.Add(actions, 0, 9);
+            layout.Controls.Add(actions, 0, 10);
             layout.SetColumnSpan(actions, 2);
 
             teleport.SelectedIndex = options.Teleport ? Math.Max(1, (int)options.TeleportMode) : 0;
@@ -76,6 +77,7 @@ namespace TideCombat
             pickup.SelectedIndex = (int)options.Pickup;
             bossProfile.SelectedIndex = (int)options.Boss;
             healer.Checked = options.SwitchHealer;
+            exitAfter.Checked = options.ExitAfterTask;
             AcceptButton = ok;
             CancelButton = cancel;
         }
@@ -96,7 +98,8 @@ namespace TideCombat
                     WaitSeconds = (int)wait.Value,
                     Pickup = (FarmPickupMode)pickup.SelectedIndex,
                     Boss = (FarmBoss)bossProfile.SelectedIndex,
-                    SwitchHealer = healer.Checked
+                    SwitchHealer = healer.Checked,
+                    ExitAfterTask = exitAfter.Checked
                 };
                 try { Result.Validate(); }
                 catch (Exception error)

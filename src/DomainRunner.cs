@@ -96,6 +96,7 @@ namespace TideCombat
         private readonly IProgress<DomainReport> progress;
         private readonly int once;
         private int usedStamina, runs;
+        private bool healPoint;
 
         internal DomainRunner(CombatSettings settings, DomainOptions options, CancellationToken token,
             IProgress<DomainReport> progress)
@@ -162,11 +163,15 @@ namespace TideCombat
                 Report("进入战斗");
                 WalkUntilF(4000);
                 PickF(true);
-                CombatOutcome combat = CombatRunner.Engage(world, settings, token);
+                CombatOutcome combat = CombatRunner.Engage(world, settings, token, 300000, 5000);
                 if (combat != CombatOutcome.Finished)
                 {
                     EnsureWorld();
-                    TeleportToHeal();
+                    if (!healPoint)
+                    {
+                        TeleportToHeal();
+                        healPoint = true;
+                    }
                     return false;
                 }
                 world.Sleep(3000);

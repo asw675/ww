@@ -30,7 +30,7 @@ namespace TideCombat
         private static readonly Rectangle IconArea = new Rectangle(420, 105, 170, 66);
 
         internal static void Run(CombatSettings settings, EnhanceOptions options, IProgress<EnhanceReport> progress,
-            CancellationToken cancellation)
+            CancellationToken cancellation, ManualResetEventSlim pause = null)
         {
             var window = new GameWindow(settings.Source);
             var input = new FarmInput(window);
@@ -108,7 +108,20 @@ namespace TideCombat
                                 Size = bounds.Size, Finished = task.Finished, Paused = task.Paused,
                                 Failure = task.Failure
                             });
-                            break;
+                            if (task.Finished)
+                                break;
+                            if (pause == null)
+                                break;
+                            while (!cancellation.IsCancellationRequested)
+                            {
+                                if (pause.Wait(100))
+                                    break;
+                            }
+                            if (cancellation.IsCancellationRequested)
+                                break;
+                            pause.Reset();
+                            task.Resume();
+                            continue;
                         }
                         if (now - lastReport >= 250)
                         {
@@ -246,27 +259,7 @@ namespace TideCombat
 
         private static void TrySave(PixelFrame frame, string kind, string reason)
         {
-            try
-            {
-                Rectangle area = Scale(frame, new Rectangle(144, 81, 448, 414));
-                area = Rectangle.Intersect(area, new Rectangle(0, 0, frame.Width, frame.Height));
-                if (area.Width < 4 || area.Height < 4)
-                    return;
-                var bytes = new byte[area.Width * area.Height * 4];
-                frame.CopyBgra(area, bytes);
-                using (var bitmap = new Bitmap(area.Width, area.Height, PixelFormat.Format32bppRgb))
-                {
-                    BitmapData data = bitmap.LockBits(new Rectangle(0, 0, area.Width, area.Height),
-                        ImageLockMode.WriteOnly, PixelFormat.Format32bppRgb);
-                    try { Marshal.Copy(bytes, 0, data.Scan0, bytes.Length); }
-                    finally { bitmap.UnlockBits(data); }
-                    string folder = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "screenshots", kind);
-                    Directory.CreateDirectory(folder);
-                    string name = DateTime.Now.ToString("HHmmss_fff") + (string.IsNullOrEmpty(reason) ? "" : "_" + Sanitize(reason));
-                    bitmap.Save(Path.Combine(folder, name + ".png"), ImageFormat.Png);
-                }
-            }
-            catch (Exception) { }
+            Screenshots.Save(frame, kind, reason, new Rectangle(144, 81, 448, 414));
         }
 
         private static string Sanitize(string value)

@@ -22,6 +22,7 @@ namespace TideCombat
         public bool SwitchHealer { get; set; }
         public FarmPickupMode Pickup { get; set; }
         public FarmBoss Boss { get; set; }
+        public bool ExitAfterTask { get; set; }
 
         public static FarmOptions Defaults()
         {

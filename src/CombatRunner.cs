@@ -11,9 +11,29 @@ namespace TideCombat
     internal static class CombatRunner
     {
         internal static CombatOutcome Engage(WorldSession world, CombatSettings settings, CancellationToken token,
-            int timeoutMs = 120000)
+            int timeoutMs = 120000, int waitForCombatMs = 0)
         {
             var planner = new BattlePlanner(settings);
+            if (waitForCombatMs > 0)
+            {
+                var waiting = Stopwatch.StartNew();
+                while (waiting.ElapsedMilliseconds < waitForCombatMs && !token.IsCancellationRequested)
+                {
+                    if (!world.Tick())
+                    {
+                        world.Sleep(120);
+                        continue;
+                    }
+                    HudSnapshot probe = world.Hud;
+                    if (probe != null && probe.Dead)
+                        return CombatOutcome.Dead;
+                    if (probe != null && (probe.EnemyHealth || probe.Locked))
+                        break;
+                    token.WaitHandle.WaitOne(80);
+                }
+                if (world.Hud == null || !(world.Hud.EnemyHealth || world.Hud.Locked))
+                    return CombatOutcome.Finished;
+            }
             var watch = Stopwatch.StartNew();
             long lastSeen = -1;
             while (!token.IsCancellationRequested)

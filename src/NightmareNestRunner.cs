@@ -247,9 +247,11 @@ namespace TideCombat
                 RunForward(10);
             }
 
+            int waitCombat = 10000;
             while (!token.IsCancellationRequested)
             {
-                CombatOutcome outcome = CombatRunner.Engage(world, settings, token, 300000);
+                CombatOutcome outcome = CombatRunner.Engage(world, settings, token, 300000, waitCombat);
+                waitCombat = 1000;
                 if (outcome == CombatOutcome.Dead)
                 {
                     int count = deaths.ContainsKey(target.Key) ? deaths[target.Key] + 1 : 1;

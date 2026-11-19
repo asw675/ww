@@ -29,6 +29,7 @@ namespace TideCombat
             var reviveInput = new FarmInput(window);
             var reviveVision = new FarmVision();
             long nextReviveClick = 0;
+            long nextPopupClick = 0;
             var browser = settings.Source == GameSource.ManagedCloud ? new CloudBrowser() : null;
             Func<bool> release = browser == null ? (Func<bool>)input.ReleaseAll : browser.ReleaseAll;
             Func<BattleAction, CancellationToken, bool> send = browser == null ?
@@ -127,6 +128,22 @@ namespace TideCombat
                         {
                             nextReviveClick = now + 2600;
                             TryRevive(currentFrame, hud, bounds, reviveInput, reviveVision, cancellation, ref state);
+                        }
+                        if (!hud.Valid && haveFrame && now >= nextPopupClick)
+                        {
+                            nextPopupClick = now + 1800;
+                            Rectangle popup;
+                            if (reviveVision.FindLabel(currentFrame, "monthly_card", .84, out popup))
+                            {
+                                try
+                                {
+                                    if (reviveInput.Click(new Point((int)(currentFrame.Width * .5),
+                                        (int)(currentFrame.Height * .89)), new Size(currentFrame.Width, currentFrame.Height),
+                                        bounds, FarmMouse.Left, 60, cancellation))
+                                        state = "关闭月卡弹窗";
+                                }
+                                catch (System.ComponentModel.Win32Exception) { }
+                            }
                         }
                         BattleAction action = planner.Observe(hud, now);
                         state = planner.Status;

@@ -15,11 +15,15 @@ namespace TideCombat
     internal static class SelfTest
     {
         private static int failed;
+        private static readonly List<string> skip = new List<string>();
 
         [STAThread]
         public static int Main(string[] args)
         {
             Console.OutputEncoding = Encoding.UTF8;
+            foreach (string argument in args)
+                if (argument.StartsWith("--skip=", StringComparison.Ordinal))
+                    skip.Add(argument.Substring(7));
             if (args.Length == 2 && args[0] == "--render")
             {
                 RenderWindows(args[1]);
@@ -97,6 +101,13 @@ namespace TideCombat
 
         private static void Check(string name, Action test)
         {
+            foreach (string filter in skip)
+            {
+                if (name.IndexOf(filter, StringComparison.OrdinalIgnoreCase) < 0)
+                    continue;
+                Console.WriteLine("SKIP " + name);
+                return;
+            }
             try
             {
                 test();

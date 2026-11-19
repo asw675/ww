@@ -129,6 +129,7 @@ namespace TideCombat
         internal string Status { get; private set; }
         internal int SwitchTimeoutMs { get; set; }
         internal int LostCombatTimeoutMs { get; set; }
+        private long liberationGraceUntil;
         internal bool Fighting { get { return activeSlot >= 0; } }
         internal bool ShouldScanExecution(long now) { return !executionPending && now - lastBreakCheck > 1000; }
         internal int LucillaTransformSlot
@@ -224,7 +225,7 @@ namespace TideCombat
                 hud.EnemyHealth || cloudHealthLostAt >= 0 && now - cloudHealthLostAt < 3000);
             bool timedCombat = activeSlot >= 0 && ChallengeClockActive(now);
             if (opening || timedCombat) hud.InChallenge = true;
-            bool characterGrace = HasCharacterGrace(hud, now);
+            bool characterGrace = HasCharacterGrace(hud, now) || now < liberationGraceUntil;
             bool switching = requestedSlot >= 0 && now < switchDeadline;
             if (!hud.Locked && !cloudCombat && !timedCombat && !characterGrace && !switching && !opening)
             {
@@ -504,6 +505,8 @@ namespace TideCombat
                     break;
                 case ActionKind.Cast:
                     nextCast[activeSlot, (int)action.Skill] = now + 1550;
+                    if (action.Skill == Skill.Liberation)
+                        liberationGraceUntil = now + 2600;
                     switch (action.Skill)
                     {
                         case Skill.Liberation: nextAction = now + 950; break;

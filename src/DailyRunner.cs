@@ -73,6 +73,8 @@ namespace TideCombat
         private readonly CancellationToken token;
         private readonly WorldSession world;
         private readonly IProgress<DailyReport> progress;
+        internal bool Failed { get; private set; }
+        internal string Failure { get; private set; }
         private int usedStamina, points;
 
         internal DailyRunner(CombatSettings settings, DailyOptions options, CancellationToken token,
@@ -86,6 +88,13 @@ namespace TideCombat
         }
 
         internal void Run()
+        {
+            try { RunCore(); }
+            catch (InputElevationRequiredException) { throw; }
+            catch (Exception error) { Fail(error.Message); }
+        }
+
+        private void RunCore()
         {
             if (!EnsureWorld())
             {
@@ -109,8 +118,12 @@ namespace TideCombat
                 {
                     using (var runner = new NightmareNestRunner(settings, nightmare, token,
                         new Progress<NightmareReport>(delegate { })))
+                    {
                         runner.Run();
-                });
+                        if (runner.Failed)
+                            throw new InvalidOperationException(runner.Failure);
+                    }
+                }, true);
                 EnsureWorld();
             }
 
@@ -135,8 +148,12 @@ namespace TideCombat
                             reported = report.UsedStamina;
                     });
                     using (var runner = new DomainRunner(settings, domain, token, recorder))
+                    {
                         runner.Run();
-                });
+                        if (runner.Failed)
+                            throw new InvalidOperationException(runner.Failure);
+                    }
+                }, true);
                 usedStamina = Math.Min(180, before + Math.Max(0, reported));
             }
 
@@ -153,8 +170,12 @@ namespace TideCombat
                 RunNested(delegate
                 {
                     using (var runner = new GardenRunner(settings, token, new Progress<GardenReport>(delegate { })))
+                    {
                         runner.Run();
-                });
+                        if (runner.Failed)
+                            throw new InvalidOperationException(runner.Failure);
+                    }
+                }, true);
                 EnsureWorld();
             }
             if (options.MergeIfNeeded)
@@ -164,13 +185,19 @@ namespace TideCombat
                 {
                     using (var runner = new MergeRunner(settings, token, new Progress<MergeReport>(delegate { })))
                         runner.Run();
-                });
+                }, false);
                 EnsureWorld();
             }
             if (options.Farm4C)
             {
                 Report("刷 4C 声骸");
-                FarmLoop.Run(settings, settings.Farm, new Progress<FarmReport>(delegate { }), token, null);
+                FarmReport last = null;
+                FarmLoop.Run(settings, settings.Farm, new Progress<FarmReport>(delegate (FarmReport report)
+                {
+                    last = report;
+                }), token, null);
+                if (last != null && last.Failure != null)
+                    throw new InvalidOperationException(last.Failure);
             }
             Report("一条龙完成");
             progress.Report(new DailyReport
@@ -309,11 +336,16 @@ namespace TideCombat
             return false;
         }
 
-        private void RunNested(Action action)
+        private void RunNested(Action action, bool critical)
         {
             try { action(); }
             catch (InputElevationRequiredException) { throw; }
-            catch (Exception error) { Report("子任务失败：" + error.Message); }
+            catch (Exception error)
+            {
+                Report("子任务失败：" + error.Message);
+                if (critical)
+                    throw;
+            }
         }
 
         private bool EnsureWorld()
@@ -353,6 +385,8 @@ namespace TideCombat
 
         private void Fail(string message)
         {
+            Failed = true;
+            Failure = message;
             progress.Report(new DailyReport
             {
                 State = message, Failure = message, Finished = true, UsedStamina = usedStamina, Points = points,

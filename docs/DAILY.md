@@ -38,6 +38,11 @@
 
 实现为 `DailyRunner` 编排，复用 `DomainRunner`/`NightmareNestRunner`/`GardenRunner`/`MergeRunner`/`FarmLoop`。
 
+## 失败传递
+
+- 体力本、梦魇、乐园、4C 的子任务失败会向上抛出，一条龙整体标记失败并显示原因。
+- 合并声骸失败按参考的 `notify_if_not_enough=False` 处理：只记录，不阻断一条龙。
+
 ## 已知限制
 
 1. 捕获模式用「首次拾取成功」代替参考的图标负片判定，可能提前/延后停止。

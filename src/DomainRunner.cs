@@ -97,6 +97,8 @@ namespace TideCombat
         private readonly int once;
         private int usedStamina, runs;
         private bool healPoint;
+        internal bool Failed { get; private set; }
+        internal string Failure { get; private set; }
 
         internal DomainRunner(CombatSettings settings, DomainOptions options, CancellationToken token,
             IProgress<DomainReport> progress)
@@ -139,6 +141,8 @@ namespace TideCombat
                 world.Sleep(1000);
                 bool finished = FarmInDomain(ref mustUse);
                 runs++;
+                if (Failed)
+                    return;
                 if (finished)
                 {
                     Report("体力用完，任务结束");
@@ -147,7 +151,7 @@ namespace TideCombat
                 recovery++;
                 if (recovery >= 3)
                 {
-                    Fail("死亡恢复次数超限，停止刷取。");
+                    Fail("连续 3 次未能正常战斗或恢复，停止刷取。");
                     return;
                 }
                 Report("死亡恢复后重新进本");
@@ -158,12 +162,19 @@ namespace TideCombat
 
         private bool FarmInDomain(ref int mustUse)
         {
+            int stalls = 0;
             while (!token.IsCancellationRequested)
             {
                 Report("进入战斗");
                 WalkUntilF(4000);
                 PickF(true);
                 CombatOutcome combat = CombatRunner.Engage(world, settings, token, 300000, 5000);
+                if (combat == CombatOutcome.NoCombat)
+                {
+                    Report("等待开战超时，退出副本重试");
+                    EnsureWorld();
+                    return false;
+                }
                 if (combat != CombatOutcome.Finished)
                 {
                     EnsureWorld();
@@ -179,9 +190,17 @@ namespace TideCombat
                 PickF(false);
                 if (!HasClaimStamina())
                 {
+                    stalls++;
+                    Report("未找到领奖界面（" + stalls + "/3）");
+                    if (stalls >= 3)
+                    {
+                        Fail("连续 3 次战斗后未找到领奖界面，停止刷取。");
+                        return false;
+                    }
                     EscCancel();
                     continue;
                 }
+                stalls = 0;
                 if (!UseStamina(ref mustUse, out bool canContinue))
                     return false;
                 world.Sleep(4000);
@@ -525,6 +544,8 @@ namespace TideCombat
 
         private void Fail(string message)
         {
+            Failed = true;
+            Failure = message;
             progress.Report(new DomainReport
             {
                 State = message, Failure = message, Runs = runs, UsedStamina = usedStamina,

@@ -72,6 +72,8 @@ namespace TideCombat
         private readonly CancellationToken token;
         private readonly WorldSession world;
         private readonly IProgress<ChangeReport> progress;
+        internal bool Failed { get; private set; }
+        internal string Failure { get; private set; }
         private int changed;
 
         internal ChangeRunner(CombatSettings settings, ChangeOptions options, CancellationToken token,

@@ -58,6 +58,13 @@ namespace TideCombat
 
         private void RunSequential()
         {
+            try { RunSequentialCore(); }
+            catch (InputElevationRequiredException) { throw; }
+            catch (Exception error) { Fail(error.Message); }
+        }
+
+        private void RunSequentialCore()
+        {
             Report("执行当前账号日常");
             RunDaily();
             EnsureWorld();
@@ -168,11 +175,25 @@ namespace TideCombat
                     RunDaily();
                     break;
                 case "FarmEchoTask":
-                    FarmLoop.Run(settings, settings.Farm, new Progress<FarmReport>(delegate { }), token, null);
+                {
+                    FarmReport last = null;
+                    FarmLoop.Run(settings, settings.Farm, new Progress<FarmReport>(delegate (FarmReport report)
+                    {
+                        last = report;
+                    }), token, null);
+                    if (last != null && last.Failure != null)
+                        throw new InvalidOperationException(last.Failure);
                     break;
+                }
                 case "EnhanceEchoTask":
-                    EnhanceLoop.Run(settings, settings.Enhance, new Progress<EnhanceReport>(delegate { }), token);
+                {
+                    EnhanceReport last = null;
+                    EnhanceLoop.Run(settings, settings.Enhance, new Progress<EnhanceReport>(
+                        delegate (EnhanceReport report) { last = report; }), token);
+                    if (last != null && last.Failure != null)
+                        throw new InvalidOperationException(last.Failure);
                     break;
+                }
                 case "TacetTask":
                     RunDomain(DomainKind.Tacet);
                     break;
@@ -185,20 +206,32 @@ namespace TideCombat
                 case "NightmareNestTask":
                     using (var runner = new NightmareNestRunner(settings, settings.Nightmare, token,
                         new Progress<NightmareReport>(delegate { })))
+                    {
                         runner.Run();
+                        if (runner.Failed) throw new InvalidOperationException(runner.Failure);
+                    }
                     break;
                 case "GardenTask":
                     using (var runner = new GardenRunner(settings, token, new Progress<GardenReport>(delegate { })))
+                    {
                         runner.Run();
+                        if (runner.Failed) throw new InvalidOperationException(runner.Failure);
+                    }
                     break;
                 case "MergeEchoTask":
                     using (var runner = new MergeRunner(settings, token, new Progress<MergeReport>(delegate { })))
+                    {
                         runner.Run();
+                        if (runner.Failed) throw new InvalidOperationException(runner.Failure);
+                    }
                     break;
                 case "ChangeEchoTask":
                     using (var runner = new ChangeRunner(settings, settings.Change, token,
                         new Progress<ChangeReport>(delegate { })))
+                    {
                         runner.Run();
+                        if (runner.Failed) throw new InvalidOperationException(runner.Failure);
+                    }
                     break;
                 default:
                     Report("暂不支持的任务类型：" + name);
@@ -210,7 +243,11 @@ namespace TideCombat
         {
             using (var runner = new DailyRunner(settings, settings.Daily, token,
                 new Progress<DailyReport>(delegate { })))
+            {
                 runner.Run();
+                if (runner.Failed)
+                    throw new InvalidOperationException(runner.Failure);
+            }
         }
 
         private void RunDomain(DomainKind kind)
@@ -219,7 +256,11 @@ namespace TideCombat
             options.Kind = kind;
             using (var runner = new DomainRunner(settings, options, token,
                 new Progress<DomainReport>(delegate { })))
+            {
                 runner.Run();
+                if (runner.Failed)
+                    throw new InvalidOperationException(runner.Failure);
+            }
         }
 
         private bool SwitchToLogin()

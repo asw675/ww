@@ -31,6 +31,8 @@ namespace TideCombat
         private readonly WorldSession world;
         private readonly CombatSettings settings;
         private readonly IProgress<MergeReport> progress;
+        internal bool Failed { get; private set; }
+        internal string Failure { get; private set; }
         private int batches;
 
         internal MergeRunner(CombatSettings settings, CancellationToken token, IProgress<MergeReport> progress)
@@ -186,6 +188,8 @@ namespace TideCombat
 
         private void Fail(string message)
         {
+            Failed = true;
+            Failure = message;
             progress.Report(new MergeReport
             {
                 State = message, Failure = message, Finished = true, Batches = batches,

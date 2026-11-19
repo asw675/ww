@@ -85,6 +85,8 @@ namespace TideCombat
         private readonly HashSet<string> unreachable = new HashSet<string>();
         private readonly Dictionary<string, int> deaths = new Dictionary<string, int>();
         private EchoDetector detector;
+        internal bool Failed { get; private set; }
+        internal string Failure { get; private set; }
         private int nests;
         private bool captureDone;
 
@@ -511,6 +513,8 @@ namespace TideCombat
 
         private void Fail(string message)
         {
+            Failed = true;
+            Failure = message;
             progress.Report(new NightmareReport
             {
                 State = message, Failure = message, Finished = true, Nests = nests,

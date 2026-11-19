@@ -4,7 +4,7 @@ using System.Threading;
 
 namespace TideCombat
 {
-    internal enum CombatOutcome { Finished, Dead, Timeout }
+    internal enum CombatOutcome { Finished, NoCombat, Dead, Timeout }
 
     // Shared combat loop: runs the battle planner until enemies are gone, the
     // character dies, or the watch expires.
@@ -32,7 +32,7 @@ namespace TideCombat
                     token.WaitHandle.WaitOne(80);
                 }
                 if (world.Hud == null || !(world.Hud.EnemyHealth || world.Hud.Locked))
-                    return CombatOutcome.Finished;
+                    return CombatOutcome.NoCombat;
             }
             var watch = Stopwatch.StartNew();
             long lastSeen = -1;

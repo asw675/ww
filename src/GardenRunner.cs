@@ -54,6 +54,9 @@ namespace TideCombat
         private readonly WorldSession world;
         private readonly IProgress<GardenReport> progress;
         private int actions;
+        private long lastActivity;
+        internal bool Failed { get; private set; }
+        internal string Failure { get; private set; }
 
         internal GardenRunner(CombatSettings settings, CancellationToken token, IProgress<GardenReport> progress)
         {
@@ -93,12 +96,21 @@ namespace TideCombat
                 if (found)
                 {
                     actions++;
+                    lastActivity = DateTime.UtcNow.Ticks / TimeSpan.TicksPerMillisecond;
                     if (!Handle(label, box))
                         break;
                     continue;
                 }
                 if (TryFinish())
                     break;
+                long now = DateTime.UtcNow.Ticks / TimeSpan.TicksPerMillisecond;
+                if (lastActivity == 0)
+                    lastActivity = now;
+                if (now - lastActivity > 45000)
+                {
+                    Fail("45 秒没有识别到乐园操作或结束界面，停止等待。");
+                    break;
+                }
                 world.Sleep(200);
             }
             Finish();
@@ -181,6 +193,7 @@ namespace TideCombat
             if (!GardenMath.IsFinished(texts))
             {
                 world.Click(restart);
+                lastActivity = DateTime.UtcNow.Ticks / TimeSpan.TicksPerMillisecond;
                 return false;
             }
             world.Click(back);
@@ -276,6 +289,8 @@ namespace TideCombat
 
         private void Fail(string message)
         {
+            Failed = true;
+            Failure = message;
             progress.Report(new GardenReport
             {
                 State = message, Failure = message, Actions = actions, Finished = true,

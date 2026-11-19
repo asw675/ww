@@ -69,7 +69,7 @@ namespace TideCombat
         private const int HotkeyMessage = 0x0312;
 
         private readonly Button start = Theme.Button("启动战斗", true);
-        private readonly ComboBox taskSelect = Theme.Select("刷 4C 声骸", "批量强化声骸", "无音区", "材料本", "模拟领域", "梦魇巢穴", "周常乐园", "合并声骸");
+        private readonly ComboBox taskSelect = Theme.Select("刷 4C 声骸", "批量强化声骸", "无音区", "材料本", "模拟领域", "梦魇巢穴", "周常乐园", "合并声骸", "改主属性");
         private readonly Button runTask = Theme.Button("运行任务", true);
         private readonly Button preview = Theme.Button("仅检测");
         private readonly Button stop = Theme.Button("停止");
@@ -103,7 +103,7 @@ namespace TideCombat
         private CombatSettings settings;
         private readonly ConcertoMeter concertoMeter;
         private CancellationTokenSource work;
-        private enum WorkMode { Battle, Preview, Farm, Enhance, Domain, Nightmare, Garden, Merge }
+        private enum WorkMode { Battle, Preview, Farm, Enhance, Domain, Nightmare, Garden, Merge, Change }
 
         private bool toggleInstalled, closing, inPreview, hasReadout;
         private string persistenceError;
@@ -381,7 +381,7 @@ namespace TideCombat
                 Source = (GameSource)source.SelectedIndex, CheckLevitator = checkLevitator.Checked,
                 ChisaDps = settings.ChisaDps, SuomingDps = settings.SuomingDps, Farm = settings.Farm,
                 Enhance = settings.Enhance, Domain = settings.Domain, Nightmare = settings.Nightmare,
-                PartyCharacters = new string[3],
+                Change = settings.Change, PartyCharacters = new string[3],
                 DetectSkillKeys = detectKeys.Checked, ResonanceKey = keys[0].Text, EchoKey = keys[1].Text,
                 LiberationKey = keys[2].Text, ToolKey = keys[3].Text, Slots = new Rotation[3], Characters = settings.Characters
             };
@@ -446,7 +446,8 @@ namespace TideCombat
                 case 4: BeginDomain(DomainKind.Simulation); break;
                 case 5: BeginNightmare(); break;
                 case 6: BeginGarden(); break;
-                default: BeginMerge(); break;
+                case 7: BeginMerge(); break;
+                default: BeginChange(); break;
             }
         }
 
@@ -500,6 +501,31 @@ namespace TideCombat
                 current.Nightmare = dialog.Result;
             }
             await StartWork(current, WorkMode.Nightmare);
+        }
+
+        private async void BeginChange()
+        {
+            if (work != null || closing)
+                return;
+            CombatSettings current;
+            try { current = ReadControls(); }
+            catch (InvalidDataException error)
+            {
+                SetFooter(error.Message, true);
+                return;
+            }
+            if (current.Source == GameSource.Background || current.Source == GameSource.ManagedCloud)
+            {
+                SetFooter("改主属性需要「前台」来源：本地客户端·前台或网页云游戏·前台。", true);
+                return;
+            }
+            using (var dialog = new ChangeForm(current.Change ?? ChangeOptions.Defaults()))
+            {
+                if (dialog.ShowDialog(this) != DialogResult.OK || dialog.Result == null)
+                    return;
+                current.Change = dialog.Result;
+            }
+            await StartWork(current, WorkMode.Change);
         }
 
         private async void BeginMerge()
@@ -619,6 +645,11 @@ namespace TideCombat
                 if (!cancellation.IsCancellationRequested && ReferenceEquals(work, cancellation))
                     RenderMerge(report);
             });
+            var changeProgress = new Progress<ChangeReport>(report =>
+            {
+                if (!cancellation.IsCancellationRequested && ReferenceEquals(work, cancellation))
+                    RenderChange(report);
+            });
             bool needsElevation = false;
             string failure = null;
             try
@@ -654,6 +685,13 @@ namespace TideCombat
                         await Task.Run(delegate
                         {
                             using (var runner = new MergeRunner(settings, cancellation.Token, mergeProgress))
+                                runner.Run();
+                        });
+                        break;
+                    case WorkMode.Change:
+                        await Task.Run(delegate
+                        {
+                            using (var runner = new ChangeRunner(settings, settings.Change, cancellation.Token, changeProgress))
                                 runner.Run();
                         });
                         break;
@@ -729,6 +767,7 @@ namespace TideCombat
                 case WorkMode.Nightmare: return "梦魇巢穴";
                 case WorkMode.Garden: return "周常乐园";
                 case WorkMode.Merge: return "合并声骸";
+                case WorkMode.Change: return "改主属性";
                 default: return "已待命";
             }
         }
@@ -743,9 +782,24 @@ namespace TideCombat
                 case WorkMode.Nightmare: return "准备清理梦魇巢穴";
                 case WorkMode.Garden: return "准备执行周常乐园";
                 case WorkMode.Merge: return "准备合并弃置声骸";
+                case WorkMode.Change: return "准备修改声骸主属性";
                 case WorkMode.Preview: return "等待切回《鸣潮》客户端";
                 default: return "等待切回《鸣潮》客户端";
             }
+        }
+
+        private void RenderChange(ChangeReport report)
+        {
+            mode.Text = report.Finished ? "任务结束" : "改主属性";
+            state.Text = report.State;
+            target.Text = "已修改 " + report.Changed;
+            skills.Text = "—";
+            lastAction.Text = report.Finished ? "已停止" : "运行中";
+            if (report.Failure != null)
+                SetFooter(report.Failure, true);
+            else
+                SetFooter(string.Format("已修改 {0} 个 · {1}", report.Changed,
+                    report.Size.Width > 0 ? report.Size.Width + "×" + report.Size.Height : "—"), false);
         }
 
         private void RenderMerge(MergeReport report)

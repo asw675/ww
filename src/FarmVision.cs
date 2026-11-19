@@ -210,6 +210,22 @@ namespace TideCombat
             return FindNear(frame, label, 20, threshold, .70, out found);
         }
 
+        internal bool BestMatch(PixelFrame frame, string[] labels, int radius, double threshold,
+            double lightMinimum, out string label, out Rectangle box)
+        {
+            label = null;
+            box = Rectangle.Empty;
+            index.Load(frame);
+            foreach (string candidate in labels)
+            {
+                if (!FindNear(frame, candidate, radius, threshold, lightMinimum, out box))
+                    continue;
+                label = candidate;
+                return true;
+            }
+            return false;
+        }
+
         internal bool FindFirst(PixelFrame frame, string label, Rectangle area, int step, double threshold,
             double lightMinimum, out Rectangle found)
         {

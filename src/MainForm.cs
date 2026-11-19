@@ -69,7 +69,7 @@ namespace TideCombat
         private const int HotkeyMessage = 0x0312;
 
         private readonly Button start = Theme.Button("启动战斗", true);
-        private readonly ComboBox taskSelect = Theme.Select("刷 4C 声骸", "批量强化声骸", "无音区", "材料本", "模拟领域", "梦魇巢穴");
+        private readonly ComboBox taskSelect = Theme.Select("刷 4C 声骸", "批量强化声骸", "无音区", "材料本", "模拟领域", "梦魇巢穴", "周常乐园");
         private readonly Button runTask = Theme.Button("运行任务", true);
         private readonly Button preview = Theme.Button("仅检测");
         private readonly Button stop = Theme.Button("停止");
@@ -442,7 +442,8 @@ namespace TideCombat
                 case 2: BeginDomain(DomainKind.Tacet); break;
                 case 3: BeginDomain(DomainKind.Forgery); break;
                 case 4: BeginDomain(DomainKind.Simulation); break;
-                default: BeginNightmare(); break;
+                case 5: BeginNightmare(); break;
+                default: BeginGarden(); break;
             }
         }
 
@@ -498,6 +499,25 @@ namespace TideCombat
             await StartWork(current, false, false, false, false, true);
         }
 
+        private async void BeginGarden()
+        {
+            if (work != null || closing)
+                return;
+            CombatSettings current;
+            try { current = ReadControls(); }
+            catch (InvalidDataException error)
+            {
+                SetFooter(error.Message, true);
+                return;
+            }
+            if (current.Source == GameSource.Background || current.Source == GameSource.ManagedCloud)
+            {
+                SetFooter("周常乐园需要「前台」来源：本地客户端·前台或网页云游戏·前台。", true);
+                return;
+            }
+            await StartWork(current, false, false, false, false, false, true);
+        }
+
         private async void BeginEnhance()
         {
             if (work != null || closing)
@@ -524,7 +544,7 @@ namespace TideCombat
         }
 
         private async Task StartWork(CombatSettings current, bool isPreview, bool isFarm, bool isEnhance = false,
-            bool isDomain = false, bool isNightmare = false)
+            bool isDomain = false, bool isNightmare = false, bool isGarden = false)
         {
             settings = current;
             SaveSettings();
@@ -541,9 +561,10 @@ namespace TideCombat
             target.Text = character.Text = skills.Text = lastAction.Text = "—";
             SetRunning(true);
             mode.Text = isPreview ? "仅检测" : isFarm ? "刷4C" : isEnhance ? "强化声骸" :
-                isDomain ? "体力本" : isNightmare ? "梦魇巢穴" : "已待命";
+                isDomain ? "体力本" : isNightmare ? "梦魇巢穴" : isGarden ? "周常乐园" : "已待命";
             state.Text = isFarm ? "准备刷取 4C 声骸" : isEnhance ? "准备强化声骸" :
-                isDomain ? "准备刷取体力本" : isNightmare ? "准备清理梦魇巢穴" : "等待切回《鸣潮》客户端";
+                isDomain ? "准备刷取体力本" : isNightmare ? "准备清理梦魇巢穴" :
+                isGarden ? "准备执行周常乐园" : "等待切回《鸣潮》客户端";
             var progress = new Progress<FarmReport>(report =>
             {
                 if (!cancellation.IsCancellationRequested && ReferenceEquals(work, cancellation))
@@ -569,6 +590,11 @@ namespace TideCombat
                 if (!cancellation.IsCancellationRequested && ReferenceEquals(work, cancellation))
                     RenderNightmare(report);
             });
+            var gardenProgress = new Progress<GardenReport>(report =>
+            {
+                if (!cancellation.IsCancellationRequested && ReferenceEquals(work, cancellation))
+                    RenderGarden(report);
+            });
             bool needsElevation = false;
             string failure = null;
             try
@@ -586,6 +612,12 @@ namespace TideCombat
                     {
                         using (var runner = new NightmareNestRunner(settings, settings.Nightmare, cancellation.Token,
                             nightmareProgress))
+                            runner.Run();
+                    });
+                else if (isGarden)
+                    await Task.Run(delegate
+                    {
+                        using (var runner = new GardenRunner(settings, cancellation.Token, gardenProgress))
                             runner.Run();
                     });
                 else if (isFarm)
@@ -644,6 +676,20 @@ namespace TideCombat
             {
                 SetFooter(error.NativeErrorCode == 1223 ? "已取消管理员授权，暂未开始战斗。" : FriendlyError(error), true);
             }
+        }
+
+        private void RenderGarden(GardenReport report)
+        {
+            mode.Text = report.Finished ? "任务结束" : "周常乐园";
+            state.Text = report.State;
+            target.Text = "操作 " + report.Actions;
+            skills.Text = "—";
+            lastAction.Text = report.Finished ? "已停止" : "运行中";
+            if (report.Failure != null)
+                SetFooter(report.Failure, true);
+            else
+                SetFooter(string.Format("已执行 {0} 次操作 · {1}", report.Actions,
+                    report.Size.Width > 0 ? report.Size.Width + "×" + report.Size.Height : "—"), false);
         }
 
         private void RenderNightmare(NightmareReport report)

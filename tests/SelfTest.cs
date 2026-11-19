@@ -63,6 +63,8 @@ namespace TideCombat
             Check("echo enhancement rules match the reference", EnhanceChecks.Rules);
             Check("echo enhancement parses OCR stats", EnhanceChecks.Parsing);
             Check("echo enhancement state machine starts from the bag", EnhanceChecks.Flow);
+            Check("domain stamina and scroll math", DomainChecks.Arithmetic);
+            Check("domain options validate", DomainChecks.Options);
             Check("input cannot run without a verified foreground window", MissingWindow);
             Check("local game window is recognized without a readable title or installation path", LocalWindowIdentity);
             Check("input privilege preflight detects elevated clients and reads native process tokens", InputPrivilegePreflight);

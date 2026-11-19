@@ -69,8 +69,8 @@ namespace TideCombat
         private const int HotkeyMessage = 0x0312;
 
         private readonly Button start = Theme.Button("启动战斗", true);
-        private readonly Button farm = Theme.Button("刷4C声骸");
-        private readonly Button enhance = Theme.Button("强化声骸");
+        private readonly ComboBox taskSelect = Theme.Select("刷 4C 声骸", "批量强化声骸", "无音区", "材料本", "模拟领域");
+        private readonly Button runTask = Theme.Button("运行任务", true);
         private readonly Button preview = Theme.Button("仅检测");
         private readonly Button stop = Theme.Button("停止");
         private readonly Button profiles = Theme.Button("角色档案");
@@ -132,8 +132,7 @@ namespace TideCombat
             }
             LoadControls();
             start.Click += delegate { BeginRun(false); };
-            farm.Click += delegate { BeginFarm(); };
-            enhance.Click += delegate { BeginEnhance(); };
+            runTask.Click += delegate { BeginTask(); };
             preview.Click += delegate { BeginRun(true); };
             stop.Click += delegate { EndRun(); };
             profiles.Click += delegate { OpenProfiles(); };
@@ -174,9 +173,11 @@ namespace TideCombat
             header.Controls.Add(titleGroup, 0, 0);
             var actions = Theme.Row();
             actions.Anchor = AnchorStyles.Right;
+            taskSelect.Width = 132;
+            taskSelect.Margin = new Padding(0, 0, 7, 0);
             actions.Controls.Add(start);
-            actions.Controls.Add(farm);
-            actions.Controls.Add(enhance);
+            actions.Controls.Add(taskSelect);
+            actions.Controls.Add(runTask);
             actions.Controls.Add(preview);
             actions.Controls.Add(stop);
             stop.Enabled = false;
@@ -377,7 +378,7 @@ namespace TideCombat
                 SupportOpener = supportOpener.Checked, IunoC6 = settings.IunoC6, RocciaC6 = settings.RocciaC6,
                 Source = (GameSource)source.SelectedIndex, CheckLevitator = checkLevitator.Checked,
                 ChisaDps = settings.ChisaDps, SuomingDps = settings.SuomingDps, Farm = settings.Farm,
-                Enhance = settings.Enhance, PartyCharacters = new string[3],
+                Enhance = settings.Enhance, Domain = settings.Domain, PartyCharacters = new string[3],
                 DetectSkillKeys = detectKeys.Checked, ResonanceKey = keys[0].Text, EchoKey = keys[1].Text,
                 LiberationKey = keys[2].Text, ToolKey = keys[3].Text, Slots = new Rotation[3], Characters = settings.Characters
             };
@@ -431,6 +432,45 @@ namespace TideCombat
             await StartWork(current, false, true);
         }
 
+        private void BeginTask()
+        {
+            switch (taskSelect.SelectedIndex)
+            {
+                case 0: BeginFarm(); break;
+                case 1: BeginEnhance(); break;
+                case 2: BeginDomain(DomainKind.Tacet); break;
+                case 3: BeginDomain(DomainKind.Forgery); break;
+                default: BeginDomain(DomainKind.Simulation); break;
+            }
+        }
+
+        private async void BeginDomain(DomainKind kind)
+        {
+            if (work != null || closing)
+                return;
+            CombatSettings current;
+            try { current = ReadControls(); }
+            catch (InvalidDataException error)
+            {
+                SetFooter(error.Message, true);
+                return;
+            }
+            if (current.Source == GameSource.Background || current.Source == GameSource.ManagedCloud)
+            {
+                SetFooter("体力本需要「前台」来源：本地客户端·前台或网页云游戏·前台。", true);
+                return;
+            }
+            DomainOptions options = current.Domain ?? DomainOptions.Defaults();
+            options.Kind = kind;
+            using (var dialog = new DomainForm(options))
+            {
+                if (dialog.ShowDialog(this) != DialogResult.OK || dialog.Result == null)
+                    return;
+                current.Domain = dialog.Result;
+            }
+            await StartWork(current, false, false, false, true);
+        }
+
         private async void BeginEnhance()
         {
             if (work != null || closing)
@@ -456,7 +496,8 @@ namespace TideCombat
             await StartWork(current, false, false, true);
         }
 
-        private async Task StartWork(CombatSettings current, bool isPreview, bool isFarm, bool isEnhance = false)
+        private async Task StartWork(CombatSettings current, bool isPreview, bool isFarm, bool isEnhance = false,
+            bool isDomain = false)
         {
             settings = current;
             SaveSettings();
@@ -472,8 +513,10 @@ namespace TideCombat
             hasReadout = false;
             target.Text = character.Text = skills.Text = lastAction.Text = "—";
             SetRunning(true);
-            mode.Text = isPreview ? "仅检测" : isFarm ? "刷4C" : isEnhance ? "强化声骸" : "已待命";
-            state.Text = isFarm ? "准备刷取 4C 声骸" : isEnhance ? "准备强化声骸" : "等待切回《鸣潮》客户端";
+            mode.Text = isPreview ? "仅检测" : isFarm ? "刷4C" : isEnhance ? "强化声骸" :
+                isDomain ? "体力本" : "已待命";
+            state.Text = isFarm ? "准备刷取 4C 声骸" : isEnhance ? "准备强化声骸" :
+                isDomain ? "准备刷取体力本" : "等待切回《鸣潮》客户端";
             var progress = new Progress<FarmReport>(report =>
             {
                 if (!cancellation.IsCancellationRequested && ReferenceEquals(work, cancellation))
@@ -489,12 +532,23 @@ namespace TideCombat
                 if (!cancellation.IsCancellationRequested && ReferenceEquals(work, cancellation))
                     RenderEnhance(report);
             });
+            var domainProgress = new Progress<DomainReport>(report =>
+            {
+                if (!cancellation.IsCancellationRequested && ReferenceEquals(work, cancellation))
+                    RenderDomain(report);
+            });
             bool needsElevation = false;
             string failure = null;
             try
             {
                 if (isEnhance)
                     await Task.Run(() => EnhanceLoop.Run(settings, settings.Enhance, enhanceProgress, cancellation.Token));
+                else if (isDomain)
+                    await Task.Run(delegate
+                    {
+                        using (var runner = new DomainRunner(settings, settings.Domain, cancellation.Token, domainProgress))
+                            runner.Run();
+                    });
                 else if (isFarm)
                     await Task.Run(() => FarmLoop.Run(settings, settings.Farm, progress, cancellation.Token, concertoMeter));
                 else
@@ -551,6 +605,20 @@ namespace TideCombat
             {
                 SetFooter(error.NativeErrorCode == 1223 ? "已取消管理员授权，暂未开始战斗。" : FriendlyError(error), true);
             }
+        }
+
+        private void RenderDomain(DomainReport report)
+        {
+            mode.Text = report.Finished ? "任务结束" : "体力本";
+            state.Text = report.State;
+            target.Text = "轮次 " + report.Runs;
+            skills.Text = "体力 " + report.UsedStamina;
+            lastAction.Text = report.Finished ? "已停止" : "运行中";
+            if (report.Failure != null)
+                SetFooter(report.Failure, true);
+            else
+                SetFooter(string.Format("轮次 {0} · 消耗体力 {1} · {2}", report.Runs, report.UsedStamina,
+                    report.Size.Width > 0 ? report.Size.Width + "×" + report.Size.Height : "—"), false);
         }
 
         private void RenderEnhance(EnhanceReport report)
@@ -675,7 +743,7 @@ namespace TideCombat
 
         private void SetRunning(bool running)
         {
-            start.Enabled = farm.Enabled = enhance.Enabled = preview.Enabled = preferences.Enabled =
+            start.Enabled = runTask.Enabled = taskSelect.Enabled = preview.Enabled = preferences.Enabled =
                 team.Enabled = !running;
             stop.Enabled = running;
         }

@@ -144,96 +144,127 @@ namespace TideCombat
             return p;
         }
 
-        internal static bool Evaluate(List<EchoStat> stats, EnhanceOptions options, out string reason)
+        // Behaviour derived from the reference rules, implemented as a small profile
+        // plus an ordered list of independent checks instead of a single scan loop.
+        private sealed class Profile
         {
-            reason = string.Empty;
-            if (options == null) options = EnhanceOptions.Defaults();
-            var valid = new HashSet<string>(options.ValidStats ?? new string[0]);
-            int invalid = 0;
-            bool hasRate = false, hasDamage = false, encounteredCrit = false, checkedFirst = false;
-            double rateValue = 0, damageValue = 0;
-            int total = stats.Count;
+            internal int Count;
+            internal int Invalid;
+            internal int ValidCount;
+            internal int Remaining;
+            internal bool HasRate, HasDamage;
+            internal double Rate, Damage;
+            internal bool FirstCritSeen;
+            internal string FirstCritName;
+            internal double FirstCritValue;
+            internal string InvalidBeforeCrit;
+            internal bool FirstStatValid;
+        }
 
-            foreach (EchoStat stat in stats)
+        private static Profile Build(List<EchoStat> stats, EnhanceOptions options, HashSet<string> valid)
+        {
+            var profile = new Profile { Count = stats.Count, Remaining = 5 - stats.Count, FirstStatValid = true };
+            bool requireOrder = options.RequireValidBeforeCrit && valid.Contains("暴击") && valid.Contains("暴击伤害");
+            bool encounteredCrit = false;
+            for (int index = 0; index < stats.Count; index++)
             {
+                EchoStat stat = stats[index];
                 bool isCrit = stat.Name == "暴击" || stat.Name == "暴击伤害";
-                if (options.RequireValidBeforeCrit && valid.Contains("暴击") && valid.Contains("暴击伤害") &&
-                    !encounteredCrit)
+                bool isValid = valid.Contains(stat.Name);
+                if (requireOrder && !encounteredCrit)
                 {
-                    if (!isCrit && !valid.Contains(stat.Name))
-                    {
-                        reason = "双爆前含无效_" + stat.Name;
-                        return false;
-                    }
+                    if (!isCrit && !isValid && profile.InvalidBeforeCrit == null)
+                        profile.InvalidBeforeCrit = stat.Name;
                     if (isCrit)
                         encounteredCrit = true;
                 }
-                bool isValid = valid.Contains(stat.Name);
+                if (!isValid)
+                    profile.Invalid++;
+                if (index == 0)
+                    profile.FirstStatValid = isValid;
+                if (!isCrit)
+                    continue;
+                if (!profile.FirstCritSeen)
+                {
+                    profile.FirstCritSeen = true;
+                    profile.FirstCritName = stat.Name;
+                    profile.FirstCritValue = stat.Value;
+                }
                 if (stat.Name == "暴击")
                 {
-                    hasRate = true;
-                    rateValue += stat.Value;
-                    if (valid.Contains("暴击") && !checkedFirst)
-                    {
-                        checkedFirst = true;
-                        if (stat.Value < options.FirstCritMinimum)
-                        {
-                            reason = "首条暴击不足_" + stat.Value.ToString("0.0");
-                            return false;
-                        }
-                    }
+                    profile.HasRate = true;
+                    profile.Rate += stat.Value;
                 }
-                else if (stat.Name == "暴击伤害")
+                else
                 {
-                    hasDamage = true;
-                    damageValue += stat.Value;
-                    if (valid.Contains("暴击伤害") && !checkedFirst)
-                    {
-                        checkedFirst = true;
-                        if (stat.Value / 2 < options.FirstCritMinimum)
-                        {
-                            reason = "首条爆伤不足_" + stat.Value.ToString("0.0");
-                            return false;
-                        }
-                    }
+                    profile.HasDamage = true;
+                    profile.Damage += stat.Value;
                 }
-                if (!isValid)
-                    invalid++;
             }
+            profile.ValidCount = profile.Count - profile.Invalid;
+            return profile;
+        }
 
-            if (options.RequireBothCrit)
+        internal static bool Evaluate(List<EchoStat> stats, EnhanceOptions options, out string reason)
+        {
+            reason = string.Empty;
+            if (options == null)
+                options = EnhanceOptions.Defaults();
+            var valid = new HashSet<string>(options.ValidStats ?? new string[0]);
+            Profile profile = Build(stats, options, valid);
+            foreach (Func<Profile, EnhanceOptions, string> rule in Rules)
             {
-                int missing = (hasRate ? 0 : 1) + (hasDamage ? 0 : 1);
-                int remainingSlots = 5 - total;
-                if (remainingSlots < missing)
-                {
-                    reason = "无法凑齐双爆_缺" + missing;
-                    return false;
-                }
-            }
-            if (hasRate && hasDamage)
-            {
-                double score = rateValue + damageValue / 2;
-                if (score < options.CritTotalMinimum)
-                {
-                    reason = "双爆总计不足_" + score.ToString("0.0");
-                    return false;
-                }
-            }
-            if (total == 1 && options.FirstMustBeValid && invalid == 1)
-            {
-                reason = "首条无效";
-                return false;
-            }
-            int validCount = total - invalid;
-            int slots = 5 - total;
-            if (validCount + slots < options.ValidCountMinimum)
-            {
-                reason = "有效词条不足_上限" + (validCount + slots);
+                string failure = rule(profile, options);
+                if (failure == null)
+                    continue;
+                reason = failure;
                 return false;
             }
             return true;
         }
+
+        private static readonly Func<Profile, EnhanceOptions, string>[] Rules =
+        {
+            (profile, options) => profile.InvalidBeforeCrit == null ? null : "双爆前含无效_" + profile.InvalidBeforeCrit,
+            (profile, options) =>
+            {
+                if (!profile.FirstCritSeen)
+                    return null;
+                bool checkedType = options.ValidStats != null &&
+                    Array.IndexOf(options.ValidStats, profile.FirstCritName) >= 0;
+                if (!checkedType)
+                    return null;
+                double value = profile.FirstCritName == "暴击伤害" ? profile.FirstCritValue / 2 : profile.FirstCritValue;
+                return value >= options.FirstCritMinimum ? null :
+                    "首条" + (profile.FirstCritName == "暴击" ? "暴击" : "爆伤") + "不足_" +
+                    profile.FirstCritValue.ToString("0.0");
+            },
+            (profile, options) =>
+            {
+                if (!options.RequireBothCrit)
+                    return null;
+                int missing = (profile.HasRate ? 0 : 1) + (profile.HasDamage ? 0 : 1);
+                return profile.Remaining < missing ? "无法凑齐双爆_缺" + missing : null;
+            },
+            (profile, options) =>
+            {
+                if (!profile.HasRate || !profile.HasDamage)
+                    return null;
+                double score = profile.Rate + profile.Damage / 2;
+                return score >= options.CritTotalMinimum ? null : "双爆总计不足_" + score.ToString("0.0");
+            },
+            (profile, options) =>
+            {
+                if (profile.Count != 1 || !options.FirstMustBeValid || profile.Invalid != 1)
+                    return null;
+                return "首条无效";
+            },
+            (profile, options) =>
+            {
+                return profile.ValidCount + profile.Remaining >= options.ValidCountMinimum ? null :
+                    "有效词条不足_上限" + (profile.ValidCount + profile.Remaining);
+            }
+        };
     }
 
     internal enum EnhanceScan { None, Cultivate, EchoSkill, StageInsert, EnhanceButtons, Dialog, Stats }

@@ -9,6 +9,7 @@
 - 交接快照用同一份参考源码完成了构建和回放，`--reference` 套件 112 项通过。独立的真实浏览器用例另见未完成项。
 - 新增 4C 声骸刷取（`src/Farm4C.cs`、`src/FarmLoop.cs`、`src/FarmVision.cs`、`src/FarmInput.cs`、`src/EchoDetector.cs`、`src/MinimapNavigator.cs`）：复刻 `FarmEchoTask` 的传送、寻路、进本、战斗、YOLO 拾取、重开与复活循环；随包携带 `echo.onnx`、`arrow.bin` 与 ONNX Runtime。`tests/FarmChecks.cs` 用合成状态机验证流程。逐项差异见 `docs/FARM4C.md`。
 - 自动战斗新增「角色倒下后自动点击复活」，替代原先的手动恢复等待。
+- 新增体力本（`src/DomainRunner.cs`、`src/DomainForm.cs`、`src/WorldSession.cs`）：无音区/材料本/模拟领域，复用世界操作层；数值与滚动公式有离线测试。
 - 新增批量强化声骸（`src/EchoEnhanceTask.cs`、`src/EnhanceLoop.cs`、`src/EnhanceForm.cs`）：复刻 `EnhanceEchoTask` 的词条判定与强化/弃置/锁定流程，规则用 `tests/EnhanceChecks.cs` 覆盖。
 - 参考的是 `ok-wuthering-waves-master` 本地快照。`config.py` 标为 `dev`，中文更新日志首项为 `v3.8.4`。`AutoCombatTask.py`、`CombatCheck.py` 和 `BaseCombatTask.py` 的 SHA-256 前缀依次为 `5A2745060107`、`94AD744B908E`、`55E9E4977ACD`。
 

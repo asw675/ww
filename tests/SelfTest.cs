@@ -77,6 +77,7 @@ namespace TideCombat
             Check("daily options validate", DailyChecks.Options);
             Check("account key normalisation", AccountChecks.Keys);
             Check("account store round-trip and validation", AccountChecks.Store);
+            Check("per-account config applies and restores", AccountChecks.Config);
             Check("input cannot run without a verified foreground window", MissingWindow);
             Check("local game window is recognized without a readable title or installation path", LocalWindowIdentity);
             Check("input privilege preflight detects elevated clients and reads native process tokens", InputPrivilegePreflight);

@@ -43,9 +43,24 @@
 
 `DailyTask`、`FarmEchoTask`、`EnhanceEchoTask`、`TacetTask`、`ForgeryTask`、`SimulationTask`、`NightmareNestTask`、`GardenTask`、`MergeEchoTask`、`ChangeEchoTask`。
 
+## 按账号覆盖配置
+
+`config` 可包含以下分组（键名大小写不敏感），执行前应用、执行后恢复：
+
+| 分组 | 可覆盖字段 |
+|---|---|
+| `Farm` | Teleport、TeleportMode、BossIndex、BossLevel、RepeatCount、WaitSeconds、SwitchHealer、Pickup、Boss |
+| `Daily` | Farm、TacetIndex、ForgeryIndex、Material、FarmNightmareEcho、AutoNightmare、CheckGarden、MergeIfNeeded、Farm4C |
+| `Enhance` | RequireBothCrit、RequireValidBeforeCrit、CritTotalMinimum、FirstCritMinimum、ValidCountMinimum、FirstMustBeValid、ValidStats、PauseAfterSuccess |
+| `Domain` | Kind、Index、Material、MaxStamina |
+| `Nightmare` | TacetNest、Purification、CaptureOnce |
+| `Change` | Target |
+| `Combat` | AutoTarget、AutoRevive、UseLiberation、RotateParty、PreferConcerto、SwitchAtLowHealth、SupportOpener、DetectSkillKeys、CheckLevitator、Source、各技能键 |
+
+枚举可用数字或名称；`ValidStats` 为字符串数组。
+
 ## 已知限制
 
-1. `config` 字段目前只做校验与保存，尚未逐项覆盖任务设置（参考实现会按账号应用独立配置）。
-2. 配置界面为简化列表，未实现参考的卡片排序/拖拽与完整校验提示。
-3. 原生 ComboBox 依赖国际服登录框；其他登录界面走 OCR。
-4. 未实机验证账号切换与登录。
+1. 配置界面为简化列表，未实现参考的卡片排序/拖拽与完整校验提示。
+2. 原生 ComboBox 依赖国际服登录框；其他登录界面走 OCR。
+3. 未实机验证账号切换与登录。

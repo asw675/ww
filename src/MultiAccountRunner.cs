@@ -124,7 +124,7 @@ namespace TideCombat
                         throw new InvalidOperationException("登录列表找不到账号：" + entry.account_key);
                     if (!Login())
                         throw new InvalidOperationException("账号登录超时：" + entry.account_key);
-                    RunConfiguredTask(entry.task);
+                    RunConfiguredTask(entry);
                     EnsureWorld();
                     store.RecordResult(entry, "success", string.Empty);
                     completed.Add(entry.account_key);
@@ -142,7 +142,21 @@ namespace TideCombat
             Finish();
         }
 
-        private void RunConfiguredTask(AccountTaskReference reference)
+        private void RunConfiguredTask(AccountEntry entry)
+        {
+            AccountSnapshot snapshot = AccountConfig.Snapshot(settings);
+            try
+            {
+                AccountConfig.Apply(settings, entry.config);
+                RunTaskByReference(entry.task);
+            }
+            finally
+            {
+                AccountConfig.Restore(settings, snapshot);
+            }
+        }
+
+        private void RunTaskByReference(AccountTaskReference reference)
         {
             string name = reference == null ? null : reference.@class;
             switch (name)

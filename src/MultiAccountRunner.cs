@@ -162,6 +162,8 @@ namespace TideCombat
             switch (name)
             {
                 case null:
+                    Report("登录成功，任务为 None，跳过");
+                    break;
                 case "DailyTask":
                     RunDaily();
                     break;
@@ -291,6 +293,7 @@ namespace TideCombat
                 }
                 return null;
             }
+            OpenAccountDropdown();
             var lines = world.Read(0, 0, 1, 1);
             foreach (OcrLine line in lines)
             {
@@ -323,6 +326,7 @@ namespace TideCombat
                 world.Sleep(1000);
                 return SameAccount(AccountKeys.FromOcr(combo.Selected()), key);
             }
+            OpenAccountDropdown();
             var lines = world.Read(0, 0, 1, 1);
             foreach (OcrLine line in lines)
             {
@@ -334,6 +338,30 @@ namespace TideCombat
                 return true;
             }
             return false;
+        }
+
+        private void OpenAccountDropdown()
+        {
+            var lines = world.Read(0, 0, 1, 1);
+            OcrLine account = null;
+            bool login = false;
+            int count = 0;
+            foreach (OcrLine line in lines)
+            {
+                string text = line.Text ?? string.Empty;
+                if (text.Contains("*"))
+                {
+                    count++;
+                    if (account == null)
+                        account = line;
+                }
+                if (LoginTexts.Any(value => text.IndexOf(value, StringComparison.OrdinalIgnoreCase) >= 0))
+                    login = true;
+            }
+            if (account == null || count != 1 || !login)
+                return;
+            world.Click(account.Box);
+            world.Sleep(1500);
         }
 
         private bool Login()

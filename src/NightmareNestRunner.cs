@@ -86,6 +86,7 @@ namespace TideCombat
         private readonly Dictionary<string, int> deaths = new Dictionary<string, int>();
         private EchoDetector detector;
         private int nests;
+        private bool captureDone;
 
         internal NightmareNestRunner(CombatSettings settings, NightmareOptions options, CancellationToken token,
             IProgress<NightmareReport> progress)
@@ -133,12 +134,15 @@ namespace TideCombat
                 Report("处理巢穴 " + (nests + 1));
                 FightNest(target);
                 nests++;
+                if (captureDone)
+                    break;
             }
             EnsureWorld();
-            Report("全部巢穴处理完成");
+            string final = captureDone ? "已捕获声骸，任务结束" : "全部巢穴处理完成";
+            Report(final);
             progress.Report(new NightmareReport
             {
-                State = "全部巢穴处理完成", Nests = nests, Finished = true,
+                State = final, Nests = nests, Finished = true,
                 Size = world.Captured ? new Size(world.Frame.Width, world.Frame.Height) : Size.Empty
             });
         }
@@ -260,12 +264,8 @@ namespace TideCombat
                 bool dropped = CollectEcho();
                 if (dropped && options.CaptureOnce)
                 {
+                    captureDone = true;
                     Report("已捕获声骸，结束梦魇巢穴任务");
-                    progress.Report(new NightmareReport
-                    {
-                        State = "已捕获声骸", Nests = nests, Finished = true,
-                        Size = world.Captured ? new Size(world.Frame.Width, world.Frame.Height) : Size.Empty
-                    });
                     return;
                 }
                 if (!dropped && !team)

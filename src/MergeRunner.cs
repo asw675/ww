@@ -29,6 +29,7 @@ namespace TideCombat
     {
         private readonly CancellationToken token;
         private readonly WorldSession world;
+        private readonly CombatSettings settings;
         private readonly IProgress<MergeReport> progress;
         private int batches;
 
@@ -36,6 +37,7 @@ namespace TideCombat
         {
             this.token = token;
             this.progress = progress;
+            this.settings = settings;
             world = new WorldSession(settings, token);
         }
 
@@ -47,11 +49,13 @@ namespace TideCombat
                 return;
             }
             Report("打开背包");
-            world.Key('B');
+            char bag = string.IsNullOrEmpty(settings.BagKey) ? 'B' : settings.BagKey[0];
+            world.Key(bag);
             world.Sleep(400);
             if (!world.WaitUntil(delegate { return !world.TeamHud; }, 5000))
             {
-                Fail("无法用 B 打开背包（可在设置里改背包键后重试）。");
+                EnsureWorld();
+                Fail("无法用 " + bag + " 打开背包（请在设置里确认背包键）。");
                 return;
             }
             world.Sleep(3000);
@@ -61,6 +65,7 @@ namespace TideCombat
                 world.FindNear("cancel_button_highlight_hcenter_vcenter", .80, out cancel);
             if (!dialog)
             {
+                EnsureWorld();
                 Fail("需要至少 1000 个弃置声骸才能合成。");
                 return;
             }

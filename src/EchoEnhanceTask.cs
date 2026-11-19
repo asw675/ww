@@ -157,6 +157,9 @@ namespace TideCombat
             internal bool FirstCritSeen;
             internal string FirstCritName;
             internal double FirstCritValue;
+            internal bool FirstCheckedSeen;
+            internal string FirstCheckedName;
+            internal double FirstCheckedValue;
             internal string InvalidBeforeCrit;
             internal bool FirstStatValid;
         }
@@ -189,6 +192,12 @@ namespace TideCombat
                     profile.FirstCritSeen = true;
                     profile.FirstCritName = stat.Name;
                     profile.FirstCritValue = stat.Value;
+                }
+                if (!profile.FirstCheckedSeen && isValid)
+                {
+                    profile.FirstCheckedSeen = true;
+                    profile.FirstCheckedName = stat.Name;
+                    profile.FirstCheckedValue = stat.Value;
                 }
                 if (stat.Name == "暴击")
                 {
@@ -228,16 +237,13 @@ namespace TideCombat
             (profile, options) => profile.InvalidBeforeCrit == null ? null : "双爆前含无效_" + profile.InvalidBeforeCrit,
             (profile, options) =>
             {
-                if (!profile.FirstCritSeen)
+                if (!profile.FirstCheckedSeen)
                     return null;
-                bool checkedType = options.ValidStats != null &&
-                    Array.IndexOf(options.ValidStats, profile.FirstCritName) >= 0;
-                if (!checkedType)
-                    return null;
-                double value = profile.FirstCritName == "暴击伤害" ? profile.FirstCritValue / 2 : profile.FirstCritValue;
+                double value = profile.FirstCheckedName == "暴击伤害"
+                    ? profile.FirstCheckedValue / 2 : profile.FirstCheckedValue;
                 return value >= options.FirstCritMinimum ? null :
-                    "首条" + (profile.FirstCritName == "暴击" ? "暴击" : "爆伤") + "不足_" +
-                    profile.FirstCritValue.ToString("0.0");
+                    "首条" + (profile.FirstCheckedName == "暴击" ? "暴击" : "爆伤") + "不足_" +
+                    profile.FirstCheckedValue.ToString("0.0");
             },
             (profile, options) =>
             {

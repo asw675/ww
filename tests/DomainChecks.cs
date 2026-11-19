@@ -14,19 +14,22 @@ namespace TideCombat
         {
             int current, backup, total;
             DomainMath.ParseStamina(new[] { "160/240" }, out current, out backup, out total);
-            Require(current == 160 && total == 240 && backup == 80, "成对体力解析错误");
+            Require(current == 160 && backup == 0 && total == 160, "斜杠右侧是上限，不应算作备用体力");
+
+            DomainMath.ParseStamina(new[] { "160/240", "80" }, out current, out backup, out total);
+            Require(current == 160 && backup == 80 && total == 240, "备用体力应取自单独数字");
 
             DomainMath.ParseStamina(new[] { "120" }, out current, out backup, out total);
-            Require(current == 0 && backup == 120 && total == 120, "备用体力解析错误");
+            Require(current == 0 && backup == 120 && total == 120, "只有数字时按参考视为备用体力");
 
             double previous = 0;
             for (int serial = 1; serial <= 20; serial++)
             {
-                double y = DomainMath.ScrollOffset(.1963, serial, 21, 4);
+                double y = DomainMath.ScrollOffset(.1963, serial, 21, new[] { 4, 5, 5, 7 });
                 Require(y > previous && y <= .8806, "滚动位置应递增且不超过底部");
                 previous = y;
             }
-            double fallback = DomainMath.ScrollOffset(0, 5, 0, 4);
+            double fallback = DomainMath.ScrollOffset(0, 5, 0, new[] { 4, 5, 5, 7 });
             Require(Math.Abs(fallback - .1963) < 1e-9, "无总数量时应回退顶部");
         }
 

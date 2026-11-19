@@ -40,28 +40,37 @@ namespace TideCombat
             foreach (string text in texts)
             {
                 string value = text ?? string.Empty;
-                Match pair = Regex.Match(value, @"(\d+)\s*/\s*(\d+)");
+                Match pair = Regex.Match(value, @"(?<!\d)(\d+)\s*/\s*(\d+)(?!\d)");
                 if (pair.Success)
                 {
                     current = int.Parse(pair.Groups[1].Value);
-                    total = int.Parse(pair.Groups[2].Value);
-                    backup = Math.Max(0, total - current);
                     continue;
                 }
-                Match number = Regex.Match(value, @"(\d+)");
+                Match number = Regex.Match(value, @"(?<!\d)(\d+)(?!\d)");
                 if (number.Success && backup == 0)
                     backup = int.Parse(number.Groups[1].Value);
             }
             total = current + backup;
         }
 
-        internal static double ScrollOffset(double top, int serial, int total, int groups)
+        internal static double ScrollOffset(double top, int serial, int total, int[] structure)
         {
             if (total <= 0)
                 return .1963;
             double start = Math.Max(.1, Math.Min(.5, top));
+            int groups = structure == null ? 1 : structure.Length;
+            int crossed = 0, sum = 0;
+            if (structure != null)
+            {
+                foreach (int group in structure)
+                {
+                    sum += group;
+                    if (serial > sum) crossed++;
+                    else break;
+                }
+            }
             double item = (.8806 - start - Math.Max(0, groups - 1) * .028) / total;
-            return Math.Min(.8806, start + item * serial + Math.Max(0, groups - 1) * .028);
+            return Math.Min(.8806, start + item * serial + crossed * .028);
         }
     }
 
@@ -106,7 +115,7 @@ namespace TideCombat
                 Fail("无法回到游戏世界。");
                 return;
             }
-            int mustUse = 0, recovery = 0;
+            int mustUse = options.MaxStamina, recovery = 0;
             while (!token.IsCancellationRequested)
             {
                 Report("读取体力");
@@ -157,6 +166,7 @@ namespace TideCombat
                 if (combat != CombatOutcome.Finished)
                 {
                     EnsureWorld();
+                    TeleportToHeal();
                     return false;
                 }
                 world.Sleep(3000);
@@ -172,11 +182,12 @@ namespace TideCombat
                 world.Sleep(4000);
                 if (!canContinue)
                 {
-                    world.Click(0.42, 0.84);
+                    world.Click(options.Kind == DomainKind.Tacet ? 0.365 : 0.42, 0.853);
                     EnsureWorld();
                     return true;
                 }
-                world.Click(0.68, 0.84);
+                world.Click(options.Kind == DomainKind.Tacet ? 0.640 : 0.68,
+                    options.Kind == DomainKind.Tacet ? 0.851 : 0.84);
                 SkipDialog();
                 WaitTeam();
                 world.Sleep(1000);
@@ -198,6 +209,10 @@ namespace TideCombat
             world.Sleep(1500);
             world.Click(0.24, KindRow());
             world.Sleep(2000);
+            if (ReadStamina(out current, out backup, out total))
+                return true;
+            world.Click(0.04, 0.4);
+            world.Sleep(1000);
             return ReadStamina(out current, out backup, out total);
         }
 
@@ -262,11 +277,26 @@ namespace TideCombat
                 return true;
             }
             double top = world.Ui != null && world.Ui.ScrollTop > 0 ? world.Ui.ScrollTop : .1963;
-            world.Click(0.973, DomainMath.ScrollOffset(top, serial, total, structure.Length));
+            double offset = DomainMath.ScrollOffset(top, serial, total, structure);
+            world.Click(0.973, offset);
             world.Sleep(1200);
             rows = world.FindAll("boss_proceed", .86, .18, 1, .90, 4, .88, .74);
             if (rows.Count == 0)
                 return false;
+            if (index >= rows.Count)
+            {
+                double lowest = 0;
+                foreach (Rectangle row in rows)
+                    lowest = Math.Max(lowest, (row.Y + row.Height / 2.0) / 900.0);
+                if (lowest < .73)
+                {
+                    world.Click(0.973, Math.Min(.8806, offset + .018));
+                    world.Sleep(1200);
+                    rows = world.FindAll("boss_proceed", .86, .18, 1, .90, 4, .88, .74);
+                    if (rows.Count == 0)
+                        return false;
+                }
+            }
             world.Click(rows[Math.Min(index, rows.Count - 1)]);
             world.Sleep(1000);
             return true;
@@ -419,6 +449,25 @@ namespace TideCombat
             else
                 canContinue = true;
             return true;
+        }
+
+        private void TeleportToHeal()
+        {
+            world.Key('M');
+            world.Sleep(2200);
+            Rectangle point;
+            if (!world.FindIn("map_way_point", .25, .20, .75, .80, 5, .86, .74, out point))
+                return;
+            world.Click(point);
+            world.Sleep(1500);
+            Rectangle travel;
+            if (world.FindNear("gray_teleport", .72, out travel))
+                world.Click(travel);
+            else
+                world.Click(0.89, 0.92);
+            world.Sleep(2000);
+            SkipDialog();
+            WaitTeam();
         }
 
         private void EscCancel()

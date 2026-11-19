@@ -62,6 +62,7 @@ namespace TideCombat
             Check("4C farm runs the Fenrico and Fallacy special flows", FarmChecks.BossScripts);
             Check("echo enhancement rules match the reference", EnhanceChecks.Rules);
             Check("echo enhancement parses OCR stats", EnhanceChecks.Parsing);
+            Check("echo enhancement first-crit uses the first valid crit type", EnhanceChecks.FirstCheckedCrit);
             Check("echo enhancement state machine starts from the bag", EnhanceChecks.Flow);
             Check("domain stamina and scroll math", DomainChecks.Arithmetic);
             Check("domain options validate", DomainChecks.Options);

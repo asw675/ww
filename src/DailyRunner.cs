@@ -124,13 +124,19 @@ namespace TideCombat
                     Material = options.Material,
                     MaxStamina = 180 - usedStamina
                 };
+                int before = usedStamina;
+                int reported = 0;
                 RunNested(delegate
                 {
-                    using (var runner = new DomainRunner(settings, domain, token,
-                        new Progress<DomainReport>(delegate { })))
+                    var recorder = new Progress<DomainReport>(delegate (DomainReport report)
+                    {
+                        if (report.UsedStamina > 0)
+                            reported = report.UsedStamina;
+                    });
+                    using (var runner = new DomainRunner(settings, domain, token, recorder))
                         runner.Run();
                 });
-                usedStamina = 180;
+                usedStamina = Math.Min(180, before + Math.Max(0, reported));
             }
 
             Report("领取日常奖励");

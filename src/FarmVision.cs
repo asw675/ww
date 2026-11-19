@@ -210,6 +210,57 @@ namespace TideCombat
             return FindNear(frame, label, 20, threshold, .70, out found);
         }
 
+        internal string BestMatchScored(PixelFrame frame, string[] labels, string[] priority, int radius,
+            double threshold, double lightMinimum, out Rectangle box)
+        {
+            box = Rectangle.Empty;
+            index.Load(frame);
+            string bestLabel = null;
+            double bestScore = 0;
+            foreach (string candidate in labels)
+            {
+                Rectangle found;
+                double score = FindNearScore(frame, candidate, radius, threshold, lightMinimum, out found);
+                if (score <= 0)
+                    continue;
+                bool boosted = priority != null && Array.IndexOf(priority, candidate) >= 0;
+                double ranked = score + (boosted ? 10 : 0);
+                if (ranked <= bestScore)
+                    continue;
+                bestScore = ranked;
+                bestLabel = candidate;
+                box = found;
+            }
+            return bestLabel;
+        }
+
+        private double FindNearScore(PixelFrame frame, string label, int radius, double threshold,
+            double lightMinimum, out Rectangle found)
+        {
+            found = Rectangle.Empty;
+            double best = 0;
+            foreach (VisualPattern pattern in PatternBank.For(label))
+            {
+                Rectangle expected = pattern.Map(frame.Width, 0);
+                foreach (int dy in Small)
+                {
+                    if (Math.Abs(dy) > radius) continue;
+                    foreach (int dx in Small)
+                    {
+                        if (Math.Abs(dx) > radius) continue;
+                        var trial = new Rectangle(expected.X + dx, expected.Y + dy, expected.Width, expected.Height);
+                        if (!Inside(frame, trial)) continue;
+                        double score = pattern.Signature.Similarity(index.Sample(trial));
+                        if (score < threshold || score <= best) continue;
+                        if (!PassesLight(frame, pattern, trial, lightMinimum)) continue;
+                        best = score;
+                        found = trial;
+                    }
+                }
+            }
+            return best;
+        }
+
         internal bool BestMatch(PixelFrame frame, string[] labels, int radius, double threshold,
             double lightMinimum, out string label, out Rectangle box)
         {

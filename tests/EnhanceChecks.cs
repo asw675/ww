@@ -45,6 +45,17 @@ namespace TideCombat
             Require(Pass(relaxed, Stat("防御", 10)), "放宽条件后单条防御应通过");
         }
 
+        internal static void FirstCheckedCrit()
+        {
+            var options = EnhanceOptions.Defaults();
+            options.ValidStats = new[] { "暴击", "攻击百分比" };
+            options.ValidCountMinimum = 1;
+            options.CritTotalMinimum = 10;
+            options.RequireValidBeforeCrit = false;
+            bool pass = Pass(options, Stat("暴击伤害", 12.0), Stat("暴击", 7.0));
+            Require(pass, "首条检查应取第一个有效暴击类型，而不是首个暴击词条");
+        }
+
         internal static void Parsing()
         {
             var lines = new List<OcrLine>

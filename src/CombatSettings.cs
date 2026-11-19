@@ -69,6 +69,7 @@ namespace TideCombat
             CheckLevitator = true;
             AutoRevive = true;
             ToolKey = "T";
+            BagKey = "B";
             Farm = FarmOptions.Defaults();
             Enhance = EnhanceOptions.Defaults();
             Domain = DomainOptions.Defaults();
@@ -88,6 +89,7 @@ namespace TideCombat
         public string EchoKey { get; set; }
         public string LiberationKey { get; set; }
         public string ToolKey { get; set; }
+        public string BagKey { get; set; }
         public bool SupportOpener { get; set; }
         public bool IunoC6 { get; set; }
         public bool RocciaC6 { get; set; }
@@ -120,6 +122,7 @@ namespace TideCombat
                 EchoKey = "Q",
                 LiberationKey = "R",
                 ToolKey = "T",
+                BagKey = "B",
                 SupportOpener = true,
                 CheckLevitator = true,
                 Farm = FarmOptions.Defaults(),
@@ -143,6 +146,8 @@ namespace TideCombat
                 throw new InvalidDataException("三个技能键须为不同的英文字母。");
             if (ToolKey == null || ToolKey.Length != 1 || ToolKey[0] < 'A' || ToolKey[0] > 'Z')
                 throw new InvalidDataException("探索工具键须为英文字母。");
+            if (BagKey == null || BagKey.Length != 1 || BagKey[0] < 'A' || BagKey[0] > 'Z')
+                BagKey = "B";
             if (PartyCharacters == null)
             {
                 // Version one did not have a built-in roster.

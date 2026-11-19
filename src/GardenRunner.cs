@@ -112,9 +112,8 @@ namespace TideCombat
                 box = Rectangle.Empty;
                 return false;
             }
-            if (world.Vision.BestMatch(world.Frame, Priority, 20, .82, .72, out label, out box))
-                return true;
-            return world.Vision.BestMatch(world.Frame, Labels, 20, .82, .72, out label, out box);
+            label = world.Vision.BestMatchScored(world.Frame, Labels, Priority, 20, .82, .72, out box);
+            return label != null;
         }
 
         private bool Handle(string label, Rectangle box)

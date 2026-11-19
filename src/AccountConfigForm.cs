@@ -9,7 +9,7 @@ namespace TideCombat
     {
         private static readonly string[] TaskClasses =
         {
-            "DailyTask", "FarmEchoTask", "EnhanceEchoTask", "TacetTask", "ForgeryTask",
+            "None", "DailyTask", "FarmEchoTask", "EnhanceEchoTask", "TacetTask", "ForgeryTask",
             "SimulationTask", "NightmareNestTask", "GardenTask", "MergeEchoTask", "ChangeEchoTask"
         };
 
@@ -102,7 +102,7 @@ namespace TideCombat
             list.Items.Clear();
             foreach (AccountEntry account in accounts)
             {
-                string taskName = account.task == null ? "DailyTask" : account.task.@class;
+                string taskName = account.task == null ? "None" : account.task.@class;
                 list.Items.Add(new ListViewItem(new[] { account.account_key, taskName }) { Checked = account.enabled });
             }
         }
@@ -119,15 +119,27 @@ namespace TideCombat
 
         private void SaveAccounts()
         {
+            var existing = new Dictionary<string, Dictionary<string, object>>(StringComparer.Ordinal);
+            try
+            {
+                foreach (AccountEntry account in store.Load())
+                    existing[account.account_key] = account.config;
+            }
+            catch (Exception) { }
             var accounts = new List<AccountEntry>();
             foreach (ListViewItem item in list.Items)
             {
+                string keyText = item.Text.Trim();
+                string taskName = item.SubItems[1].Text;
+                Dictionary<string, object> config;
+                if (!existing.TryGetValue(keyText, out config) || config == null)
+                    config = new Dictionary<string, object>();
                 accounts.Add(new AccountEntry
                 {
-                    account_key = item.Text.Trim(),
+                    account_key = keyText,
                     enabled = item.Checked,
-                    task = new AccountTaskReference { module = "TideCombat", @class = item.SubItems[1].Text },
-                    config = new Dictionary<string, object>()
+                    task = taskName == "None" ? null : new AccountTaskReference { module = "TideCombat", @class = taskName },
+                    config = config
                 });
             }
             try

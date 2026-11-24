@@ -14,6 +14,8 @@ namespace TideCombat
 
         internal static void Arithmetic()
         {
+            Require(DomainMath.WaitForCombatMs == 200000 && DomainMath.CombatTimeoutMs == 0,
+                "按原版等待开战 200 秒，开始战斗后不另设硬时限");
             int current, backup, total;
             DomainMath.ParseStamina(new[] { "160/240" }, out current, out backup, out total);
             Require(current == 160 && backup == 0 && total == 160, "斜杠右侧是上限，不应算作备用体力");
@@ -95,6 +97,13 @@ namespace TideCombat
             DomainOptions options = DomainOptions.Defaults();
             options.Validate();
             Require(options.Kind == DomainKind.Tacet && options.Index == 1, "默认体力本配置错误");
+            options.Index = 17; // 旧版配置仅有当前 Index。
+            DomainOptions forgery = options.ForKind(DomainKind.Forgery);
+            Require(forgery.Index == 1 && forgery.TacetIndex == 17, "缺省材料本序号不应沿用旧的无音区序号");
+            forgery.SetIndexForKind(DomainKind.Forgery, 8);
+            DomainOptions tacet = forgery.ForKind(DomainKind.Tacet);
+            Require(tacet.Index == 17 && tacet.ForgeryIndex == 8 && tacet.ForKind(DomainKind.Forgery).Index == 8,
+                "两类副本的序号应该独立保存并可重复切换");
             bool threw = false;
             try
             {
@@ -127,6 +136,16 @@ namespace TideCombat
             var waypoints = FarmVision.SortWaypoints(new[] { far, near, duplicate }, new Size(1600, 900));
             Require(waypoints.Count == 2 && waypoints[0] == near && waypoints[1] == far,
                 "重叠的大小信标应去重，尝试次序应按屏幕中心的距离排序");
+
+            Require(DomainMath.ReferenceCategoryPoint(DomainKind.Tacet, screen, new Rectangle(150, 644, 80, 27)) == new Point(384, 657) &&
+                DomainMath.ReferenceCategoryPoint(DomainKind.Forgery, screen, new Rectangle(150, 345, 80, 30)) == new Point(384, 360) &&
+                DomainMath.ReferenceCategoryPoint(DomainKind.Simulation, screen, new Rectangle(150, 254, 80, 32)) == new Point(384, 270),
+                "正常图鉴布局采用参考三类分类固定点");
+            Require(DomainMath.ReferenceCategoryPoint(DomainKind.Tacet, screen, new Rectangle(150, 440, 80, 27)).IsEmpty,
+                "分类位置偏移时不点击过期固定坐标");
+            Require(DomainMath.VerifiedReferencePoint(near, new Point(814, 446)) == new Point(814, 446) &&
+                DomainMath.VerifiedReferencePoint(near, far.Location) == new Point(822, 452),
+                "参考点在已验证按钮内时使用，否则落在按钮中心");
 
             foreach (string label in new[] { "重新挑战", "重新挑戰", "再次挑战", "再次挑戰", "Rechallenge" })
                 Require(DomainMath.RechallengeButton(new[] { new OcrLine { Text = label, Box = near, Score = .95f } }) == near,

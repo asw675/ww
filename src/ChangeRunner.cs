@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Drawing;
+using System.IO;
 using System.Linq;
 using System.Text.RegularExpressions;
 using System.Threading;
@@ -31,20 +32,22 @@ namespace TideCombat
 
     internal static class ChangeMath
     {
+        private const string HavocStat = "湮灭伤害加成";
+        private const string HavocOcrAlias = "灭伤害加成";
         private static readonly Regex Stat = new Regex(
             @"^(?:主(?:音)?属性:?)?([\u4e00-\u9fff]+)(?:\+?\d+(?:\.\d+)?%?)?$");
         private static readonly string[][] Fixes =
         {
             new[] { "凝夜自霜", "凝夜白霜" },
-            new[] { "主属性灭伤害加成", "主属性湮灭伤害加成" },
-            new[] { "主属性行射伤害加成", "主属性衍射伤害加成" },
-            new[] { "灭伤害加成", "主属性湮灭伤害加成" }
+            new[] { "主属性行射伤害加成", "主属性衍射伤害加成" }
         };
 
         internal static string Fix(string text)
         {
             if (string.IsNullOrEmpty(text))
                 return string.Empty;
+            if (text == HavocOcrAlias || text == "主属性" + HavocOcrAlias)
+                return "主属性" + HavocStat;
             foreach (string[] fix in Fixes)
             {
                 if (text.Contains(fix[0]))
@@ -78,6 +81,8 @@ namespace TideCombat
                     return "防御";
                 case "暴击率":
                     return "暴击";
+                case HavocOcrAlias:
+                    return HavocStat;
                 case "治疗效果加成":
                     return name;
                 default:
@@ -97,6 +102,33 @@ namespace TideCombat
                 result = line;
             }
             return result;
+        }
+
+        internal static string ReadCurrentStat(IEnumerable<OcrLine> lines)
+        {
+            var stats = lines.Where(line => line.Score >= .65f).Select(line => ReadStat(line.Text))
+                .Where(stat => stat != null).Distinct().ToArray();
+            return stats.Length == 1 ? stats[0] : null;
+        }
+
+        // Only an explicit selected-card level is evidence of zero/non-zero.
+        // The skill heading may appear in an unexpected/rearranged layout and
+        // cannot by itself authorize an irreversible Change action.
+        internal static int? ReadBagLevel(IEnumerable<OcrLine> levels)
+        {
+            int? level = null;
+            foreach (OcrLine line in levels)
+            {
+                int value;
+                string text = OcrText.Compact(line.Text);
+                if (line.Score < .65f || !Regex.IsMatch(text, @"^\+[0-9]{1,2}$") ||
+                    !int.TryParse(text.Substring(1), out value) || value > 25)
+                    continue;
+                if (level.HasValue && level.Value != value)
+                    return null;
+                level = value;
+            }
+            return level;
         }
     }
 
@@ -128,7 +160,7 @@ namespace TideCombat
             this.options = options;
             this.token = token;
             this.progress = progress;
-            world = new WorldSession(settings, token);
+            world = new WorldSession(settings, token, allowManagedMenuTask: true);
         }
 
         internal void Run()
@@ -142,7 +174,13 @@ namespace TideCombat
             }
             while (!token.IsCancellationRequested)
             {
-                if (!IsLevelZero())
+                int level;
+                if (!TryReadBagLevel(out level))
+                {
+                    Fail("未确认当前声骸等级，停止以避免误改主属性。");
+                    return;
+                }
+                if (level > 0)
                 {
                     RunLog.Info("改主属性", "没有可修改的声骸，任务结束 · 已修改=" + changed);
                     progress.Report(new ChangeReport
@@ -150,16 +188,22 @@ namespace TideCombat
                         State = "没有可修改的声骸，任务结束", Changed = changed, Finished = true,
                         Size = world.Captured ? new Size(world.Frame.Width, world.Frame.Height) : Size.Empty
                     });
+                    if (changed > 0)
+                        OpenScreenshotFolder();
                     return;
                 }
                 if (!ChangeOne(cultivate))
                     return;
-                changed++;
                 if (world.Tick())
                     Screenshots.Save(world.Frame, "success", string.Empty,
                         new Rectangle(144, 81, 448, 414));
+                // The reference increments after Esc. Preserve a confirmed
+                // acquisition even if navigation back subsequently fails;
+                // the received item still counts as a real completed change.
+                bool returned = ReturnToBag();
+                changed++;
                 Report("已修改 " + changed + " 个");
-                if (!ReturnToBag())
+                if (!returned)
                 {
                     Fail("返回背包超时。");
                     return;
@@ -198,7 +242,7 @@ namespace TideCombat
                 Fail("无法读取当前主属性。");
                 return false;
             }
-            if (current.Contains(options.Target))
+            if (ChangeMath.IsTarget(options.Target, current))
             {
                 Fail("目标属性与当前主属性一致，请修改背包筛选条件。");
                 return false;
@@ -213,9 +257,28 @@ namespace TideCombat
             world.Sleep(800);
             world.Click(0.52, 0.71);
             OcrLine target = WaitText(null, options.Target, 5000, mainStat: true);
-            if (target == null || !world.Click(target.Box))
+            if (target != null)
             {
-                Fail(target == null ? "未找到唯一的目标属性选项。" : "未成功点击目标属性选项。");
+                int route = world.InputRouteVersion;
+                world.Sleep(100);
+                // Re-read the exact option after the reference's settle
+                // delay; never click a stale or non-unique hit.
+                OcrLine refreshed = ChangeMath.FindTarget(world.Read(0, 0, 1, 1), options.Target);
+                if (world.InputRouteVersion != route || refreshed == null || !target.Box.IntersectsWith(refreshed.Box))
+                {
+                    Fail("目标属性选项在等待确认时已变化。");
+                    return false;
+                }
+                target = refreshed;
+                if (!world.ClickOnRoute(target.Box, route))
+                {
+                    Fail("未成功点击目标属性选项。");
+                    return false;
+                }
+            }
+            else
+            {
+                Fail("未找到唯一的目标属性选项。");
                 return false;
             }
             world.Sleep(500);
@@ -251,7 +314,7 @@ namespace TideCombat
                     return true;
                 }
                 world.Key((char)0x1B);
-                world.Sleep(700);
+                world.Sleep(1000);
             }
             return FindCultivate(out box);
         }
@@ -270,23 +333,61 @@ namespace TideCombat
             return false;
         }
 
-        private bool IsLevelZero()
+        private bool TryReadBagLevel(out int level)
         {
-            var lines = world.Read(0.66, 0.48, 0.77, 0.56);
-            foreach (OcrLine line in lines)
-                if (line.Text != null && line.Text.Contains("声骸技能"))
+            int route = world.InputRouteVersion;
+            int? confirmed = null;
+            int? previous = null;
+            bool found = world.WaitUntil(() =>
+            {
+                if (route != world.InputRouteVersion || !world.Captured)
+                    return false;
+                // Read the level locations used by the enhancement bag scanner.
+                // Include both known bag layouts, without assuming the first card
+                // is already selected in this manually filtered task.
+                var levels = world.Read(1098.0 / 1600, 149.0 / 900, 1158.0 / 1600, 202.0 / 900);
+                levels.AddRange(world.Read(1465.0 / 1600, 200.0 / 900, 1537.0 / 1600, 240.0 / 900));
+                int? candidate = ChangeMath.ReadBagLevel(levels);
+                if (route != world.InputRouteVersion || !world.Captured || !candidate.HasValue)
+                {
+                    previous = null;
+                    return false;
+                }
+                if (previous == candidate)
+                {
+                    confirmed = candidate;
                     return true;
-            return false;
+                }
+                previous = candidate;
+                return false;
+            }, 5000);
+            level = confirmed.GetValueOrDefault(-1);
+            return found && route == world.InputRouteVersion && confirmed.HasValue;
+        }
+
+        private static void OpenScreenshotFolder()
+        {
+            try
+            {
+                string directory = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "screenshots");
+                if (Directory.Exists(directory))
+                    using (var opened = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(directory)
+                    { UseShellExecute = true })) { }
+            }
+            catch (Exception error)
+            {
+                RunLog.Warn("改主属性", "打开截图目录失败 · " + error.Message);
+            }
         }
 
         private string ReadCurrentStat()
         {
-            OcrLine first = null;
+            string current = null;
             return world.WaitUntil(() =>
             {
-                first = world.Read(.09, .20, .15, .26).FirstOrDefault();
-                return first != null && !string.IsNullOrWhiteSpace(first.Text);
-            }, 5000) ? first.Text : null;
+                current = ChangeMath.ReadCurrentStat(world.Read(.09, .20, .15, .26));
+                return current != null;
+            }, 5000) ? current : null;
         }
 
         private OcrLine WaitText(RectangleF? area, string text, int timeoutMs, bool mainStat = false)

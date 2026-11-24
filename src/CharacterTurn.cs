@@ -126,8 +126,11 @@ namespace TideCombat
         internal long LastEntry = -60000, LastExit = -60000, LastFullHealerSwitch = -1;
         internal long LastIntro = -60000, LastOutro = -60000, LastDodge = -60000;
         internal long BuffStarted = -1, LastLiberation = -1;
+        internal long DeniaSecondLiberation = -1;
         internal int BuffDuration;
         internal readonly long[] LastSkill = { -60000, -60000, -60000 };
+        internal readonly double[] SkillCooldowns = new double[3];
+        internal long CooldownSampleAt = -1;
         internal bool FreeIntro, HasToolBox, InRecital;
         internal bool CartethyiaTransformed, CartethyiaTryMidAir;
         internal PhoebeMemory Phoebe;
@@ -153,6 +156,9 @@ namespace TideCombat
                     RoverForm = null;
                     break;
                 case "Denia":
+                    DeniaSecondLiberation = -1;
+                    Phase = 0;
+                    break;
                 case "Jinhsi":
                 case "Changli":
                 case "Lupa":
@@ -185,7 +191,22 @@ namespace TideCombat
 
         internal bool CarlottaReady(FreezeClock clock, long now)
         {
-            return Resource > 2 || Resource > 0 && clock.Elapsed(CarlottaResonanceAt, now) >= CarlottaResonanceCooldown || LiberationPrimed;
+            return Resource > 2 || Resource > 0 && (CooldownSampleAt >= 0 ?
+                RemainingCooldown(Skill.Resonance, clock, now) <= .2 :
+                CarlottaResonanceCooldown - clock.Elapsed(CarlottaResonanceAt, now) <= 200) || LiberationPrimed;
+        }
+
+        internal void ObserveCooldowns(HudSnapshot hud, long now)
+        {
+            CooldownSampleAt = now;
+            for (int i = 0; i < SkillCooldowns.Length; i++)
+                SkillCooldowns[i] = double.IsNaN(hud.Cooldowns[i]) ?
+                    hud.Skills[i] == SkillState.Cooling ? .3 : 0 : hud.Cooldowns[i];
+        }
+
+        internal double RemainingCooldown(Skill skill, FreezeClock clock, long now)
+        {
+            return CooldownSampleAt < 0 ? 0 : SkillCooldowns[(int)skill] - clock.Elapsed(CooldownSampleAt, now) / 1000.0;
         }
 
         internal long BuffRemaining(FreezeClock clock, long now)
@@ -207,16 +228,19 @@ namespace TideCombat
         internal readonly bool Intro;
         internal readonly bool SubDpsIntro;
         internal readonly bool FirstEngage;
+        internal readonly bool FarmEchoTask;
         internal readonly string Outro;
         internal readonly long Started;
         private readonly Func<HudSnapshot, long, bool> fastPerform;
         private readonly Func<bool> pendingExecution;
         private readonly bool? battleLiberation;
+        private readonly bool? openWorldAutoCombat;
         internal readonly FreezeClock Clock;
         internal HudSnapshot Hud;
         internal long Now;
         internal bool Succeeded;
         internal bool CastTimedOut;
+        internal string CombatExitReason;
         internal bool AnimationSeen;
         internal bool TeamHiddenDuringMove;
         internal bool AnimationAttackHeld;
@@ -234,13 +258,15 @@ namespace TideCombat
         internal bool QReady { get { return UsableWithoutCooldown(Skill.Echo); } }
         internal bool RReady { get { return MayUseLiberation && Hud.Keys[2] != '\0' && Hud.Skills[2] == SkillState.Ready; } }
         internal bool MayUseLiberation { get { return battleLiberation ?? (Settings.UseLiberation || Hud.InChallenge || !Hud.OpenWorld); } }
+        internal bool IsOpenWorldAutoCombat { get { return openWorldAutoCombat ?? !Hud.InRealm; } }
         internal bool WasBuffed { get { return Memory.BuffRemaining(Clock, Now) > 0; } }
         internal bool NeedFastPerform { get { return fastPerform != null && fastPerform(Hud, Now); } }
         internal bool ExecutionAvailable { get { return pendingExecution != null ? pendingExecution() : Hud.BreakPrompt; } }
 
         internal TurnContext(FighterMemory actor, FighterMemory[] team, CombatSettings settings, bool intro,
             string outro, long start, bool subDpsIntro = false, Func<HudSnapshot, long, bool> fastPerform = null,
-            FreezeClock clock = null, Func<bool> pendingExecution = null, bool firstEngage = false, bool? battleLiberation = null)
+            FreezeClock clock = null, Func<bool> pendingExecution = null, bool firstEngage = false, bool? battleLiberation = null,
+            bool? openWorldAutoCombat = null, bool farmEchoTask = false)
         {
             Memory = actor;
             Team = team;
@@ -248,11 +274,13 @@ namespace TideCombat
             Intro = intro;
             SubDpsIntro = intro && subDpsIntro;
             FirstEngage = firstEngage;
+            FarmEchoTask = farmEchoTask;
             Outro = outro;
             Started = start;
             this.fastPerform = fastPerform;
             this.pendingExecution = pendingExecution;
             this.battleLiberation = battleLiberation;
+            this.openWorldAutoCombat = openWorldAutoCombat;
             Clock = clock ?? new FreezeClock();
         }
 
@@ -305,7 +333,7 @@ namespace TideCombat
                 return skill == (int)Skill.Liberation && !rawLiberation && !MayUseLiberation ? 0 : Hud.Keys[skill];
             switch (button)
             {
-                case BattleButton.Jump: return 0x20;
+                case BattleButton.Jump: return Settings.JumpVirtualKey();
                 case BattleButton.MiddleClick: return 0x04;
                 case BattleButton.Interact: return 'F';
                 case BattleButton.Forward: return 'W';
@@ -333,7 +361,7 @@ namespace TideCombat
         private int heldAnimationTimeout;
         private AnimationInput animationActions;
         private int animationDelay;
-        private bool activeHold, sent, confirmation, holdSucceeded;
+        private bool activeHold, sent, confirmation, holdSucceeded, resonanceAttackDue;
         private bool possibleAnimationRequired, cooldownRecorded, liberationWasReady;
         private int holdKey;
         private readonly Dictionary<BattleButton, int> latched = new Dictionary<BattleButton, int>();
@@ -350,6 +378,14 @@ namespace TideCombat
         internal bool AnimationInProgress(long now)
         {
             return animationStartedAt >= 0 && now - animationStartedAt < AnimationTimeout() || confirmation && now - sentAt < 950;
+        }
+
+        internal bool ReferenceLiberationInProgress(long now)
+        {
+            return animationStartedAt >= 0 && now - animationStartedAt < AnimationTimeout() ||
+                activeHold && move != null && move.Type == MoveType.HoldLiberation ||
+                move != null && move.Type == MoveType.Incarnation && now - moveStart < move.Duration ||
+                Context.Memory.Id == "Zani" && now < Context.ContinueAfterLockLossUntil;
         }
 
         internal CharacterTurn(CharacterKit fighter, TurnContext context)
@@ -390,6 +426,13 @@ namespace TideCombat
             }
             if (sent && move != null && move.VerifyCast && animationStartedAt >= 0)
                 Context.AnimationSeen |= move.Type == MoveType.CastResonance || now - hiddenSince >= 75;
+            if (animationStartedAt >= 0 && move != null && move.Type == MoveType.CastLiberation &&
+                now - animationStartedAt >= 7000)
+            {
+                Context.CombatExitReason = "共鸣解放动画超过7秒";
+                Finished = true;
+                return default(BattleAction);
+            }
             if (animationStartedAt < 0 || now - animationStartedAt >= AnimationTimeout()) return default(BattleAction);
             if ((animationActions & AnimationInput.HoldAttack) != 0 && now - animationStartedAt >= animationDelay &&
                 !latched.ContainsKey(BattleButton.Attack))
@@ -422,7 +465,8 @@ namespace TideCombat
             return animationStartedAt >= 0 && now - animationStartedAt < AnimationTimeout() &&
                 (activeHold && move != null && move.Type == MoveType.HoldLiberation ||
                 latched.ContainsKey(BattleButton.Attack) && (Context.Memory.Id == "Camellya" || Context.Memory.Id == "Sanhua" ||
-                    Context.Memory.Id == "YangYangSp" || Context.AnimationAttackHeld));
+                    Context.Memory.Id == "YangYangSp" || Context.AnimationAttackHeld) ||
+                Context.FarmEchoTask && Context.Memory.Id == "Carlotta" && latched.ContainsKey(BattleButton.Forward));
         }
 
         private int AnimationTimeout()
@@ -508,6 +552,7 @@ namespace TideCombat
                     liberationWasReady = false;
                     Context.AnimationSeen = false;
                     Context.CastTimedOut = false;
+                    resonanceAttackDue = false;
                     if (move.Type == MoveType.Incarnation)
                     {
                         Context.IncarnationFreezeAt = -1;
@@ -548,6 +593,7 @@ namespace TideCombat
                 if (move.Type == MoveType.CastLiberation)
                 {
                     BattleAction cast = ObserveLiberation(hud, key, now);
+                    if (Finished) return default(BattleAction);
                     if (move == null) continue;
                     return cast;
                 }
@@ -625,11 +671,13 @@ namespace TideCombat
                 return default(BattleAction);
             }
             if (!ready) return default(BattleAction);
+            // BaseChar.click_resonance alternates a click with a new frame before
+            // trying E again. Do not bundle the two actions from one observation.
+            if (resonanceAttackDue)
+                return BattleAction.Press(BattleButton.Attack, 0, false);
             if (move.RequiresLitResonance && Context.Hud.ResonanceWhiteRatio <= 0)
                 return move.AttackBetweenCasts && now >= nextAnimationAttack ? BattleAction.AnimationPulse(false, true) : default(BattleAction);
-            BattleAction action = BattleAction.Press(BattleButton.Resonance, key, false);
-            action.AttackBefore = sent && move.AttackBetweenCasts;
-            return action;
+            return BattleAction.Press(BattleButton.Resonance, key, false);
         }
 
         private BattleAction ObserveEcho(int key, long now)
@@ -638,7 +686,7 @@ namespace TideCombat
             bool ready = key != 0 && (state == SkillState.Ready || state == SkillState.Unavailable);
             if (move.CastTimeout == 0 && ready)
                 return BattleAction.Press(BattleButton.Echo, key, false);
-            if (key == 0 || !Context.Hud.InRealm && CharacterKit.HasFireRing(Context.Memory.Id) ||
+            if (key == 0 || Context.IsOpenWorldAutoCombat && CharacterKit.HasFireRing(Context.Memory.Id) ||
                 now - moveStart >= move.CastTimeout + move.Duration)
             {
                 FinishMove(false);
@@ -672,6 +720,13 @@ namespace TideCombat
             {
                 if (elapsed >= move.CastTimeout)
                 {
+                    // Character-specific short probes (e.g. Carlotta) simply
+                    // retry later; the default 15s helper exits the combat.
+                    if (move.CastTimeout >= 15000)
+                    {
+                        Context.CombatExitReason = "共鸣解放持续可用但超过释放时限";
+                        Finished = true;
+                    }
                     FinishMove(false);
                     return default(BattleAction);
                 }
@@ -730,6 +785,12 @@ namespace TideCombat
             if (action.ReassertHold)
             {
                 nextHoldRepeat = now + move.Interval;
+                return;
+            }
+            if (move.Type == MoveType.CastResonance && action.Button == BattleButton.Attack)
+            {
+                resonanceAttackDue = false;
+                next = now + 1; // require a subsequent observation before rechecking E
                 return;
             }
             bool first = !sent;
@@ -791,6 +852,7 @@ namespace TideCombat
             }
             if (move.Type == MoveType.CastResonance)
             {
+                resonanceAttackDue = move.AttackBetweenCasts;
                 sentAt = now;
                 confirmation = move.VerifyCast;
                 next = now + (move.VerifyCast ? 200 : 100);

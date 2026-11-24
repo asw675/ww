@@ -91,9 +91,9 @@ namespace TideCombat
         private readonly LinkLabel logFolder = new LinkLabel { Text = "打开日志目录", AutoSize = true,
             LinkColor = Theme.Accent, ActiveLinkColor = Theme.Accent, Anchor = AnchorStyles.Right | AnchorStyles.Bottom };
         private readonly CheckBox autoTarget = Option("看见敌人血条后自动锁定");
-        private readonly CheckBox autoRevive = Option("角色倒下后自动点击复活");
+        private readonly CheckBox autoRevive = Option("梦魇巢穴内自动尝试复活");
         private readonly CheckBox useLiberation = Option("大世界使用共鸣解放");
-        private readonly CheckBox checkLevitator = Option("根据控物图标判断浮空");
+        private readonly CheckBox checkLevitator = Option("检查控物（兼容项）");
         private readonly CheckBox rotate = Option("自动切换队伍角色");
         private readonly CheckBox concerto = Option("切人前优先等协奏充满");
         private readonly CheckBox lowHealth = Option("低血量时优先切治疗");
@@ -103,6 +103,7 @@ namespace TideCombat
             "网页云游戏 · 前台", "网页云游戏 · 后台", "本地客户端 · 自动");
         private readonly Button cloudPage = Theme.Button("打开官网云游戏");
         private readonly TextBox guideKey = new TextBox { MaxLength = 18, Width = 66, CharacterCasing = CharacterCasing.Upper };
+        private readonly TextBox jumpKey = HotkeyField(), dodgeKey = HotkeyField(), wheelKey = HotkeyField();
         private readonly TextBox bagKey = KeyField();
         private readonly TextBox[] keys = { KeyField(), KeyField(), KeyField(), KeyField() };
         private readonly ComboBox[] roles = new ComboBox[3];
@@ -119,6 +120,7 @@ namespace TideCombat
         private CancellationTokenSource assistCancellation;
         private Task assistRun;
         private bool assistEnabled;
+        private bool startupAssistOnly;
         internal enum WorkMode
         {
             Battle, Preview, Farm, Enhance, Domain, Nightmare, Garden, Merge, Change, Daily,
@@ -129,6 +131,7 @@ namespace TideCombat
         private ManualResetEventSlim enhanceGate;
         private NotifyIcon taskNotice;
         private string persistenceError;
+        private string settingsLoadError;
 
         internal MainForm() : this(SettingsFile.Location) { }
 
@@ -159,7 +162,8 @@ namespace TideCombat
             {
                 RunLog.Error("设置", "读取设置失败，使用默认值", error);
                 settings = CombatSettings.Defaults();
-                footer.Text = "配置读取失败，已载入默认值。 " + FriendlyError(error);
+                settingsLoadError = FriendlyError(error);
+                footer.Text = "配置读取失败，已载入默认值。 " + settingsLoadError;
                 footer.ForeColor = Theme.Warning;
             }
             LoadControls();
@@ -315,6 +319,7 @@ namespace TideCombat
             card.Controls.Add(autoTarget);
             card.Controls.Add(autoRevive);
             card.Controls.Add(useLiberation);
+            checkLevitator.AccessibleDescription = "切换控物并检查角色是否浮空。参考版本目前未调用此检查，保留配置兼容。";
             card.Controls.Add(checkLevitator);
             card.Controls.Add(rotate);
             card.Controls.Add(concerto);
@@ -340,6 +345,14 @@ namespace TideCombat
             guideRow.Controls.Add(bagLabel);
             guideRow.Controls.Add(bagKey);
             card.Controls.Add(guideRow);
+            var movementRow = Theme.Row();
+            movementRow.Controls.Add(Theme.Text("跳跃", Theme.Muted));
+            movementRow.Controls.Add(jumpKey);
+            movementRow.Controls.Add(Theme.Text("闪避", Theme.Muted));
+            movementRow.Controls.Add(dodgeKey);
+            movementRow.Controls.Add(Theme.Text("轮盘", Theme.Muted));
+            movementRow.Controls.Add(wheelKey);
+            card.Controls.Add(movementRow);
             rotate.CheckedChanged += delegate
             {
                 concerto.Enabled = rotate.Checked;
@@ -416,6 +429,12 @@ namespace TideCombat
                 TextAlign = HorizontalAlignment.Center, Margin = new Padding(0, 0, 11, 2) };
         }
 
+        private static TextBox HotkeyField()
+        {
+            return new TextBox { MaxLength = 18, Width = 66, CharacterCasing = CharacterCasing.Upper,
+                TextAlign = HorizontalAlignment.Center, Margin = new Padding(0, 0, 5, 2) };
+        }
+
         internal static string TaskCategory(int index)
         {
             switch (index)
@@ -451,6 +470,7 @@ namespace TideCombat
             autoTarget.Checked = settings.AutoTarget;
             autoRevive.Checked = settings.AutoRevive;
             useLiberation.Checked = settings.UseLiberation;
+            checkLevitator.Checked = settings.CheckLevitator;
             rotate.Checked = settings.RotateParty;
             concerto.Checked = settings.PreferConcerto;
             lowHealth.Checked = settings.SwitchAtLowHealth;
@@ -459,7 +479,6 @@ namespace TideCombat
             lowHealth.Enabled = rotate.Checked;
             supportOpener.Enabled = rotate.Checked;
             detectKeys.Checked = settings.DetectSkillKeys;
-            checkLevitator.Checked = settings.CheckLevitator;
             source.SelectedIndex = (int)settings.Source;
             keys[0].Text = settings.ResonanceKey;
             keys[1].Text = settings.EchoKey;
@@ -467,6 +486,9 @@ namespace TideCombat
             keys[3].Text = settings.ToolKey;
             guideKey.Text = settings.GuidebookKey ?? "F2";
             bagKey.Text = settings.BagKey ?? "B";
+            jumpKey.Text = settings.JumpKey ?? "SPACE";
+            dodgeKey.Text = settings.DodgeKey ?? "LSHIFT";
+            wheelKey.Text = settings.WheelKey ?? "TAB";
             for (int index = 0; index < roles.Length; index++)
             {
                 roles[index].SelectedIndex = (int)settings.Slots[index].Role;
@@ -481,16 +503,18 @@ namespace TideCombat
             var current = new CombatSettings
             {
                 AutoTarget = autoTarget.Checked, AutoRevive = autoRevive.Checked,
-                UseLiberation = useLiberation.Checked,
+                UseLiberation = useLiberation.Checked, CheckLevitator = checkLevitator.Checked,
                 RotateParty = rotate.Checked, PreferConcerto = concerto.Checked, SwitchAtLowHealth = lowHealth.Checked,
                 SupportOpener = supportOpener.Checked, IunoC6 = settings.IunoC6, RocciaC6 = settings.RocciaC6,
-                Source = (GameSource)source.SelectedIndex, CheckLevitator = checkLevitator.Checked,
+                Source = (GameSource)source.SelectedIndex,
                 ChisaDps = settings.ChisaDps, SuomingDps = settings.SuomingDps, Farm = settings.Farm,
                 Enhance = settings.Enhance, Domain = settings.Domain, Nightmare = settings.Nightmare,
                 Change = settings.Change, Daily = settings.Daily, Cultivation = settings.Cultivation,
+                MultiAccountExitAfterTask = settings.ExitAfterMultiAccount,
                 WorldAssist = settings.WorldAssist, PartyCharacters = new string[3],
                 DetectSkillKeys = detectKeys.Checked, ResonanceKey = keys[0].Text, EchoKey = keys[1].Text,
                 LiberationKey = keys[2].Text, ToolKey = keys[3].Text, BagKey = bagKey.Text, GuidebookKey = guideKey.Text,
+                JumpKey = jumpKey.Text, DodgeKey = dodgeKey.Text, WheelKey = wheelKey.Text,
                 Slots = new Rotation[3], Characters = settings.Characters
             };
             for (int index = 0; index < roles.Length; index++)
@@ -565,11 +589,7 @@ namespace TideCombat
                 case 14: SaveWorldAssistOptions(); break;
                 case 15: BeginSecondSola(); break;
                 case 16:
-                    if (work == null && !closing && assistRun == null)
-                    {
-                        assistEnabled = true;
-                        BeginAssist();
-                    }
+                    BeginManualAssist();
                     break;
             }
         }
@@ -585,7 +605,7 @@ namespace TideCombat
                 SetFooter(error.Message, true);
                 return;
             }
-            if (current.Source != GameSource.AutoLocal && current.Source != GameSource.Foreground)
+            if (!SupportsRahaiSource(current.Source))
             {
                 SetFooter("拉海洛方块需要 Windows 客户端，请使用本地客户端自动或前台模式。", true);
                 return;
@@ -641,9 +661,35 @@ namespace TideCombat
             }
             settings = current;
             SaveSettings();
-            if (assistRun != null) { await SuspendAssist(); BeginAssist(); }
+            if (assistRun != null)
+            {
+                if (startupAssistOnly && !current.WorldAssist.StartsAutomatically) assistEnabled = false;
+                await SuspendAssist();
+                BeginAssist();
+            }
             if (persistenceError == null)
                 SetFooter("已保存战斗辅助设置。", false);
+        }
+
+        internal void EnableStartupAssist()
+        {
+            if (closing || work != null || settingsLoadError != null || settings.WorldAssist == null ||
+                !settings.WorldAssist.AllowsStartup(settings.Source)) return;
+            WorldAssistOptions startup = settings.WorldAssist.ForStartup();
+            if (!startup.NeedsVision && !startup.RestoreCursor && !startup.StartsBattleAutomatically) return;
+            assistEnabled = true;
+            startupAssistOnly = true;
+            BeginAssist();
+        }
+
+        private async void BeginManualAssist()
+        {
+            if (closing || work != null) return;
+            if (assistRun != null && !startupAssistOnly) return;
+            assistEnabled = true;
+            startupAssistOnly = false;
+            await SuspendAssist();
+            BeginAssist();
         }
 
         private void BeginAssist()
@@ -658,6 +704,16 @@ namespace TideCombat
                 SetFooter(error.Message, true);
                 return;
             }
+            if (startupAssistOnly)
+            {
+                if (!current.WorldAssist.AllowsStartup(current.Source))
+                {
+                    assistEnabled = false;
+                    return;
+                }
+                current.WorldAssist = current.WorldAssist.ForStartup();
+            }
+            bool startupBattle = startupAssistOnly && current.WorldAssist.StartsBattleAutomatically;
             var cancellation = new CancellationTokenSource();
             assistCancellation = cancellation;
             var report = new Progress<BattleReport>(value =>
@@ -666,17 +722,17 @@ namespace TideCombat
                     RenderReport(value);
             });
             stop.Enabled = true;
-            mode.Text = "后台辅助";
-            assistRun = RunAssist(current, report, cancellation);
+            mode.Text = startupBattle ? "启动辅助和自动战斗" : "后台辅助";
+            assistRun = RunAssist(current, report, cancellation, startupBattle);
         }
 
         private async Task RunAssist(CombatSettings current, IProgress<BattleReport> report,
-            CancellationTokenSource cancellation)
+            CancellationTokenSource cancellation, bool includeBattle)
         {
             await Task.Yield();
             try
             {
-                await Task.Run(() => BattleLoop.Run(current, false, report, cancellation.Token, concertoMeter, true));
+                await Task.Run(() => BattleLoop.Run(current, false, report, cancellation.Token, concertoMeter, !includeBattle));
             }
             catch (Exception error)
             {
@@ -782,11 +838,26 @@ namespace TideCombat
                 {
                     if (form.ShowDialog(this) != DialogResult.OK)
                         return;
+                    current.MultiAccountExitAfterTask = form.ExitAfterTask;
                     if (!form.StartRequested)
                     {
-                        SetFooter("已保存多账号配置。", false);
+                        settings = current;
+                        SaveSettings();
+                        if (persistenceError == null) SetFooter("已保存多账号配置。", false);
                         return;
                     }
+                }
+            }
+            else using (var form = new MultiAccountRunForm(current.ExitAfterMultiAccount))
+            {
+                if (form.ShowDialog(this) != DialogResult.OK) return;
+                current.MultiAccountExitAfterTask = form.ExitAfterTask;
+                if (!form.StartRequested)
+                {
+                    settings = current;
+                    SaveSettings();
+                    if (persistenceError == null) SetFooter("已保存多账号日常设置。", false);
+                    return;
                 }
             }
             await StartWork(current, accountMode == MultiAccountMode.Config
@@ -903,17 +974,27 @@ namespace TideCombat
             await StartWork(current, WorkMode.Enhance);
         }
 
-        private async Task StartWork(CombatSettings current, WorkMode workMode)
+        private async Task StartWork(CombatSettings current, WorkMode workMode, bool? commandLineExit = null)
         {
             var elapsed = System.Diagnostics.Stopwatch.StartNew();
             bool isPreview = workMode == WorkMode.Preview;
             bool waitForWindow = workMode != WorkMode.Battle && !isPreview;
             RunLog.Info("任务", "开始 " + workMode + "，游戏来源=" + current.Source);
             settings = current;
-            SaveSettings();
-            if (waitForWindow && current.Source == GameSource.ManagedCloud)
+            if (!commandLineExit.HasValue)
+                SaveSettings();
+            // The command-line and elevation-resume paths must observe the
+            // same foreground-only boundary as the interactive activity entry.
+            if (workMode == WorkMode.Rahai && !SupportsRahaiSource(current.Source))
             {
-                const string reason = "此任务在云游戏中请使用「网页云游戏 · 前台」。";
+                const string reason = "拉海洛方块需要 Windows 客户端，请使用本地客户端自动或前台模式。";
+                RunLog.Warn("任务", workMode + " 未启动。 " + reason);
+                SetFooter(reason, true);
+                return;
+            }
+            if (waitForWindow && current.Source == GameSource.ManagedCloud && !SupportsManagedCloudTask(workMode))
+            {
+                const string reason = "专用后台云游戏目前支持改主属性；此任务请使用「网页云游戏 · 前台」。";
                 RunLog.Warn("任务", workMode + " 未启动。 " + reason);
                 if (persistenceError == null)
                     SetFooter(reason, true);
@@ -924,7 +1005,7 @@ namespace TideCombat
                 InputIntegrity.LocalGameNeedsElevation())
             {
                 RunLog.Warn("任务", workMode + " 未启动，游戏进程需要更高输入权限");
-                OfferAdministratorRestart(workMode);
+                OfferAdministratorRestart(workMode, commandLineExit);
                 return;
             }
             var cancellation = new CancellationTokenSource();
@@ -990,6 +1071,7 @@ namespace TideCombat
                     RenderMulti(report);
             });
             bool needsElevation = false;
+            bool completionVerified = true;
             string failure = null;
             FarmReport farmResult = null;
             EnhanceReport enhanceResult = null;
@@ -999,8 +1081,13 @@ namespace TideCombat
                 cancellation.Token.ThrowIfCancellationRequested();
                 if (waitForWindow)
                 {
-                    GameSource detected = await WaitForTaskWindow(current.Source, cancellation.Token);
-                    state.Text = detected == GameSource.Background ? "已识别游戏窗口，正在准备后台运行。" : ModeStartup(workMode);
+                    if (current.Source == GameSource.ManagedCloud)
+                        state.Text = "请在已开启的专用云游戏窗口中手动登录并打开已筛选背包，等待任务识别。";
+                    else
+                    {
+                        GameSource detected = await WaitForTaskWindow(current.Source, cancellation.Token);
+                        state.Text = detected == GameSource.Background ? "已识别游戏窗口，正在准备后台运行。" : ModeStartup(workMode);
+                    }
                 }
                 switch (workMode)
                 {
@@ -1013,6 +1100,7 @@ namespace TideCombat
                             enhanceResult = await Task.Run(() => EnhanceLoop.Run(settings, settings.Enhance, enhanceProgress,
                                 cancellation.Token, gate));
                             failure = enhanceResult.Failure;
+                            completionVerified = enhanceResult.Finished;
                         }
                         finally
                         {
@@ -1027,6 +1115,7 @@ namespace TideCombat
                             using (var runner = new DomainRunner(settings, settings.Domain, cancellation.Token, domainProgress))
                             {
                                 runner.Run();
+                                completionVerified = runner.CompletionVerified;
                                 return runner.Failure;
                             }
                         }, cancellation.Token);
@@ -1048,6 +1137,7 @@ namespace TideCombat
                             using (var runner = new GardenRunner(settings, cancellation.Token, gardenProgress))
                             {
                                 runner.Run();
+                                completionVerified = runner.CompletionVerified;
                                 return runner.Failure;
                             }
                         });
@@ -1058,6 +1148,7 @@ namespace TideCombat
                             using (var runner = new MergeRunner(settings, cancellation.Token, mergeProgress))
                             {
                                 runner.Run();
+                                completionVerified = runner.CompletionVerified;
                                 return runner.Failure;
                             }
                         });
@@ -1147,6 +1238,7 @@ namespace TideCombat
                     }
                     case WorkMode.Farm:
                         farmResult = await Task.Run(() => FarmLoop.Run(settings, settings.Farm, progress, cancellation.Token, concertoMeter));
+                        completionVerified = farmResult != null && farmResult.Finished;
                         if (farmResult != null && !cancellation.IsCancellationRequested)
                         {
                             RenderFarm(farmResult);
@@ -1210,15 +1302,36 @@ namespace TideCombat
                 if (closing)
                     Close();
             }
-            bool exitAfter = !cancellation.IsCancellationRequested && !needsElevation && failure == null &&
-                ((workMode == WorkMode.Farm && settings.Farm != null && settings.Farm.ExitAfterTask) ||
-                 ((workMode == WorkMode.Daily || workMode == WorkMode.MultiDaily) &&
-                  settings.Daily != null && settings.Daily.ExitAfterTask));
+            bool exitAfter = ShouldExitAfterTask(settings, workMode, commandLineExit == true,
+                completionVerified && !cancellation.IsCancellationRequested && !needsElevation && failure == null);
             cancellation.Dispose();
             if (exitAfter && !closing)
                 ExitGameAndProgram();
-            if (needsElevation && !closing) OfferAdministratorRestart(workMode);
+            if (needsElevation && !closing) OfferAdministratorRestart(workMode, commandLineExit);
             else if (!exitAfter) BeginAssist();
+        }
+
+        internal static bool ShouldExitAfterTask(CombatSettings settings, WorkMode workMode, bool commandLineExit,
+            bool completed)
+        {
+            return completed && ((workMode == WorkMode.Farm && settings.Farm != null && settings.Farm.ExitAfterTask) ||
+                (commandLineExit && Program.ReferenceTaskName(workMode,
+                    workMode == WorkMode.Domain && settings.Domain != null ? (DomainKind?)settings.Domain.Kind : null) != null) ||
+                (workMode == WorkMode.Daily && settings.Daily != null && settings.Daily.ExitAfterTask) ||
+                ((workMode == WorkMode.MultiDaily || workMode == WorkMode.MultiConfig) && settings.ExitAfterMultiAccount));
+        }
+
+        internal static bool SupportsManagedCloudTask(WorkMode mode)
+        {
+            // Only the inventory task that starts from the player's pre-opened
+            // menu and needs coordinate clicks/Escape has a complete isolated
+            // input implementation. Do not dispatch other runners onto it.
+            return mode == WorkMode.Change;
+        }
+
+        internal static bool SupportsRahaiSource(GameSource source)
+        {
+            return source == GameSource.AutoLocal || source == GameSource.Foreground;
         }
 
         private async Task<GameSource> WaitForTaskWindow(GameSource source, CancellationToken token)
@@ -1250,7 +1363,27 @@ namespace TideCombat
                 await StartWork(settings, workMode);
         }
 
-        private void OfferAdministratorRestart(WorkMode workMode)
+        internal async void StartTaskFromCommandLine(WorkMode workMode, DomainKind? domain, bool exitAfter)
+        {
+            if (work != null || closing)
+                return;
+            if (settingsLoadError != null)
+            {
+                string reason = ModeLabel(workMode) + "未启动，无法读取已保存的配置。 " + settingsLoadError;
+                RunLog.Warn("任务", reason);
+                SetFooter(reason, true);
+                return;
+            }
+            CombatSettings current = settings;
+            if (workMode == WorkMode.Domain && domain.HasValue)
+            {
+                current = AccountConfig.ForRun(settings);
+                current.Domain = current.Domain.ForKind(domain.Value);
+            }
+            await StartWork(current, workMode, exitAfter);
+        }
+
+        private void OfferAdministratorRestart(WorkMode workMode, bool? commandLineExit)
         {
             const string reason = "《鸣潮》以更高权限运行，Windows 已阻止工具发送按键。";
             string task = workMode == WorkMode.Battle ? "自动战斗" : ModeLabel(workMode);
@@ -1272,7 +1405,17 @@ namespace TideCombat
                 return;
             try
             {
-                var restart = new System.Diagnostics.ProcessStartInfo(Application.ExecutablePath, Program.ResumeTask + " " + workMode)
+                string arguments;
+                if (commandLineExit.HasValue)
+                {
+                    string taskName = Program.ReferenceTaskName(workMode,
+                        workMode == WorkMode.Domain && settings.Domain != null ? (DomainKind?)settings.Domain.Kind : null);
+                    if (taskName == null) { SetFooter("无法恢复此命令行任务。", true); return; }
+                    arguments = Program.ResumeCommandTask + " -t " + taskName +
+                        (commandLineExit.Value ? " --exit" : string.Empty);
+                }
+                else arguments = Program.ResumeTask + " " + workMode;
+                var restart = new System.Diagnostics.ProcessStartInfo(Application.ExecutablePath, arguments)
                 {
                     UseShellExecute = true, Verb = "runas", WorkingDirectory = AppDomain.CurrentDomain.BaseDirectory
                 };
@@ -1330,6 +1473,12 @@ namespace TideCombat
 
         private void ExitGameAndProgram()
         {
+            if (settings.Source == GameSource.ManagedCloud)
+            {
+                RunLog.Info("任务", "已结束专用后台云游戏任务；仅退出工具，云会话请手动关闭。");
+                Application.Exit();
+                return;
+            }
             try
             {
                 var window = new GameWindow(settings.Source);
@@ -1500,18 +1649,18 @@ namespace TideCombat
             state.Text = report.State;
             if (!string.IsNullOrEmpty(report.LastAction))
                 lastAction.Text = report.LastAction;
-            target.Text = report.Kills > 0 ? "已刷 " + report.Kills : "—";
+            target.Text = report.Attempts > 0 ? "已尝试 " + report.Attempts : "—";
             skills.Text = string.Format("声骸 {0} · {1:F1} 个/小时", report.Echoes, report.Rate);
             if (report.Finished && report.Failure != null)
                 SetFooter(report.Failure, true);
             else
-                SetFooter(string.Format("击杀 {0} · 声骸 {1} · {2:F1} 个/小时 · {3}", report.Kills, report.Echoes, report.Rate,
+                SetFooter(string.Format("尝试 {0} · 击杀 {1} · 声骸 {2} · {3:F1} 个/小时 · {4}", report.Attempts, report.Kills, report.Echoes, report.Rate,
                     report.Size.Width > 0 ? report.Size.Width + "×" + report.Size.Height : "—"), false);
         }
 
         private void RenderReport(BattleReport report)
         {
-            NotifyTask("登录", report.Notice);
+            NotifyTask(report.NoticeTitle ?? "登录", report.Notice);
             HudSnapshot hud = report.Hud;
             mode.Text = inPreview ? "仅检测" : report.State == "战斗中" ? "运行中" : "已待命";
             state.Text = report.DetectedMode.HasValue ?

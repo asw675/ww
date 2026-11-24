@@ -1,4 +1,6 @@
 using System;
+using System.Collections.Generic;
+using System.Drawing;
 using System.IO;
 using System.Runtime.Serialization;
 using System.Runtime.Serialization.Json;
@@ -27,16 +29,18 @@ namespace TideCombat
 
         internal ConcertoMeter(string path = null)
         {
-            this.path = path;
-            if (path == null || !File.Exists(path)) return;
+            // The earlier calibration stored values normalized to 2160px. A
+            // separate file prevents interpreting those values as raw pixels.
+            this.path = path == null ? null : Path.ChangeExtension(path, ".raw.json");
+            if (this.path == null || !File.Exists(this.path)) return;
             try
             {
-                using (Stream stream = File.OpenRead(path))
+                using (Stream stream = File.OpenRead(this.path))
                 {
                     var values = (double[])Serializer.ReadObject(stream);
                     if (values == null || values.Length != fullAreas.Length) return;
                     for (int i = 0; i < fullAreas.Length; i++)
-                        if (values[i] > 0 && values[i] <= 126 * 126) fullAreas[i] = values[i];
+                        if (values[i] > 0) fullAreas[i] = values[i];
                 }
             }
             catch (IOException) { }
@@ -91,11 +95,10 @@ namespace TideCombat
                 }
                 marks[y * width + x] = color;
             }
-            int target = expectedIndex;
-            if (target < 0)
-                for (int i = 0; i < colorCounts.Length; i++)
-                    if (colorCounts[i] > (target < 0 ? 0 : colorCounts[target])) target = i;
-            if (target < 0) return 0;
+            int target = expectedIndex < 0 ? 0 : expectedIndex;
+            if (expectedIndex < 0)
+                for (int i = 1; i < colorCounts.Length; i++)
+                    if (colorCounts[i] > colorCounts[target]) target = i;
             observed = (ConcertoColor)target;
 
             int centerX = width / 2, centerY = height / 2;
@@ -113,14 +116,20 @@ namespace TideCombat
             int area = RingComponent(potentialArea, out selectedLabel);
             if (area == 0) return 0;
 
-            double normalizedArea = area * 2160.0 / frame.SourceHeight * 2160 / frame.SourceHeight;
-            if (EnclosesCenter(centerX, centerY, selectedLabel))
+            return CalibrateRaw((ConcertoColor)target, area, IsReferenceFullRing(width, height, labels, selectedLabel));
+        }
+
+        internal double CalibrateRaw(ConcertoColor color, int area, bool full)
+        {
+            int target = (int)color;
+            if (target < 0 || target >= fullAreas.Length) return 0;
+            if (full && area > 0)
             {
-                changed |= fullAreas[target] != normalizedArea;
-                fullAreas[target] = normalizedArea;
+                changed |= fullAreas[target] != area;
+                fullAreas[target] = area;
                 return 1;
             }
-            return fullAreas[target] <= 0 ? 0 : Math.Min(.99, normalizedArea / fullAreas[target]);
+            return fullAreas[target] <= 0 ? 0 : Math.Min(.99, area / fullAreas[target]);
         }
 
         private void Prepare(int size)
@@ -197,29 +206,96 @@ namespace TideCombat
             return area;
         }
 
-        private bool EnclosesCenter(int x, int y, int blocked)
+        private static readonly int[] ContourDx = { -1, -1, 0, 1, 1, 1, 0, -1 };
+        private static readonly int[] ContourDy = { 0, -1, -1, -1, 0, 1, 1, 1 };
+
+        // RETR_EXTERNAL + CHAIN_APPROX_SIMPLE / approxPolyDP(0.05 * perimeter)
+        // in the reference. Trace the exterior boundary in the same pixel
+        // coordinate space; unlike flood-filling the center, this tests the
+        // approximated contour for convexity and at least four vertices.
+        internal static bool IsReferenceFullRing(int width, int height, int[] components, int selected)
         {
-            int center = y * width + x;
-            if (labels[center] == blocked) return false;
-            int tail = 0;
-            Visit(center, blocked, ref tail);
-            for (int head = 0; head < tail; head++)
+            if (selected <= 0) return false;
+            int first = Array.IndexOf(components, selected);
+            if (first < 0) return false;
+            var contour = new List<Point>();
+            var origin = new Point(first % width, first / width);
+            var point = origin;
+            var previous = new Point(origin.X - 1, origin.Y);
+            Point firstNext = Point.Empty;
+            bool haveFirst = false, closedContour = false;
+            for (int steps = 0; steps <= components.Length * 8; steps++)
             {
-                int cell = queue[head], row = cell / width, column = cell % width;
-                if (column == 0 || column == width - 1 || row == 0 || row == height - 1) return false;
-                Visit(cell - 1, blocked, ref tail);
-                Visit(cell + 1, blocked, ref tail);
-                Visit(cell - width, blocked, ref tail);
-                Visit(cell + width, blocked, ref tail);
+                int scan = 0;
+                while (scan < 7 && (point.X + ContourDx[scan] != previous.X || point.Y + ContourDy[scan] != previous.Y)) scan++;
+                int edge = -1;
+                for (int k = 0; k < 8; k++)
+                {
+                    int direction = (scan + k) % 8;
+                    int x = point.X + ContourDx[direction], y = point.Y + ContourDy[direction];
+                    if (x >= 0 && x < width && y >= 0 && y < height && components[y * width + x] == selected)
+                    { edge = direction; break; }
+                }
+                if (edge < 0) return false;
+                var next = new Point(point.X + ContourDx[edge], point.Y + ContourDy[edge]);
+                if (!haveFirst) { firstNext = next; haveFirst = true; }
+                else if (point == origin && next == firstNext) { closedContour = true; break; }
+                contour.Add(point);
+                int preceding = (edge + 7) % 8;
+                previous = new Point(point.X + ContourDx[preceding], point.Y + ContourDy[preceding]);
+                point = next;
             }
-            return true;
+            if (!closedContour || contour.Count < 4) return false;
+
+            double perimeter = 0;
+            for (int i = 0; i < contour.Count; i++)
+                perimeter += Math.Sqrt(SquaredDistance(contour[i], contour[(i + 1) % contour.Count]));
+            int a = 0, b = 0;
+            double farthest = 0;
+            for (int i = 0; i < contour.Count; i++)
+                for (int j = i + 1; j < contour.Count; j++)
+                {
+                    double distance = SquaredDistance(contour[i], contour[j]);
+                    if (distance > farthest) { farthest = distance; a = i; b = j; }
+                }
+            double epsilon = .05 * perimeter;
+            var polygon = new List<Point>();
+            Approximate(contour, a, b, epsilon, polygon);
+            Approximate(contour, b, a + contour.Count, epsilon, polygon);
+            if (polygon.Count < 4) return false;
+            int winding = 0;
+            for (int i = 0; i < polygon.Count; i++)
+            {
+                Point p = polygon[i], q = polygon[(i + 1) % polygon.Count], r = polygon[(i + 2) % polygon.Count];
+                long cross = (long)(q.X - p.X) * (r.Y - q.Y) - (long)(q.Y - p.Y) * (r.X - q.X);
+                int sign = Math.Sign(cross);
+                if (sign == 0 || winding != 0 && winding != sign) return false;
+                winding = sign;
+            }
+            return winding != 0;
         }
 
-        private void Visit(int cell, int blocked, ref int tail)
+        private static double SquaredDistance(Point p, Point q)
         {
-            if (labels[cell] == blocked || labels[cell] < 0) return;
-            labels[cell] = -1;
-            queue[tail++] = cell;
+            double dx = p.X - q.X, dy = p.Y - q.Y;
+            return dx * dx + dy * dy;
+        }
+
+        private static void Approximate(List<Point> contour, int first, int last, double epsilon, List<Point> polygon)
+        {
+            Point a = contour[first % contour.Count], b = contour[last % contour.Count];
+            double dx = b.X - a.X, dy = b.Y - a.Y;
+            double longest = 0, threshold = epsilon * Math.Sqrt(dx * dx + dy * dy);
+            int split = -1;
+            for (int i = first + 1; i < last; i++)
+            {
+                Point p = contour[i % contour.Count];
+                double cross = Math.Abs((p.Y - a.Y) * dx - (p.X - a.X) * dy);
+                if (cross > longest) { longest = cross; split = i; }
+            }
+            if (split < 0 || longest <= threshold) { polygon.Add(a); return; }
+            Approximate(contour, first, split, epsilon, polygon);
+            Approximate(contour, split, last, epsilon, polygon);
         }
     }
 }

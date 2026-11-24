@@ -12,7 +12,7 @@ namespace TideCombat
         internal Skill Skill;
         internal char Key;
         internal int Slot;
-        internal bool FollowWithAttack, DuringAnimation, AttackBefore, ConsumesExecution, ReassertHold;
+        internal bool FollowWithAttack, DuringAnimation, AttackBefore, ConsumesExecution, ReassertHold, HelperSwitch;
         internal BattleButton Button;
         internal int NativeKey, DownMilliseconds;
 
@@ -120,13 +120,16 @@ namespace TideCombat
     internal sealed class BattlePlanner
     {
         private const int LostCombatMs = 1700;
+        private const int VisiblePartySwitchTimeoutMs = 10000;
         internal const int SwitchBlocked = 0, SwitchLow = 100, SwitchNormal = 200, SwitchHigh = 300, SwitchRequired = 400;
         private readonly CombatSettings settings;
         private readonly bool targetForTask;
-        private readonly bool attackVisibleEnemies;
         private readonly bool? supportOpener;
         private readonly bool? useLiberation;
+        private readonly bool? openWorldAutoCombat;
         private readonly bool cloud;
+        private readonly bool standalone;
+        private readonly bool farmEchoTask;
         private readonly ChallengeStartObservation challengeObservation;
         private readonly Func<long> challengeClock;
         private readonly FreezeClock clock = new FreezeClock();
@@ -137,7 +140,7 @@ namespace TideCombat
         private readonly FighterMemory[] roster = { new FighterMemory(), new FighterMemory(), new FighterMemory() };
         private CharacterTurn turn;
         private CharacterTurn switchExecution;
-        private bool planningRoutineSwitch, routineSwitchRequested, executionPending;
+        private bool planningRoutineSwitch, routineSwitchRequested, helperSwitchRequested, executionPending;
         private FighterMemory delayedSwitchExit;
         private long lastBreakCheck = -1001;
         private long recheckConcertoAt;
@@ -149,14 +152,15 @@ namespace TideCombat
         private int lockedFrames, healthFrames, sameSlotFrames;
         private int observedSlot = -1, activeSlot = -1, requestedSlot = -1;
         private long lastLock, fieldStart, battleStart, nextAction, switchDeadline, nextTarget, restartTurn;
-        private long nextCombatProbe;
+        private long missingPartySwitchDeadline;
         private long retrySwitchAt, noSwitchAttackUntil;
         private long challengeStartUntil, lastChallengeTimer = -1;
+        private double abyssTimerSeconds = double.NaN;
         private long cloudHealthLostAt = -1;
         private bool challengeActive;
         private bool knownParty;
         private bool battleLiberation;
-        private int recoverySlot = -1;
+        private int recoverySlot = -1, recoveryOrigin = -1;
         private long recoveryDeadline, recoverySentAt = -1;
         private bool recoveryRepeats, recoveryNeedsHealer;
         private long retargetDeadline, retargetHealthLostAt = -1;
@@ -171,6 +175,22 @@ namespace TideCombat
         internal bool PreferMainAfterHealer { get; set; }
         private long liberationGraceUntil;
         internal bool Fighting { get { return activeSlot >= 0; } }
+        internal bool CombatAborted { get; private set; }
+        internal bool RecoveringAfterBattle { get { return recoverySlot >= 0 || recoveryNeedsHealer; } }
+        internal bool ProtectingAnimation(long now)
+        {
+            return turn != null && (turn.AnimationInProgress(now) || turn.CanContinueWithoutLock(now));
+        }
+
+        internal bool BlocksFarmEchoEnd(HudSnapshot hud, long now)
+        {
+            if (turn != null && turn.ReferenceLiberationInProgress(now)) return true;
+            if (activeSlot < 0 || hud.Current != activeSlot) return false;
+            FighterMemory actor = roster[activeSlot];
+            if (HasCharacterGrace(hud, now)) return true;
+            if (actor.Id == "Lily") return hud.Shows("lily_slumberland");
+            return actor.Id == "Hsin" && turn != null && now < turn.Context.ContinueAfterLockLossUntil;
+        }
         internal bool ShouldScanExecution(long now) { return !executionPending && now - lastBreakCheck > 1000; }
         internal int LucillaTransformSlot
         {
@@ -178,38 +198,25 @@ namespace TideCombat
         }
 
         internal BattlePlanner(CombatSettings settings, bool cloud = false, bool targetForTask = false,
-            bool? supportOpener = null, bool? useLiberation = null, bool attackVisibleEnemies = false,
-            ChallengeStartObservation challengeObservation = null, Func<long> challengeClock = null)
+            bool? supportOpener = null, bool? useLiberation = null,
+            ChallengeStartObservation challengeObservation = null, Func<long> challengeClock = null, bool standalone = false,
+            bool? openWorldAutoCombat = null, bool farmEchoTask = false)
         {
             this.settings = settings;
             this.cloud = cloud;
+            this.standalone = standalone;
+            this.farmEchoTask = farmEchoTask;
             this.targetForTask = targetForTask;
-            this.attackVisibleEnemies = attackVisibleEnemies;
             this.supportOpener = supportOpener;
             this.useLiberation = useLiberation;
+            this.openWorldAutoCombat = openWorldAutoCombat;
             this.challengeObservation = challengeObservation ?? new ChallengeStartObservation();
             this.challengeClock = challengeClock;
             SwitchTimeoutMs = 5000;
             LostCombatTimeoutMs = LostCombatMs;
         }
 
-        internal BattleAction Observe(HudSnapshot hud, long now)
-        {
-            BattleAction action = ObserveCore(hud, now);
-            if ((action.Kind == ActionKind.Wait || action.Kind == ActionKind.Attack) &&
-                activeSlot >= 0 && requestedSlot < 0 && switchExecution == null &&
-                (turn == null || !turn.AnimationInProgress(now)) && now - battleStart >= 150 &&
-                now >= nextCombatProbe && hud.Valid && !hud.Locked && CanAttackVisibleEnemy(hud))
-                return BattleAction.Target();
-            return action;
-        }
-
-        private bool CanAttackVisibleEnemy(HudSnapshot hud)
-        {
-            return !cloud && attackVisibleEnemies && hud.EnemyHealth && !hud.ChallengePrompt;
-        }
-
-        private BattleAction ObserveCore(HudSnapshot hud, long now)
+        internal BattleAction Observe(HudSnapshot hud, long now, Func<double> readAbyssTimer = null)
         {
             if (hud.Dead)
             {
@@ -217,6 +224,16 @@ namespace TideCombat
                 ExpireBattle(now + LostCombatMs);
                 Status = "角色倒下，等待手动恢复";
                 return default(BattleAction);
+            }
+            if (CombatAborted)
+            {
+                if (!targetForTask)
+                    CombatAborted = false; // standalone may recognize a fresh encounter
+                else
+                {
+                    Status = "共鸣解放超时，结束本次战斗";
+                    return ObserveTaskAfterBattle(hud, now);
+                }
             }
             BattleAction layoutAction;
             if (!cloud && TryRecoverTargetLayout(hud, now, out layoutAction))
@@ -228,12 +245,23 @@ namespace TideCombat
             {
                 CancelChallengePrompt();
                 BattleAction animation = turn == null ? default(BattleAction) : turn.ObserveUnavailable(now, hud.TeamHudHidden);
+                if (turn != null && turn.Context.CombatExitReason != null)
+                    return AbortBattle(previous, now, turn.Context.CombatExitReason);
                 ResetLockConfirmation();
                 healthFrames = 0;
                 acquireUntil = 0;
+                bool partyVisible = hud.PartySize >= 2;
+                if (routineSwitchRequested && requestedSlot >= 0 &&
+                    now >= (partyVisible ? switchDeadline : missingPartySwitchDeadline))
+                {
+                    FinishBattle(now);
+                    Status = partyVisible ? "切换超时，重新确认战斗" : "切换后队伍画面未恢复";
+                    return default(BattleAction);
+                }
                 if ((requestedSlot < 0 || now >= switchDeadline) &&
                     (turn == null || !turn.AnimationInProgress(now) && !turn.CanContinueWithoutLock(now)))
-                    ExpireBattle(now);
+                    ExpireBattle(now, recover: true);
+                if (activeSlot < 0) ExpireRecovery(now);
                 if (activeSlot < 0 && knownParty && hud.PartySize == 0 && !hud.TeamHudHidden)
                 {
                     for (int slot = 0; slot < roster.Length; slot++) roster[slot] = new FighterMemory();
@@ -246,6 +274,7 @@ namespace TideCombat
 
             IdentifyTeam(hud, now);
             FighterMemory seen = roster[hud.Current];
+            seen.ObserveCooldowns(hud, now);
             if (seen.Id == "Carlotta" && hud.Skills[0] != SkillState.Unknown)
             {
                 seen.CarlottaResonanceAt = now;
@@ -255,7 +284,10 @@ namespace TideCombat
             if (activeSlot >= 0) ObserveBreakPrompt(hud, now);
             if (turn != null && hud.Current == activeSlot) turn.ObserveAvailable(hud, now);
             if (hud.Locked || hud.EnemyHealth) ResetRecovery();
-            long openingRemaining = challengeObservation.Observe(hud, challengeClock == null ? now : challengeClock(), consume: true);
+            bool canObserveStart = !standalone || activeSlot < 0 && settings.WorldAssist != null && settings.WorldAssist.PickUp;
+            long openingRemaining = canObserveStart ?
+                challengeObservation.Observe(hud, challengeClock == null ? now : challengeClock(), consume: true) : 0;
+            if (!canObserveStart) challengeObservation.Clear();
             if (openingRemaining > 0)
             {
                 challengeStartUntil = now + openingRemaining;
@@ -263,22 +295,20 @@ namespace TideCombat
             }
             if (hud.OpenWorld) ResetChallenge();
             bool opening = !hud.ChallengePrompt && now < challengeStartUntil;
-            if (hud.Countdown && !hud.OpenWorld && (hud.Locked || activeSlot >= 0 || opening))
+            if (challengeActive && !opening && (lastChallengeTimer < 0 || now - lastChallengeTimer >= 400))
             {
-                challengeActive = true;
+                abyssTimerSeconds = readAbyssTimer == null ? double.NaN : readAbyssTimer();
                 lastChallengeTimer = now;
             }
-            else if (hud.ChallengeSeconds == 0) lastChallengeTimer = -1;
             if (hud.Locked || hud.EnemyHealth) cloudHealthLostAt = -1;
             else if (cloud && activeSlot >= 0 && cloudHealthLostAt < 0) cloudHealthLostAt = now;
             bool cloudCombat = cloud && (activeSlot < 0 ? (settings.AutoTarget || targetForTask) && hud.EnemyHealth :
                 hud.EnemyHealth || cloudHealthLostAt >= 0 && now - cloudHealthLostAt < 3000);
-            bool visibleEnemy = CanAttackVisibleEnemy(hud);
             bool timedCombat = activeSlot >= 0 && ChallengeClockActive(now);
             if (opening || timedCombat) hud.InChallenge = true;
             bool characterGrace = HasCharacterGrace(hud, now) || now < liberationGraceUntil;
             bool switching = requestedSlot >= 0 && now < switchDeadline;
-            if (!hud.Locked && !visibleEnemy && !cloudCombat && !timedCombat && !characterGrace && !switching && !opening)
+            if (!hud.Locked && !cloudCombat && !timedCombat && !characterGrace && !switching && !opening)
             {
                 ResetLockConfirmation();
                 if (activeSlot == hud.Current && activeSlot >= 0 && now - lastLock < 4000 &&
@@ -338,7 +368,7 @@ namespace TideCombat
                 return AcquireTarget(hud, now);
             }
 
-            if (hud.Locked || visibleEnemy || cloudCombat && hud.EnemyHealth)
+            if (hud.Locked || cloudCombat && hud.EnemyHealth)
             {
                 lastLock = now;
                 ResetRetarget();
@@ -369,7 +399,6 @@ namespace TideCombat
                 return default(BattleAction);
             }
 
-            bool openingOnVisibleEnemy = activeSlot < 0 && visibleEnemy && !hud.Locked;
             if (hud.Current != activeSlot)
             {
                 ClearSwitchExecution(now);
@@ -404,6 +433,9 @@ namespace TideCombat
                 }
                 EndTurn();
                 activeSlot = hud.Current;
+                FighterMemory entering = roster[activeSlot];
+                if (entering.Id == "Rover" && entering.RoverForm == null)
+                    entering.RoverForm = hud.RoverForm ?? "RoverSpectro";
                 if (first)
                 {
                     battleStart = now;
@@ -420,17 +452,12 @@ namespace TideCombat
                 }
                 fieldStart = now;
                 requestedSlot = -1;
-                routineSwitchRequested = planningRoutineSwitch = false;
+                routineSwitchRequested = planningRoutineSwitch = helperSwitchRequested = false;
                 openerPending = first;
                 noSwitchAttackUntil = 0;
                 if (!first && roster[activeSlot].Id == null) nextAction = Math.Max(nextAction, now + 270);
             }
             previous = hud;
-            if (openingOnVisibleEnemy)
-            {
-                Status = "发现敌人，主动攻击";
-                return BattleAction.Attack();
-            }
             if (switchExecution != null)
             {
                 BattleAction executionAction = switchExecution.Observe(hud, now);
@@ -457,7 +484,7 @@ namespace TideCombat
                             return AttackWhenSwitchUnavailable(now);
                         }
                     }
-                    if ((hud.Locked || visibleEnemy || cloud && hud.EnemyHealth || timedCombat || opening || characterGrace) &&
+                    if ((hud.Locked || cloud && hud.EnemyHealth || timedCombat || opening || characterGrace) &&
                         now >= retrySwitchAt)
                         return routineSwitchRequested ? RoutineSwitch(hud, now, requestedSlot) : BattleAction.Switch(requestedSlot);
                     return default(BattleAction);
@@ -488,7 +515,9 @@ namespace TideCombat
                 {
                     openerPending = false;
                     EndTurn();
-                    return BattleAction.Switch(support);
+                    BattleAction switchAction = BattleAction.Switch(support);
+                    switchAction.HelperSwitch = true;
+                    return switchAction;
                 }
             }
             openerPending = false;
@@ -504,7 +533,7 @@ namespace TideCombat
                     memory.LastTurn = now;
                     turn = new CharacterTurn(kit, new TurnContext(memory, roster, settings, entryIntro, entryOutro,
                         now, entrySubDpsIntro, MustMakeRoomForTeammate, clock, () => executionPending, now - battleStart < 400,
-                        battleLiberation));
+                        battleLiberation, openWorldAutoCombat, farmEchoTask));
                 }
                 return turn == null ? default(BattleAction) : ObserveTurn(hud, now);
             }
@@ -528,6 +557,18 @@ namespace TideCombat
                     return BattleAction.Cast(skill, hud.Keys[(int)skill]);
             }
             return BattleAction.Attack();
+        }
+
+        internal BattleAction ObserveTaskAfterBattle(HudSnapshot hud, long now)
+        {
+            if (!hud.Valid)
+            {
+                ExpireRecovery(now);
+                return default(BattleAction);
+            }
+            IdentifyTeam(hud, now);
+            BattleAction cleanup;
+            return ObserveRecovery(hud, now, out cleanup) ? cleanup : default(BattleAction);
         }
 
         internal void Sent(BattleAction action, long now)
@@ -560,7 +601,6 @@ namespace TideCombat
             {
                 case ActionKind.Target:
                     nextTarget = now + (cloud ? 800 : 200);
-                    nextCombatProbe = now + 500;
                     break;
                 case ActionKind.Attack:
                     nextAction = now + (now < noSwitchAttackUntil || planningRoutineSwitch || routineSwitchRequested ? 100 : 155);
@@ -585,7 +625,7 @@ namespace TideCombat
                     }
                     if (requestedSlot == action.Slot)
                     {
-                        retrySwitchAt = now + (routineSwitchRequested ? 100 : 270);
+                        retrySwitchAt = now + (routineSwitchRequested ? 100 : helperSwitchRequested ? 200 : 270);
                         break;
                     }
                     pendingIntro = false;
@@ -601,11 +641,14 @@ namespace TideCombat
                     }
                     requestedSlot = action.Slot;
                     routineSwitchRequested = action.FollowWithAttack;
+                    helperSwitchRequested = action.HelperSwitch;
                     planningRoutineSwitch = false;
                     bool known = activeSlot >= 0 && roster[activeSlot].Id != null;
-                    switchDeadline = now + (routineSwitchRequested || known ? SwitchTimeoutMs : 1050);
-                    retrySwitchAt = now + (routineSwitchRequested ? 100 : known ? 270 : 1050);
-                    nextAction = now + (routineSwitchRequested ? 0 : 220);
+                    missingPartySwitchDeadline = now + (helperSwitchRequested ? 6000 : SwitchTimeoutMs);
+                    switchDeadline = now + (routineSwitchRequested ? VisiblePartySwitchTimeoutMs :
+                        helperSwitchRequested ? 6000 : known ? SwitchTimeoutMs : 1050);
+                    retrySwitchAt = now + (routineSwitchRequested ? 100 : helperSwitchRequested ? 200 : known ? 270 : 1050);
+                    nextAction = now + (routineSwitchRequested ? 0 : helperSwitchRequested ? 200 : 220);
                     EndTurn();
                     break;
             }
@@ -618,9 +661,10 @@ namespace TideCombat
 
         internal void Invalidate(long now)
         {
+            CombatAborted = false;
             EndTurn();
             ClearSwitchExecution(now);
-            planningRoutineSwitch = routineSwitchRequested = false;
+            planningRoutineSwitch = routineSwitchRequested = helperSwitchRequested = false;
             requestedSlot = -1;
             ResetRecovery();
             ResetLockConfirmation();
@@ -640,9 +684,14 @@ namespace TideCombat
             Array.Clear(readyFrames, 0, readyFrames.Length);
         }
 
-        private void ExpireBattle(long now)
+        private void ExpireBattle(long now, bool recover = false)
         {
-            if (activeSlot >= 0 && now - lastLock >= LostCombatTimeoutMs) FinishBattle(now);
+            if (activeSlot >= 0 && now - lastLock >= LostCombatTimeoutMs)
+            {
+                if (recover && targetForTask && settings.RotateParty && previous != null)
+                    BeginRecovery(previous, now);
+                FinishBattle(now);
+            }
         }
 
         private void ResetRetarget()
@@ -679,13 +728,15 @@ namespace TideCombat
         {
             challengeObservation.Clear();
             lastChallengeTimer = -1;
+            abyssTimerSeconds = double.NaN;
             challengeStartUntil = 0;
             challengeActive = false;
         }
 
         private bool ChallengeClockActive(long now)
         {
-            return challengeActive && lastChallengeTimer >= 0 && now - lastChallengeTimer < 400;
+            return challengeActive && lastChallengeTimer >= 0 && now - lastChallengeTimer < 400 &&
+                abyssTimerSeconds > 0;
         }
 
         private bool TryRecoverTargetLayout(HudSnapshot hud, long now, out BattleAction action)
@@ -718,7 +769,7 @@ namespace TideCombat
         {
             EndTurn();
             ClearSwitchExecution(now);
-            planningRoutineSwitch = routineSwitchRequested = false;
+            planningRoutineSwitch = routineSwitchRequested = helperSwitchRequested = false;
             activeSlot = -1;
             requestedSlot = -1;
             previous = null;
@@ -736,10 +787,12 @@ namespace TideCombat
         private BattleAction ObserveTurn(HudSnapshot hud, long now)
         {
             BattleAction action = turn.Observe(hud, now);
+            if (turn.Context.CombatExitReason != null)
+                return AbortBattle(hud, now, turn.Context.CombatExitReason);
             if (!turn.Finished)
                 return action;
             bool combatVisible = hud.Locked || cloud && hud.EnemyHealth || now < challengeStartUntil ||
-                CanAttackVisibleEnemy(hud) || ChallengeClockActive(now) || HasCharacterGrace(hud, now);
+                ChallengeClockActive(now) || HasCharacterGrace(hud, now);
             EndTurn();
             restartTurn = now;
             if (settings.RotateParty && combatVisible)
@@ -751,6 +804,17 @@ namespace TideCombat
             roster[activeSlot].FreeIntro = false;
             restartTurn = now + 370;
             return combatVisible ? BattleAction.Attack() : default(BattleAction);
+        }
+
+        private BattleAction AbortBattle(HudSnapshot hud, long now, string reason)
+        {
+            RunLog.Warn("Battle", reason);
+            if (hud != null && hud.Valid && settings.RotateParty) BeginRecovery(hud, now);
+            FinishBattle(now);
+            CombatAborted = true;
+            ResetLockConfirmation();
+            Status = reason;
+            return default(BattleAction);
         }
 
         private bool HasCharacterGrace(HudSnapshot hud, long now)
@@ -806,7 +870,8 @@ namespace TideCombat
             ClearSwitchExecution(now);
             if (afterSwitch) delayedSwitchExit = actor;
             var context = new TurnContext(actor, roster, settings, false, null, now, clock: clock,
-                pendingExecution: () => executionPending);
+                pendingExecution: () => executionPending, openWorldAutoCombat: openWorldAutoCombat,
+                farmEchoTask: farmEchoTask);
             switchExecution = new CharacterTurn(Rotations.BreakEnemy(context), context);
             return true;
         }
@@ -884,7 +949,13 @@ namespace TideCombat
                 }
             }
             if (hud.Current >= 0 && roster[hud.Current].Id == "Rover" && hud.RoverForm != null)
-                roster[hud.Current].RoverForm = hud.RoverForm;
+            {
+                FighterMemory rover = roster[hud.Current];
+                // Exploration can change the selected form. Lock it only when
+                // combat actually starts, then keep it for the whole battle.
+                if (activeSlot >= 0 && rover.RoverForm == null) rover.RoverForm = hud.RoverForm;
+                else if (activeSlot < 0 && rover.RoverForm == null) rover.RoverLastKnownForm = hud.RoverForm;
+            }
             if (partyChanged)
                 RunLog.Info("Battle", "队伍识别 · " + string.Join("、", roster.Take(PartySlots(hud))
                     .Select((fighter, slot) => hud.Profiles[slot] != null ? hud.Profiles[slot].Name :
@@ -903,9 +974,21 @@ namespace TideCombat
 
         private void ResetRecovery()
         {
-            recoverySlot = -1;
+            recoverySlot = recoveryOrigin = -1;
             recoverySentAt = -1;
             recoveryNeedsHealer = recoveryRepeats = false;
+        }
+
+        private void ExpireRecovery(long now)
+        {
+            if (!RecoveringAfterBattle || now < recoveryDeadline) return;
+            if (recoverySlot >= 0 && recoveryNeedsHealer)
+            {
+                recoverySlot = -1;
+                recoverySentAt = -1;
+                recoveryDeadline = now + 6000;
+            }
+            else ResetRecovery();
         }
 
         private void BeginRecovery(HudSnapshot hud, long now)
@@ -914,8 +997,17 @@ namespace TideCombat
             recoveryDeadline = now + 6000;
             recoveryNeedsHealer = supportOpener ?? settings.SupportOpener;
             FighterMemory current = roster[hud.Current];
-            recoveryRepeats = current.Id == "Cartethyia" && current.CartethyiaTransformed;
+            recoveryOrigin = hud.Current;
+            bool helperHandoff = targetForTask && (current.Id == "Camellya" || current.Id == "Iuno" ||
+                current.Id == "Linnai" || current.Id == "Mornye" || current.Id == "Aemeath" ||
+                current.Id == "Ciaccona" && current.InRecital);
+            recoveryRepeats = helperHandoff || current.Id == "Cartethyia" && current.CartethyiaTransformed;
             if (!recoveryRepeats && current.Id != "Augusta" && current.Id != "Cantarella") return;
+            if (helperHandoff)
+            {
+                recoverySlot = FindSupport(hud, hud.Current, now, false);
+                if (recoverySlot >= 0) return;
+            }
             for (int offset = 1; offset < roster.Length; offset++)
             {
                 int slot = (hud.Current + offset) % roster.Length;
@@ -928,10 +1020,12 @@ namespace TideCombat
         private bool ObserveRecovery(HudSnapshot hud, long now, out BattleAction action)
         {
             action = default(BattleAction);
-            if (recoverySlot >= 0 && hud.Current != recoverySlot && now < recoveryDeadline &&
-                (recoveryRepeats || recoverySentAt < 0))
+            bool switched = hud.Current != recoveryOrigin;
+            if (recoverySlot >= 0 && !switched && now < recoveryDeadline &&
+                (recoveryRepeats || recoverySentAt < 0 || targetForTask))
             {
-                if (now >= nextAction) action = BattleAction.Switch(recoverySlot);
+                if (now >= nextAction && (recoveryRepeats || recoverySentAt < 0))
+                    action = BattleAction.Switch(recoverySlot);
                 return true;
             }
             if (recoverySentAt >= 0 && now < nextAction) return true;
@@ -940,6 +1034,7 @@ namespace TideCombat
             if (!chooseHealer) return false;
             recoverySlot = FindSupport(hud, hud.Current, now, false);
             if (recoverySlot < 0) return false;
+            recoveryOrigin = hud.Current;
             recoveryRepeats = true;
             recoveryDeadline = now + 6000;
             if (now >= nextAction) action = BattleAction.Switch(recoverySlot);
@@ -991,7 +1086,8 @@ namespace TideCombat
             var healerLocked = new List<int>(2);
             for (int slot = 0; slot < PartySlots(hud); slot++)
             {
-                if (slot == activeSlot || hud.Health[slot] <= 0 || now < blockedSwitch[slot])
+                if (slot == activeSlot || hud.Health[slot] <= 0 && !hud.HealthUnknown[slot] ||
+                    roster[slot].Id == null && now < blockedSwitch[slot])
                     continue;
                 int priority = SwitchingPriority(hud, slot, now, intro);
                 if (priority <= SwitchBlocked) continue;
@@ -1118,7 +1214,7 @@ namespace TideCombat
                     if (sinceForte < 16000) return SwitchBlocked;
                     break;
                 case "Zhezhi":
-                    if (carlotta != null && carlotta.CarlottaReady(clock, now)) return SwitchRequired;
+                    if (!farmEchoTask && carlotta != null && carlotta.CarlottaReady(clock, now)) return SwitchRequired;
                     break;
             }
             if (intro)
@@ -1141,7 +1237,7 @@ namespace TideCombat
         {
             if (!settings.RotateParty) return false;
             for (int slot = 0; slot < PartySlots(hud); slot++)
-                if (slot != activeSlot && hud.Health[slot] > 0 &&
+                if (slot != activeSlot && (hud.Health[slot] > 0 || hud.HealthUnknown[slot]) &&
                     SwitchingPriority(hud, slot, now, false) >= SwitchRequired)
                     return true;
             return false;

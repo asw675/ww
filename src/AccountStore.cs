@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Text;
 using System.Web.Script.Serialization;
 
@@ -29,12 +30,27 @@ namespace TideCombat
 
     internal static class AccountTasks
     {
-        internal static readonly string[] Choices =
+        // OKWW's visible, selectable non-recursive production registry, in
+        // registration order. WW-only tasks form a distinct explicit group.
+        internal static readonly string[] ReferenceChoices =
         {
-            "None", "DailyTask", "FarmEchoTask", "EnhanceEchoTask", "TacetTask", "ForgeryTask",
-            "SimulationTask", "NightmareNestTask", "GardenTask", "MergeEchoTask", "ChangeEchoTask",
-            "CultivationTask", "RahaiBlocksTask", "GalGameTask"
+            "None", "DailyTask", "FarmEchoTask", "NightmareNestTask", "TacetTask", "ForgeryTask",
+            "SimulationTask", "MergeEchoTask", "EnhanceEchoTask", "ChangeEchoTask", "GardenTask"
         };
+        internal static readonly string[] ExtensionChoices = { "CultivationTask", "RahaiBlocksTask", "GalGameTask" };
+        internal static readonly string[] Choices = ReferenceChoices.Concat(ExtensionChoices).ToArray();
+        internal static readonly string[] DisplayChoices = ReferenceChoices.Concat(
+            ExtensionChoices.Select(name => "WW 扩展 · " + name)).ToArray();
+
+        // Migrate only the known explicit historical WW serialization at the
+        // storage boundary. The runtime resolver still accepts canonical exact
+        // registrations exclusively, not arbitrary module/type loading.
+        internal static void ImportLegacy(AccountTaskReference reference)
+        {
+            if (reference != null && reference.module == "TideCombat" &&
+                Array.IndexOf(Choices, reference.@class) > 0)
+                reference.module = "src.task." + reference.@class;
+        }
 
         internal static string Resolve(AccountTaskReference reference)
         {
@@ -120,9 +136,7 @@ namespace TideCombat
                         throw new InvalidDataException("账号任务引用必须包含 module 和 class 两个文本字段。");
                     entry.task = new AccountTaskReference { module = (string)module, @class = (string)type };
                 }
-                if (entry.task != null && entry.task.module == "TideCombat" &&
-                    Array.IndexOf(AccountTasks.Choices, entry.task.@class) > 0)
-                    entry.task.module = "src.task." + entry.task.@class;
+                AccountTasks.ImportLegacy(entry.task);
                 accounts.Add(entry);
             }
             Validate(accounts);

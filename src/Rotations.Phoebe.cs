@@ -163,6 +163,9 @@ namespace TideCombat
 
         private static IEnumerable<Move> PhoebePrayer(TurnContext c, PhoebeMemory state)
         {
+            // CharacterTurn only advances moves on a visible team HUD. Give a newly
+            // visible HUD the same half-second settle before choosing the prayer.
+            yield return Move.Wait(500);
             Func<HudSnapshot, bool> condition = PhoebePrayerCondition(c, state);
             state.Prayer = PhoebePrayerResult.Unavailable;
             if (!condition(c.Hud)) yield break;

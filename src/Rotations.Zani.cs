@@ -192,13 +192,16 @@ namespace TideCombat
 
         private static IEnumerable<Move> ZaniFinisher(TurnContext c)
         {
-            long start = c.Now, limit = c.Now + 9000;
+            long start = c.Now;
             bool send = true;
-            c.ContinueAfterLockLossUntil = limit;
-            while (c.Hud.ZaniForm != 1 && c.Now - start <= 6000 && c.Now < limit)
+            while (c.Hud.ZaniForm != 1 && c.Now - start <= 6000)
             {
                 if (c.Hud.ResonanceWhiteRatio == 0) start = c.Now;
                 else if (c.Now - start > 1500) send = false;
+                // During the reference's rolling animation allowance, only
+                // fresh valid samples may extend lock-loss protection. Capture
+                // failure/cancellation independently release inputs in the planner.
+                c.ContinueAfterLockLossUntil = start + 6000;
                 if (send) yield return Move.RawLiberationPress();
                 yield return Move.Wait(50);
             }

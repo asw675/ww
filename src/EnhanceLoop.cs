@@ -86,6 +86,7 @@ namespace TideCombat
                     string.Join("、", options.ValidStats), options.PauseAfterSuccess, evidenceDirectory));
 
                 using (var capture = new BattleLoop.WindowFrames(window))
+                using (var cursorAssist = WorldAssist.CreateCursorOnly(settings.WorldAssist, vision))
                 {
                     while (!cancellation.IsCancellationRequested && !task.Finished)
                     {
@@ -125,6 +126,11 @@ namespace TideCombat
                         }
 
                         long now = timer.ElapsedMilliseconds;
+                        if (cursorAssist != null)
+                        {
+                            if (captured) cursorAssist.UpdateCursor(window, bounds, now);
+                            else cursorAssist.ResetWindow();
+                        }
                         if (!captured && frameLostAt < 0)
                             frameLostAt = now;
                         else if (captured && frameLostAt >= 0)
@@ -572,13 +578,13 @@ namespace TideCombat
             {
                 string folder = Path.Combine(directory, kind);
                 Directory.CreateDirectory(folder);
-                string name = string.Format("{0:D3}-{1:D2}", task.ItemNumber, task.Round);
+                string name = EvidenceName(kind, task.ItemNumber, task.Round, task.Enhanced, task.Discarded, reason);
                 if (kind == "materials")
                     name += "-" + DateTime.Now.ToString("HHmmssfff");
                 string path = Path.Combine(folder, name + ".png");
                 Rectangle area = kind == "before" || kind == "error" || kind == "selection"
                     ? new Rectangle(0, 0, frame.Width, frame.Height)
-                    : Scale(frame, new Rectangle(144, 81, 496, kind == "materials" ? 783 : 414));
+                    : Scale(frame, EvidenceCrop(kind));
                 Screenshots.WritePng(frame, area, path);
                 RunLog.Info(LogArea, "已保存强化截图 · " + kind + " · " + path +
                     (string.IsNullOrEmpty(reason) ? "" : " · 原因=" + reason));
@@ -587,6 +593,28 @@ namespace TideCombat
             {
                 RunLog.Error(LogArea, "保存强化截图失败 · 类型=" + kind, error);
             }
+        }
+
+        internal static string EvidenceName(string kind, int item, int round, int enhanced, int discarded, string reason)
+        {
+            if (kind == "success")
+                return enhanced.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            if (kind == "failed")
+            {
+                // Match the reference's numbered rejected-Echo evidence without
+                // allowing the OCR/error text to alter the local directory.
+                string safe = Regex.Replace(reason ?? string.Empty, @"[<>:""/\\|?*\x00-\x1F]", string.Empty);
+                return discarded.ToString(System.Globalization.CultureInfo.InvariantCulture) + "_" + safe;
+            }
+            return string.Format("{0:D3}-{1:D2}", item, round);
+        }
+
+        internal static Rectangle EvidenceCrop(string kind)
+        {
+            // Reference result screenshot: (0.09,0.09) to (0.37,0.55).
+            // Keep the broader diagnostic stage/material screenshots separate.
+            return new Rectangle(144, 81, kind == "success" || kind == "failed" ? 448 : 496,
+                kind == "materials" ? 783 : 414);
         }
 
         internal static void OpenEvidence(string directory)

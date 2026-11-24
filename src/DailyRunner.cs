@@ -20,6 +20,13 @@ namespace TideCombat
 
     internal sealed class DailyRunner : IDisposable
     {
+        // Signals an ordinary child return with incomplete evidence, never a
+        // successful result. Only known child types may recover and advance.
+        private sealed class UnverifiedChildResultException : InvalidOperationException
+        {
+            internal readonly int Route;
+            internal UnverifiedChildResultException(string message, int route) : base(message) { Route = route; }
+        }
         private const string LogArea = "一条龙";
         private readonly CombatSettings settings;
         private readonly DailyOptions options;
@@ -29,9 +36,17 @@ namespace TideCombat
         private readonly DailyEvidence evidence;
         internal bool Failed { get; private set; }
         internal string Failure { get; private set; }
+        internal bool RecoverableFailuresOnly { get; private set; }
+        internal bool HasNormalUnverifiedFailure { get; private set; }
+        private bool allFailuresRecoverable;
+
+        internal bool TryGetContinuationWindow(out IntPtr handle, out uint processId)
+        {
+            return TaskContinuation.TryGetCurrentWindow(world, out handle, out processId);
+        }
         private int usedStamina, points;
-        private bool cultivationIncludesNightmare, claimedTacetStamina;
-        private bool? initialRewardReady;
+        private bool cultivationIncludesNightmare, cultivationSpentStamina;
+        private bool? initialActivityPage, initialRewardReady;
 
         internal DailyRunner(CombatSettings settings, DailyOptions options, CancellationToken token,
             IProgress<DailyReport> progress)
@@ -62,17 +77,37 @@ namespace TideCombat
 
         private void RunCore()
         {
+            RecoverableFailuresOnly = false;
+            HasNormalUnverifiedFailure = false;
+            allFailuresRecoverable = true;
             options.Validate();
             DailyTask[] tasks = (DailyTask[])options.GetTasks().Clone();
             if (Array.IndexOf(tasks, DailyTask.Farm4C) >= 0 && (settings.Farm == null || !settings.Farm.Teleport))
                 throw new InvalidOperationException("一条龙已选择刷 4C，请先在刷 4C 设置里开启传送。");
             if (Array.IndexOf(tasks, DailyTask.Nightmare) >= 0 && options.GetNightmareMode() == DailyNightmareMode.All)
-                (settings.Nightmare ?? NightmareOptions.Defaults()).Validate();
+                CreateNightmareOptions(settings.Nightmare, DailyNightmareMode.All);
             RunLog.Info(LogArea, "任务计划 · " + string.Join(" → ", tasks.Select(DailyPlan.Label)));
             string unselected = string.Join("、", Enum.GetValues(typeof(DailyTask)).Cast<DailyTask>()
                 .Except(tasks).Select(DailyPlan.Label));
             if (!string.IsNullOrEmpty(unselected))
                 RunLog.Info(LogArea, "未选择项目 · " + unselected);
+            token.ThrowIfCancellationRequested();
+            EnsureInitialScreen(tasks[0]);
+            if (options.IsReferencePlan)
+            {
+                // OKWW snapshots both prerequisites once. A successful tap on
+                // nightmare rewards must not change whether stamina was needed
+                // at the start of the daily task.
+                bool activityPage;
+                bool rewardReady = ReadDailyProgress(out activityPage, continueToDomain: true, keepGuidebook: true);
+                initialActivityPage = activityPage;
+                initialRewardReady = rewardReady;
+                if (!activityPage)
+                    throw new InvalidOperationException("未确认日常活跃度页面，不能安全判断体力消耗或按需梦魇。");
+                tasks = options.GetReferenceRunTasks(rewardReady, usedStamina);
+                RunLog.Info(LogArea, "初始进度决定的实际项目 · " + string.Join(" → ", tasks.Select(DailyPlan.Label)));
+            }
+
             var failed = new List<string>();
             for (int index = 0; index < tasks.Length; index++)
             {
@@ -82,8 +117,8 @@ namespace TideCombat
                     string reason;
                     if (!RunStep(tasks[index], index + 1, tasks.Length, out reason))
                         failed.Add(DailyPlan.Label(tasks[index]) + "（" + reason + "）");
-                    if (options.Tasks == null && tasks[index] == DailyTask.Stamina)
-                        DailyPlan.OrderRewardsAndNightmare(tasks, claimedTacetStamina);
+                    if (options.Tasks == null && options.Farm == DomainKind.Cultivation && tasks[index] == DailyTask.Stamina)
+                        DailyPlan.OrderCultivationRewardsAndNightmare(tasks, cultivationSpentStamina);
                 }
                 catch (InvalidOperationException)
                 {
@@ -96,6 +131,7 @@ namespace TideCombat
             token.ThrowIfCancellationRequested();
             if (failed.Count > 0)
             {
+                RecoverableFailuresOnly = allFailuresRecoverable;
                 Fail("一条龙结束，失败项目：" + string.Join("、", failed) + "。");
                 return;
             }
@@ -116,15 +152,23 @@ namespace TideCombat
             var watch = Stopwatch.StartNew();
             try
             {
-                string before = evidence.Begin(task, index, ReadEvidenceFrame());
+                string before = null;
+                if (options.IsReferencePlan)
+                    evidence.StartStep(task, index);
+                else before = evidence.Begin(task, index, ReadEvidenceFrame());
+                token.ThrowIfCancellationRequested();
                 string completion;
                 string skipReason = ExecuteStep(task, out completion);
                 token.ThrowIfCancellationRequested();
-                string after = evidence.Save(before == null ? "after-missing-before" :
-                    skipReason == null ? "after-confirmed" : "after-skipped", ReadEvidenceFrame());
-                if (before == null || after == null)
-                    RunLog.Warn(LogArea, "本步骤的起止截图未完整保存，游戏内结果见本步记录。");
-                string duration = " · 耗时=" + watch.ElapsedMilliseconds + "ms";
+                if (!options.IsReferencePlan)
+                {
+                    string after = evidence.Save(before == null ? "after-missing-before" :
+                        skipReason == null ? "after-confirmed" : "after-skipped", ReadEvidenceFrame());
+                    token.ThrowIfCancellationRequested();
+                    if (before == null || after == null)
+                        RunLog.Warn(LogArea, "本步骤的起止截图未完整保存，游戏内结果见本步记录。");
+                }
+                string duration = options.IsReferencePlan ? "" : " · 耗时=" + watch.ElapsedMilliseconds + "ms";
                 string status = skipReason == null ? "完成 " : "跳过 ";
                 string detail = skipReason ?? completion;
                 Report(status + step + (detail == null ? "" : " · " + detail) + duration);
@@ -147,18 +191,24 @@ namespace TideCombat
                     RunLog.Warn(LogArea, "中断 " + step + " · 输入权限不足" + duration);
                     throw;
                 }
-                bool critical = (task == DailyTask.Stamina && options.Farm != DomainKind.Cultivation) ||
-                    task == DailyTask.Garden || task == DailyTask.Farm4C;
-                if (!critical && index < count)
+                var unverified = error as UnverifiedChildResultException;
+                bool normalUnverified = unverified != null;
+                bool critical = !DailyPlan.CanAttemptRecovery(task, options.IsReferencePlan,
+                    options.Farm == DomainKind.Cultivation, normalUnverified);
+                bool attemptedRecovery = !critical && (options.IsReferencePlan || index < count || normalUnverified);
+                if (attemptedRecovery)
                 {
                     RunLog.Warn(LogArea, "项目未确认，检查能否安全继续后续任务");
-                    critical = !world.WaitUntil(CanResumeAfterFailure, 5000);
+                    critical = normalUnverified ? !ConfirmUnverifiedContinuation(unverified.Route) : !TryResumeAfterFailure(task);
                     token.ThrowIfCancellationRequested();
                     RunLog.Info(LogArea, critical ? "未确认可继续的游戏界面" : "已确认游戏界面，将继续后续任务");
                 }
                 RunLog.Error(LogArea, "失败 " + step + " · 是否中止=" + critical + duration, error);
                 if (critical)
                     throw new InvalidOperationException(DailyPlan.Label(task) + "失败：" + error.Message, error);
+                if (normalUnverified) HasNormalUnverifiedFailure = true;
+                if (!attemptedRecovery || !options.IsReferencePlan && !normalUnverified)
+                    allFailuresRecoverable = false;
                 Report("失败 " + step + " · " + error.Message);
                 failureReason = error.Message;
                 return false;
@@ -185,12 +235,93 @@ namespace TideCombat
 
         private void RecordEvidence(string stage)
         {
-            evidence.Save(stage, world.Captured ? world.Frame : default(PixelFrame));
+            if (!options.IsReferencePlan)
+                evidence.Save(stage, world.Captured ? world.Frame : default(PixelFrame));
         }
 
         private void RecordEvidence(string stage, PixelFrame frame)
         {
-            evidence.Save(stage, frame);
+            if (!options.IsReferencePlan) evidence.Save(stage, frame);
+        }
+
+        private void EnsureInitialScreen(DailyTask firstTask)
+        {
+            if (world.Tick() && (world.VerifiedWorld && !world.InRealm ||
+                !options.IsReferencePlan && options.Tasks != null && CanKeepInitialScreen(firstTask)))
+            {
+                if (options.IsReferencePlan) world.Sleep(500);
+                return;
+            }
+
+            var recovery = new WorldRecovery(world, Report);
+            bool ready = recovery.EnsureMain(180000, loginPending: true);
+            token.ThrowIfCancellationRequested();
+            if (!ready)
+                throw new InvalidOperationException("一条龙开始前未确认进入游戏世界。");
+        }
+
+        private bool CanKeepInitialScreen(DailyTask task)
+        {
+            if (task == DailyTask.Nightmare && world.VerifiedWorld && world.InRealm)
+                return true;
+            if (world.InRealm)
+                return false;
+            switch (task)
+            {
+                case DailyTask.Mail:
+                    return world.Terminal || ReadMailHeading(world.Frame);
+                case DailyTask.BattlePass:
+                    return world.Terminal || ReadBattlePass().Page != BattlePassPage.Unknown;
+                case DailyTask.DailyRewards:
+                case DailyTask.Stamina:
+                case DailyTask.Nightmare:
+                case DailyTask.Garden:
+                    return world.Terminal || GuidebookVisible();
+                case DailyTask.MonthlyCard:
+                    return world.Ui != null && world.Ui.MonthlyCard;
+                default:
+                    return false;
+            }
+        }
+
+        private bool TryResumeAfterFailure(DailyTask task)
+        {
+            if (world.WaitUntil(CanResumeAfterFailure, 5000))
+                return RecoverKnownTaskWorld();
+            if ((task != DailyTask.Garden && task != DailyTask.Merge) || !world.Tick() ||
+                world.InRealm || world.TeamHud)
+                return false;
+
+            int route = world.InputRouteVersion;
+            string page = task == DailyTask.Garden ? "garden_start_game" : "echo_select_all";
+            Rectangle ignored;
+            if (!world.FindNear(page, .82, out ignored) || !world.Key((char)0x1B, route: route))
+                return false;
+            return world.WaitUntil(() => world.InputRouteVersion == route && CanResumeAfterFailure(), 5000) &&
+                RecoverKnownTaskWorld();
+        }
+
+        private bool ConfirmUnverifiedContinuation(int route)
+        {
+            // This path may leave a verified Guidebook open after nightmare
+            // scanning. Close only that known menu on the original route and
+            // never enter a login/reconnect state machine to get a substitute
+            // successful result.
+            for (int attempt = 0; attempt < 3; attempt++)
+            {
+                if (!world.Tick() || world.InputRouteVersion != route) return false;
+                if (TaskContinuation.IsSafeWorld(world)) return true;
+                if (world.InRealm || world.TeamHud || !(world.Terminal || GuidebookVisible()) ||
+                    !world.Key((char)0x1B, route: route)) return false;
+                if (token.WaitHandle.WaitOne(800)) return false;
+            }
+            return world.Tick() && world.InputRouteVersion == route && TaskContinuation.IsSafeWorld(world);
+        }
+
+        private bool RecoverKnownTaskWorld()
+        {
+            return options.IsReferencePlan ? new WorldRecovery(world, Report).EnsureMain(180000, loginPending: false) &&
+                world.VerifiedWorld && !world.InRealm : EnsureWorld();
         }
 
         private bool CanResumeAfterFailure()
@@ -211,9 +342,11 @@ namespace TideCombat
                 case DailyTask.Stamina: return RunStamina(out completion);
                 case DailyTask.DailyRewards: return ClaimDaily(out completion);
                 case DailyTask.Mail: return ClaimMail(out completion);
-                case DailyTask.BattlePass: completion = ClaimBattlePass(); break;
+                case DailyTask.BattlePass: return ClaimBattlePass(out completion);
                 case DailyTask.Garden: return RunGarden(out completion);
-                case DailyTask.Merge: RequireWorld(); return RunMerge(out completion);
+                case DailyTask.Merge:
+                    if (!options.IsReferencePlan) RequireWorld();
+                    return RunMerge(out completion);
                 case DailyTask.Farm4C: RequireWorld(); completion = RunFarm4C(); break;
                 case DailyTask.MonthlyCard: return ClaimMonthlyCard(out completion);
                 default: throw new InvalidOperationException("未识别的一条龙任务。");
@@ -231,32 +364,50 @@ namespace TideCombat
                     return "本次培养目标已启用梦魇巢穴";
                 if (!ShouldCheckNightmareProgress(options))
                     return "刷无音区时无需额外补日常声骸";
-                bool activityPage = true;
-                if (options.Tasks == null && initialRewardReady.HasValue ? initialRewardReady.Value :
-                    ReadDailyProgress(out activityPage))
+                bool activityPage, rewardReady;
+                if (options.Tasks == null && initialActivityPage.HasValue)
+                {
+                    activityPage = initialActivityPage.Value;
+                    rewardReady = initialRewardReady.GetValueOrDefault();
+                }
+                else rewardReady = ReadDailyProgress(out activityPage);
+                if (rewardReady)
                     return "日常积分已满";
                 if (!activityPage)
                     return "未确认日常积分，跳过按需补捡";
             }
-            NightmareOptions configured = settings.Nightmare ?? NightmareOptions.Defaults();
-            var nightmare = new NightmareOptions
-            {
-                TacetNest = mode != DailyNightmareMode.All || configured.TacetNest,
-                Purification = mode != DailyNightmareMode.All || configured.Purification,
-                CaptureOnce = mode != DailyNightmareMode.All
-            };
-            nightmare.Validate();
+            NightmareOptions nightmare = CreateNightmareOptions(settings.Nightmare, mode);
+            token.ThrowIfCancellationRequested();
             using (var runner = new NightmareNestRunner(settings, nightmare, token,
-                new StepProgress<NightmareReport>(), RecordEvidence))
+                new StepProgress<NightmareReport>(), RecordEvidence, world))
             {
-                runner.Run();
+                runner.Run(fromDailyReference: options.IsReferencePlan);
+                token.ThrowIfCancellationRequested();
                 if (runner.Failed)
                     throw new InvalidOperationException(runner.Failure);
                 if (runner.CompletionIssue != null)
-                    throw new InvalidOperationException(runner.CompletionIssue);
+                    throw new UnverifiedChildResultException("梦魇扫描正常返回，但未完成核验：" + runner.CompletionIssue,
+                        world.InputRouteVersion);
                 completion = nightmare.CaptureOnce ? "已确认捕获声骸" : "已核对所选巢穴页面和处理结果";
             }
             return null;
+        }
+
+        internal static NightmareOptions CreateNightmareOptions(NightmareOptions configured, DailyNightmareMode mode)
+        {
+            configured = configured ?? NightmareOptions.Defaults();
+            bool captureOnce = mode != DailyNightmareMode.All;
+            if (!captureOnce && !configured.TacetNest && !configured.Purification)
+                throw new System.IO.InvalidDataException("全部梦魇巢穴至少选择一种巢穴类型。");
+            bool useBoth = captureOnce && !configured.TacetNest && !configured.Purification;
+            var nightmare = new NightmareOptions
+            {
+                TacetNest = configured.TacetNest || useBoth,
+                Purification = configured.Purification || useBoth,
+                CaptureOnce = captureOnce
+            };
+            nightmare.Validate();
+            return nightmare;
         }
 
         internal static bool ShouldCheckNightmareProgress(DailyOptions options)
@@ -267,9 +418,19 @@ namespace TideCombat
         private string RunStamina(out string completion)
         {
             completion = null;
-            bool activityPage;
-            bool rewardReady = ReadDailyProgress(out activityPage, continueToDomain: true);
-            if (activityPage) initialRewardReady = rewardReady;
+            bool activityPage, rewardReady;
+            if (options.IsReferencePlan && initialActivityPage.HasValue)
+            {
+                activityPage = initialActivityPage.Value;
+                rewardReady = initialRewardReady.GetValueOrDefault();
+            }
+            else rewardReady = ReadDailyProgress(out activityPage, continueToDomain: true);
+            token.ThrowIfCancellationRequested();
+            if (options.Tasks == null && options.Farm == DomainKind.Cultivation)
+            {
+                initialActivityPage = activityPage;
+                initialRewardReady = rewardReady;
+            }
             if (!DailyPlan.NeedsStamina(rewardReady, usedStamina))
                 return rewardReady ? "日常积分已满" : "今日已消耗 180 体力";
             if (!activityPage)
@@ -287,7 +448,8 @@ namespace TideCombat
                     try
                     {
                         int spent = runner.Run(budget);
-                        claimedTacetStamina = spent > 0;
+                        token.ThrowIfCancellationRequested();
+                        cultivationSpentStamina = spent > 0;
                         completion = "培养目标确认消耗 " + spent + " 点体力";
                     }
                     catch (Exception error)
@@ -295,7 +457,9 @@ namespace TideCombat
                         if (token.IsCancellationRequested || error is InputElevationRequiredException) throw;
                         RunLog.Error(LogArea, "培养目标失败", error);
                         var recovery = new WorldRecovery(world, Report);
-                        if (!recovery.EnsureMain(180000))
+                        bool ready = recovery.EnsureMain(180000);
+                        token.ThrowIfCancellationRequested();
+                        if (!ready)
                             throw new InvalidOperationException("培养目标失败且未能返回大世界。", error);
                         return "培养目标失败，已返回大世界 · " + error.Message;
                     }
@@ -317,15 +481,20 @@ namespace TideCombat
             using (var runner = new DomainRunner(settings, domain, token, recorder, RecordEvidence, world))
             {
                 runner.Run();
+                token.ThrowIfCancellationRequested();
                 if (runner.Failed)
                     throw new InvalidOperationException(runner.Failure);
                 if (!runner.CompletionVerified)
-                    throw new InvalidOperationException("未确认体力本的领奖或可用体力。");
-                claimedTacetStamina = options.Farm == DomainKind.Tacet && runner.UsedStamina > 0;
+                    throw new UnverifiedChildResultException("体力本已正常返回，但未确认领奖或可用体力。",
+                        world.InputRouteVersion);
                 if (runner.NoStamina && usedStamina == before)
+                {
+                    if (options.IsReferencePlan) world.Sleep(4000);
                     return "核对画面后确认体力不足";
+                }
                 completion = "确认消耗 " + (usedStamina - before) + " 点体力";
             }
+            if (options.IsReferencePlan) world.Sleep(4000);
             return null;
         }
 
@@ -335,6 +504,7 @@ namespace TideCombat
             using (var runner = new GardenRunner(settings, token, new StepProgress<GardenReport>(), RecordEvidence, world))
             {
                 runner.Run();
+                token.ThrowIfCancellationRequested();
                 if (runner.Failed)
                     throw new InvalidOperationException(runner.Failure);
                 if (!runner.CompletionVerified)
@@ -351,9 +521,10 @@ namespace TideCombat
             completion = null;
             int batches = 0;
             using (var runner = new MergeRunner(settings, token, new StepProgress<MergeReport>(r => batches = r.Batches),
-                RecordEvidence, notifyIfInsufficient: false))
+                RecordEvidence, notifyIfInsufficient: false, session: world))
             {
                 runner.Run();
+                token.ThrowIfCancellationRequested();
                 if (runner.Failed)
                     throw new InvalidOperationException(runner.Failure);
                 if (!runner.CompletionVerified)
@@ -375,9 +546,9 @@ namespace TideCombat
             token.ThrowIfCancellationRequested();
             if (last != null && last.Failure != null)
                 throw new InvalidOperationException(last.Failure);
-            if (last == null || !last.Finished || last.Kills < settings.Farm.RepeatCount)
+            if (last == null || !last.Finished || last.Attempts < settings.Farm.RepeatCount)
                 throw new InvalidOperationException("未确认达到刷 4C 的设定轮数。");
-            return "确认完成 " + last.Kills + " 轮，确认吸收 " + last.Echoes + " 个";
+            return "已执行 " + last.Attempts + " 轮，确认击杀 " + last.Kills + " 次，确认吸收 " + last.Echoes + " 个";
         }
 
         private string ClaimMonthlyCard(out string completion)
@@ -403,32 +574,40 @@ namespace TideCombat
             throw new InvalidOperationException("已识别月卡弹窗，未确认弹窗消失并返回大世界。");
         }
 
-        private bool ReadDailyProgress(out bool activityPage, bool continueToDomain = false)
+        private bool ReadDailyProgress(out bool activityPage, bool continueToDomain = false, bool keepGuidebook = false)
         {
             OpenDailyActivity();
             activityPage = world.WaitUntil(() => IsDailyActivityPage(world.Frame), 5000);
             if (activityPage)
             {
                 int used, currentPoints;
-                bool readStamina = DailyPlan.TryReadStamina(world.Read(.10, .10, .50, .75), out used);
-                if (!readStamina)
+                bool uncertainStamina, uncertainPoints;
+                bool readStamina = DailyPlan.TryReadStamina(world.Read(.10, .10, .50, .75), out used, out uncertainStamina);
+                if (!readStamina && !uncertainStamina)
                 {
                     world.Click(.974, .6);
                     world.Sleep(1000);
-                    readStamina = DailyPlan.TryReadStamina(world.Read(.10, .10, .50, .75), out used);
+                    readStamina = DailyPlan.TryReadStamina(world.Read(.10, .10, .50, .75), out used, out uncertainStamina);
                 }
-                bool readPoints = DailyPlan.TryReadPoints(world.Read(.19, .80, .30, .93), out currentPoints);
+                bool readPoints = DailyPlan.TryReadPoints(world.Read(.19, .80, .30, .93), out currentPoints, out uncertainPoints);
                 activityPage = world.Tick() && IsDailyActivityPage(world.Frame);
+                if (activityPage && (!readStamina && uncertainStamina || !readPoints && uncertainPoints))
+                {
+                    // Absence after a confirmed page can be treated as zero,
+                    // but conflicting/inconclusive numeric evidence cannot.
+                    activityPage = false;
+                    RunLog.Warn(LogArea, "日常数值有冲突或低置信候选，不以 0 代替并消耗体力。");
+                }
                 if (activityPage)
                 {
                     RecordEvidence("daily-progress-read");
                     if (!readStamina) RunLog.Warn(LogArea, "翻页后仍缺少日常消耗计数，本次按 0 计算");
                     if (!readPoints) RunLog.Warn(LogArea, "活跃度页面缺少积分读数，本次按 0 计算");
-                    usedStamina = Math.Max(usedStamina, used);
-                    points = Math.Max(points, currentPoints);
+                    usedStamina = options.IsReferencePlan ? used : Math.Max(usedStamina, used);
+                    points = options.IsReferencePlan ? currentPoints : Math.Max(points, currentPoints);
                     Report(readStamina && readPoints ? "日常进度读取完成" : "日常进度已按缺失项取 0");
                     bool rewardReady = DailyPlan.RewardReady(currentPoints);
-                    if (!continueToDomain || !DailyPlan.NeedsStamina(rewardReady, usedStamina)) RequireWorld();
+                    if (!keepGuidebook && (!continueToDomain || !DailyPlan.NeedsStamina(rewardReady, usedStamina))) RequireWorld();
                     return rewardReady;
                 }
             }
@@ -453,8 +632,14 @@ namespace TideCombat
 
         private void OpenDailyActivity()
         {
-            var guide = new GuidebookNavigation(world, Report, GuideTab.Quest);
-            if (!guide.Open(() => new WorldRecovery(world, Report).EnsureMain(180000, loginPending: true)))
+            if (options.IsReferencePlan)
+            {
+                // The reference reopens the F2 guide from main rather than
+                // reusing a previously selected quest page.
+                RequireWorld();
+            }
+            var guide = new GuidebookNavigation(world, Report, GuideTab.Quest, referenceSequence: options.IsReferencePlan);
+            if (!guide.Open(() => new WorldRecovery(world, Report).EnsureMain(180000, loginPending: false)))
                 throw new InvalidOperationException(guide.Failure ?? "未识别到任务图鉴。");
             if (world.Tick() && IsDailyActivityPage(world.Frame))
                 return;
@@ -473,18 +658,21 @@ namespace TideCombat
                 throw new InvalidOperationException("任务图鉴已打开，但没有识别到日常页签。");
             }
             RecordEvidence("daily-tab");
-            RequireInput(world.Click(tab), "打开已识别的日常页");
+            RequireInput(ClickVerifiedControl(tab, .17, .12), "打开已识别的日常页");
+            if (options.IsReferencePlan) world.Sleep(1000);
         }
 
         private string ClaimMail(out string completion)
         {
             completion = null;
+            if (options.IsReferencePlan) RequireWorld();
             if (!world.Tick() || !ReadMailHeading(world.Frame))
             {
                 if (!world.Captured || !world.Vision.IsTerminal(world.Frame))
                 {
                     RequireWorld();
                     RequireInput(world.Key((char)0x1B), "打开终端");
+                    if (options.IsReferencePlan) world.Sleep(1500);
                 }
                 Rectangle mail = Rectangle.Empty;
                 if (!world.WaitUntil(() => world.Vision.FindTerminalMail(world.Frame, out mail), 5000))
@@ -493,9 +681,12 @@ namespace TideCombat
                     throw new InvalidOperationException("未识别到终端的邮件入口。");
                 }
                 RecordEvidence("mail-entry");
-                RequireInput(world.Click(mail), "打开已识别的邮件入口");
+                RequireInput(ClickVerifiedControl(mail, .64, .95), "打开已识别的邮件入口");
+                if (options.IsReferencePlan) world.Sleep(1000);
             }
-            return ClaimVisibleRewards(true, out completion);
+            string result = ClaimVisibleRewards(true, out completion);
+            if (options.IsReferencePlan) world.Sleep(1000);
+            return result;
         }
 
         private enum ClaimStatus { Unknown, Open, Available, Empty, Receipt }
@@ -555,15 +746,36 @@ namespace TideCombat
         {
             beforeButton = BattlePassVision.ButtonPatch(world.Frame, button);
             PixelFrame beforeNotice = mail ? DailyClaimVision.CaptureMailNoticeBackground(world.Frame) : default(PixelFrame);
-            RequireInput(world.Click(button), "领取已识别的" + label);
+            RequireInput(ClickVerifiedControl(button, mail ? .14 : .93, mail ? .90 : .882), "领取已识别的" + label);
+            long earliest = world.Now + (options.IsReferencePlan ? 1000 : 0);
             if (mail && world.WaitUntil(() => DailyClaimVision.HasMailClaimedNotice(world.Frame, beforeNotice, world.Ocr), 2200))
             {
+                WaitUntilTime(earliest);
                 RecordEvidence("mail-attachments-cleared-notice");
                 RunLog.Info(LogArea, "已识别「全部邮件的附件已经领取完毕」");
                 return ClaimStatus.Empty;
             }
             Rectangle unused;
-            return WaitForClaimStatus(mail, true, mail ? 4800 : 7000, out unused, button, beforeButton);
+            ClaimStatus status = WaitForClaimStatus(mail, true, mail ? 4800 : 7000, out unused, button, beforeButton);
+            if (status != ClaimStatus.Receipt) WaitUntilTime(earliest);
+            return status;
+        }
+
+        private bool ClickVerifiedControl(Rectangle control, double referenceX, double referenceY, bool centered = false)
+        {
+            if (!world.Captured || control.IsEmpty) return false;
+            int route = world.InputRouteVersion;
+            Point point = options.IsReferencePlan ? DailyPlan.ReferenceControlPoint(control,
+                new Size(world.Frame.Width, world.Frame.Height), referenceX, referenceY, centered) :
+                new Point(control.Left + control.Width / 2, control.Top + control.Height / 2);
+            return world.ClickOnRoute(point, route);
+        }
+
+        private void WaitUntilTime(long earliest)
+        {
+            int remaining = (int)Math.Max(0, earliest - world.Now);
+            if (remaining > 0) world.Sleep(remaining);
+            token.ThrowIfCancellationRequested();
         }
 
         private void CloseClaimReceipt()
@@ -670,13 +882,33 @@ namespace TideCombat
                 Rectangle.FromLTRB(x, y, (int)(frame.Width * right), (int)(frame.Height * bottom)));
         }
 
-        private string ClaimBattlePass()
+        private enum BattlePassEntryResult { Unconfirmed, Opened, Unavailable }
+
+        private string ClaimBattlePass(out string completion)
         {
-            if (!OpenBattlePass())
+            completion = null;
+            int entryRoute;
+            BattlePassEntryResult entry = OpenBattlePass(out entryRoute);
+            if (entry == BattlePassEntryResult.Unavailable)
+            {
+                if (!world.Tick() || world.InputRouteVersion != entryRoute)
+                    throw new InvalidOperationException("确认战令状态后输入路径已变化。");
+                // The original logs a missing battle pass and continues. Only
+                // explicit, stable season-closed evidence warrants that skip;
+                // an OCR miss or failed input remains a real failure.
+                RecordEvidence("battle-pass-season-unavailable");
+                RequireWorld();
+                if (world.InputRouteVersion != entryRoute)
+                    throw new InvalidOperationException("战令未开放，返回世界时输入路径已变化。");
+                return "已确认先约电台本期未开放或已结束";
+            }
+            if (entry != BattlePassEntryResult.Opened)
             {
                 RecordEvidence("battle-pass-entry-unconfirmed");
                 throw new InvalidOperationException("未确认进入先约电台。");
             }
+            if (!world.Tick() || world.InputRouteVersion != entryRoute)
+                throw new InvalidOperationException("进入先约电台后输入路径已变化。");
 
             string tasks;
             try { tasks = ClaimBattlePassPage(BattlePassPage.Tasks, "tasks", "电台任务"); }
@@ -694,31 +926,94 @@ namespace TideCombat
             RequireInput(world.Key((char)0x1B), "关闭已确认的先约电台");
             if (!world.WaitUntil(() => world.VerifiedWorld || world.Vision.IsTerminal(world.Frame), 5000))
                 throw new InvalidOperationException("战令奖励状态已记录，退出电台后的界面未确认。");
-            return tasks + "，" + rewards;
+            if (options.IsReferencePlan) RequireWorld();
+            completion = tasks + "，" + rewards;
+            return null;
         }
 
-        private bool OpenBattlePass()
+        private BattlePassEntryResult OpenBattlePass(out int entryRoute)
         {
+            entryRoute = -1;
             if (!world.Tick())
-                return false;
+                return BattlePassEntryResult.Unconfirmed;
+            if (options.IsReferencePlan)
+            {
+                // Reference opens the in-world HUD directly with Alt. Retain
+                // terminal recognition only as a fallback from a known screen.
+                RequireWorld();
+                int route = world.InputRouteVersion;
+                BattlePassEntryResult result = TryOpenBattlePassHud(route);
+                if (result != BattlePassEntryResult.Unconfirmed) { entryRoute = route; return result; }
+                if (!world.Tick() || world.InputRouteVersion != route || !world.VerifiedWorld && !world.Terminal)
+                    return BattlePassEntryResult.Unconfirmed;
+            }
             if (!world.VerifiedWorld && !world.Vision.IsTerminal(world.Frame) &&
                 ReadBattlePass().Page != BattlePassPage.Unknown)
-                return true;
+            { entryRoute = world.InputRouteVersion; return BattlePassEntryResult.Opened; }
 
             if (world.VerifiedWorld && world.Key((char)0x1B))
                 world.WaitUntil(() => world.Vision.IsTerminal(world.Frame), 4000);
-            if (ClickBattlePassEntry() && WaitForBattlePassPage(BattlePassPage.Unknown, 7000))
-                return true;
+            int terminalRoute = world.InputRouteVersion;
+            if (ClickBattlePassEntry() && world.InputRouteVersion == terminalRoute)
+            {
+                BattlePassEntryResult result = WaitForBattlePassEntry(terminalRoute, 7000);
+                if (result != BattlePassEntryResult.Unconfirmed) { entryRoute = terminalRoute; return result; }
+            }
 
             if (world.Window.Mode != GameSource.Background || !world.TryRecoverForegroundCapture())
-                return false;
+                return BattlePassEntryResult.Unconfirmed;
             if (!world.VerifiedWorld && !world.Vision.IsTerminal(world.Frame) &&
                 ReadBattlePass().Page != BattlePassPage.Unknown)
-                return true;
+            { entryRoute = world.InputRouteVersion; return BattlePassEntryResult.Opened; }
             if (world.VerifiedWorld && world.Key((char)0x1B, requireForeground: true))
                 world.WaitUntil(() => world.Vision.IsTerminal(world.Frame), 4000);
-            return ClickBattlePassEntry(requireForeground: true) &&
-                WaitForBattlePassPage(BattlePassPage.Unknown, 7000);
+            terminalRoute = world.InputRouteVersion;
+            if (!ClickBattlePassEntry(requireForeground: true) || world.InputRouteVersion != terminalRoute)
+                return BattlePassEntryResult.Unconfirmed;
+            BattlePassEntryResult fallback = WaitForBattlePassEntry(terminalRoute, 7000);
+            if (fallback != BattlePassEntryResult.Unconfirmed) entryRoute = terminalRoute;
+            return fallback;
+        }
+
+        private BattlePassEntryResult TryOpenBattlePassHud(int route)
+        {
+            if (!world.Tick() || world.InputRouteVersion != route || !world.VerifiedWorld || world.InRealm)
+                return BattlePassEntryResult.Unconfirmed;
+            const char alt = '\u0012';
+            if (!world.KeyDown(alt, route)) return BattlePassEntryResult.Unconfirmed;
+            bool clicked = false;
+            try
+            {
+                if (token.WaitHandle.WaitOne(50) || !world.Tick() || route != world.InputRouteVersion ||
+                    !world.VerifiedWorld || world.InRealm) return BattlePassEntryResult.Unconfirmed;
+                var reference = new Point((int)(world.Frame.Width * .86), (int)(world.Frame.Height * .05));
+                clicked = world.ClickOnRoute(reference, route);
+            }
+            finally { world.KeyUp(alt); }
+            return clicked ? WaitForBattlePassEntry(route, 7000) : BattlePassEntryResult.Unconfirmed;
+        }
+
+        private BattlePassEntryResult WaitForBattlePassEntry(int route, int timeoutMs)
+        {
+            BattlePassEntryResult state = BattlePassEntryResult.Unconfirmed;
+            long since = -1;
+            bool ready = world.WaitUntil(() =>
+            {
+                if (world.InputRouteVersion != route || !world.Captured) return false;
+                var lines = world.Read(.00, .00, .98, .98);
+                if (world.InputRouteVersion != route || !world.Captured) return false;
+                var size = new Size(world.Frame.Width, world.Frame.Height);
+                BattlePassEntryResult observed = !world.VerifiedWorld && !world.Terminal &&
+                    BattlePassVision.Inspect(lines, size).Page != BattlePassPage.Unknown ? BattlePassEntryResult.Opened :
+                    BattlePassVision.IsSeasonUnavailable(lines, size) ? BattlePassEntryResult.Unavailable : BattlePassEntryResult.Unconfirmed;
+                if (observed == BattlePassEntryResult.Unconfirmed) { state = observed; since = -1; return false; }
+                if (observed != state) { state = observed; since = world.Now; return false; }
+                // The reference has a 1-second settled active page. An
+                // explicit season-closed toast may be shorter, but it still
+                // must be seen on consecutive frames of the same route.
+                return since >= 0 && world.Now - since >= (state == BattlePassEntryResult.Opened ? 1000 : 150);
+            }, timeoutMs);
+            return ready && world.InputRouteVersion == route ? state : BattlePassEntryResult.Unconfirmed;
         }
 
         private bool ClickBattlePassEntry(bool requireForeground = false)
@@ -740,16 +1035,29 @@ namespace TideCombat
         private string ClaimBattlePassPage(BattlePassPage page, string evidenceName, string label)
         {
             BattlePassReadout before = ReadBattlePass();
-            if (before.Page != page)
+            if (before.Page != page || options.IsReferencePlan)
             {
-                Point tab;
-                if (before.Page == BattlePassPage.Unknown || !BattlePassVision.FindTab(world.Frame, page, out tab) ||
-                    !world.ClickMenuButton(tab, retry: true) || !WaitForBattlePassPage(page, 6000))
+                Point tab = Point.Empty;
+                bool canNavigate = before.Page != BattlePassPage.Unknown && BattlePassVision.FindTab(world.Frame, page, out tab);
+                bool navigated = false;
+                if (canNavigate)
+                {
+                    if (options.IsReferencePlan)
+                    {
+                        int route = world.InputRouteVersion;
+                        var anchor = new Point((int)(world.Frame.Width * .04),
+                            (int)(world.Frame.Height * (page == BattlePassPage.Tasks ? .30 : .17)));
+                        navigated = world.ClickOnRoute(anchor, route);
+                        if (navigated) world.Sleep(page == BattlePassPage.Tasks ? 1000 : 2000);
+                    }
+                    else navigated = world.ClickMenuButton(tab, retry: true);
+                }
+                if ((!navigated && before.Page != page) || navigated && !WaitForBattlePassPage(page, 6000))
                 {
                     RecordEvidence("battle-pass-" + evidenceName + "-navigation-unconfirmed");
                     throw new InvalidOperationException("未确认进入" + label + "页。");
                 }
-                before = ReadBattlePass();
+                if (navigated) before = ReadBattlePass();
             }
             string evidence = "battle-pass-" + evidenceName;
             RecordEvidence(evidence + "-before");
@@ -766,9 +1074,11 @@ namespace TideCombat
 
             int[] original = BattlePassVision.ButtonPatch(world.Frame, before.ClaimAll);
             var frameSize = new Size(world.Frame.Width, world.Frame.Height);
-            RequireInput(world.Click(before.ClaimAll), "点击" + label + "一键领取");
+            RequireInput(ClickVerifiedControl(before.ClaimAll, .68, .91, centered: true), "点击" + label + "一键领取");
+            long earliest = world.Now + (options.IsReferencePlan ? (page == BattlePassPage.Tasks ? 3000 : 2000) : 0);
             bool receiptSeen;
             bool completed = WaitForBattlePassClaim(page, evidence, before.ClaimAll, frameSize, original, out receiptSeen);
+            WaitUntilTime(earliest);
             if (!completed && !receiptSeen && !token.IsCancellationRequested)
             {
                 BattlePassReadout retry = ReadBattlePass();
@@ -844,7 +1154,12 @@ namespace TideCombat
         private void RequireWorld()
         {
             token.ThrowIfCancellationRequested();
-            if (!EnsureWorld())
+            // Default reference calls use a shared ensure-main recovery on
+            // the existing session. Ordinary return paths must not enable a
+            // fresh login state machine; the explicit startup path owns it.
+            bool ready = options.IsReferencePlan ? new WorldRecovery(world, Report).EnsureMain(10000, loginPending: false) &&
+                world.VerifiedWorld && !world.InRealm : EnsureWorld();
+            if (!ready)
                 throw new InvalidOperationException("无法回到游戏世界。");
         }
 
@@ -882,6 +1197,21 @@ namespace TideCombat
                 }
                 if (world.VerifiedWorld)
                     return true;
+                // Reuse the existing route-verified cloud-disconnect recovery on
+                // a recognized disconnect dialog, without enabling the ordinary
+                // login state machine for arbitrary screens during a task.
+                if ((world.Window.Mode == GameSource.Cloud || world.Window.Mode == GameSource.ManagedCloud) &&
+                    !world.TeamHud && !world.Terminal && !GuidebookVisible())
+                {
+                    bool disconnected;
+                    Rectangle exit = WorldAssist.CloudDisconnectButton(world.Read(.20, .25, .80, .75, centered: true), out disconnected);
+                    if (disconnected && !exit.IsEmpty)
+                    {
+                        var recovery = new WorldRecovery(world, Report);
+                        return recovery.EnsureMain(10000, loginPending: false) &&
+                            world.VerifiedWorld && !world.InRealm;
+                    }
+                }
                 world.Key((char)0x1B);
                 world.Sleep(800);
             }

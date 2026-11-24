@@ -105,7 +105,7 @@ namespace TideCombat
         }
 
         internal bool DragForeground(Point start, Size frameSize, Rectangle bounds, CancellationToken token,
-            Func<Func<Point, bool>, bool> finish)
+            Func<Func<Point, bool>, bool> finish, int preHoldMs = 120)
         {
             if (window.Mode != GameSource.Foreground)
                 return false;
@@ -123,7 +123,7 @@ namespace TideCombat
                 last = screen;
                 return true;
             };
-            if (!move(start) || token.WaitHandle.WaitOne(120) || Cursor.Position != last ||
+            if (!move(start) || token.WaitHandle.WaitOne(preHoldMs) || Cursor.Position != last ||
                 !StillAt(handle, bounds) || !SendMouse(FarmMouse.Left, true))
                 return false;
             bool placed = false;

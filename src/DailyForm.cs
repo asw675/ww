@@ -55,7 +55,7 @@ namespace TideCombat
             layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
             Controls.Add(layout);
 
-            var hint = Theme.Text("勾选要执行的任务，按列表从上到下运行。选中一行后可调整顺序。", Theme.Muted);
+            var hint = Theme.Text("默认使用 OKWW 固定日常顺序；自定义勾选、换序、培养目标和单次捕获属于 WW 扩展。", Theme.Muted);
             hint.Margin = new Padding(0, 0, 0, 10);
             layout.Controls.Add(hint, 0, 0);
             layout.SetColumnSpan(hint, 2);

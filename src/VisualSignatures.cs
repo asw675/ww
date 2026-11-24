@@ -165,10 +165,15 @@ namespace TideCombat
         internal readonly Rectangle Area;
         internal readonly VisualSignature Signature;
         private readonly byte[] light;
+        private readonly byte[] rgb;
         internal readonly byte[] SourcePng;
+        internal readonly ReferenceFeature Reference;
         private readonly int lightSum, lightSquares, lightHigh, lightLow, edgeFloor;
+        private readonly long redSum, greenSum, blueSum;
+        private readonly double templateVariance;
 
-        internal VisualPattern(string label, string fighter, Rectangle area, VisualSignature signature, byte[] light, byte[] sourcePng = null)
+        internal VisualPattern(string label, string fighter, Rectangle area, VisualSignature signature, byte[] light,
+            byte[] sourcePng = null, byte[] rgb = null, ReferenceFeature reference = null)
         {
             Label = label;
             Fighter = fighter;
@@ -176,6 +181,19 @@ namespace TideCombat
             Signature = signature;
             this.light = light;
             SourcePng = sourcePng;
+            Reference = reference;
+            this.rgb = rgb;
+            if (rgb != null && rgb.Length == area.Width * area.Height * 3)
+            {
+                long squares = 0;
+                for (int i = 0; i < rgb.Length; i += 3)
+                {
+                    int r = rgb[i], g = rgb[i + 1], b = rgb[i + 2];
+                    redSum += r; greenSum += g; blueSum += b;
+                    squares += r * r + g * g + b * b;
+                }
+                templateVariance = rgb.Length / 3.0 * squares - ((double)redSum * redSum + (double)greenSum * greenSum + (double)blueSum * blueSum);
+            }
             if (light == null) return;
             for (int index = 0; index < light.Length; index++)
             {
@@ -189,6 +207,34 @@ namespace TideCombat
         }
 
         internal bool HasLight { get { return light != null; } }
+        internal bool HasColorCorrelation { get { return rgb != null && templateVariance > 0; } }
+
+        internal double ColorCorrelation(PixelFrame frame, Rectangle placement)
+        {
+            if (!HasColorCorrelation || placement.Size != Area.Size || placement.Left < 0 || placement.Top < 0 ||
+                placement.Right > frame.Width || placement.Bottom > frame.Height) return 0;
+            long sr = 0, sg = 0, sb = 0, squares = 0, product = 0;
+            int index = 0;
+            for (int y = placement.Top; y < placement.Bottom; y++)
+            for (int x = placement.Left; x < placement.Right; x++)
+            {
+                int r, g, b;
+                frame.Rgb(x, y, out r, out g, out b);
+                sr += r; sg += g; sb += b;
+                squares += r * r + g * g + b * b;
+                product += r * rgb[index++] + g * rgb[index++] + b * rgb[index++];
+            }
+            double n = rgb.Length / 3.0;
+            double variance = n * squares - ((double)sr * sr + (double)sg * sg + (double)sb * sb);
+            double denominator = Math.Sqrt(templateVariance * Math.Max(0, variance));
+            return denominator > 0 ? (n * product - ((double)sr * redSum + (double)sg * greenSum + (double)sb * blueSum)) / denominator : 0;
+        }
+
+        internal double BestColorCorrelation(ColorMatchArea region, double minimum)
+        {
+            return HasColorCorrelation ? region.Best(rgb, Area.Width, Area.Height, redSum, greenSum, blueSum,
+                templateVariance, minimum) : 0;
+        }
 
         internal bool HasLightEdge(PixelFrame frame, Rectangle placement, double contrastFraction = 1)
         {
@@ -246,6 +292,171 @@ namespace TideCombat
         }
     }
 
+    // Dense matching in the small declared portrait ROI. Integral sums make
+    // normalization O(1) per candidate. Block-mean projection is a mathematical
+    // upper bound (Cauchy-Schwarz), not an approximate similarity rejection.
+    internal sealed class ColorMatchArea
+    {
+        private readonly byte[] values;
+        private readonly int width, height, stride;
+        private readonly int[] red, green, blue, squared;
+        internal ColorMatchArea(PixelFrame frame, Rectangle rectangle)
+        {
+            width = rectangle.Width; height = rectangle.Height; stride = width + 1;
+            values = new byte[width * height * 4];
+            frame.CopyBgra(rectangle, values);
+            red = new int[stride * (height + 1)]; green = new int[red.Length];
+            blue = new int[red.Length]; squared = new int[red.Length];
+            for (int y = 1; y <= height; y++)
+            {
+                int rsum = 0, gsum = 0, bsum = 0, ssq = 0;
+                for (int x = 1; x <= width; x++)
+                {
+                    int i = ((y - 1) * width + x - 1) * 4;
+                    int r = values[i+2], g = values[i+1], b = values[i];
+                    rsum += r; gsum += g; bsum += b; ssq += r*r + g*g + b*b;
+                    int at = y*stride+x, prior = at-stride;
+                    red[at] = red[prior]+rsum; green[at] = green[prior]+gsum;
+                    blue[at] = blue[prior]+bsum; squared[at] = squared[prior]+ssq;
+                }
+            }
+        }
+
+        private int Sum(int[] table, int left, int top, int w, int h)
+        {
+            int a = top * stride + left, b = a + h * stride;
+            return table[b+w] - table[b] - table[a+w] + table[a];
+        }
+
+        private struct Block
+        {
+            internal int Left, Top, Width, Height;
+            internal double R, G, B, InverseCount;
+        }
+
+        internal double Best(byte[] template, int tw, int th, long tr, long tg, long tb, double templateVariance, double minimum)
+        {
+            int n = tw * th;
+            if (tw > width || th > height || n == 0) return 0;
+            double templateEnergy = templateVariance / n;
+            double templateMean = ((double)tr*tr + (double)tg*tg + (double)tb*tb) / n;
+            var blocks = new List<Block>(16);
+            double templateBlockEnergy = -templateMean;
+            for (int gy = 0; gy < 4; gy++) for (int gx = 0; gx < 4; gx++)
+            {
+                int left = gx * tw / 4, right = (gx+1)*tw/4, top = gy*th/4, bottom = (gy+1)*th/4;
+                if (right == left || top == bottom) continue;
+                var block = new Block { Left=left, Top=top, Width=right-left, Height=bottom-top,
+                    InverseCount=1.0/((right-left)*(bottom-top)) };
+                for (int y = top; y < bottom; y++) for (int x = left; x < right; x++)
+                {
+                    int at=(y*tw+x)*3; block.R+=template[at]; block.G+=template[at+1]; block.B+=template[at+2];
+                }
+                templateBlockEnergy += (block.R*block.R + block.G*block.G + block.B*block.B)*block.InverseCount;
+                blocks.Add(block);
+            }
+            double residualT = Math.Max(0, templateEnergy-templateBlockEnergy);
+            Block[] parts = blocks.ToArray();
+            double best = minimum, result = 0;
+            for(int y=0;y<=height-th;y++) for(int x=0;x<=width-tw;x++)
+            {
+                int sr=Sum(red,x,y,tw,th), sg=Sum(green,x,y,tw,th), sb=Sum(blue,x,y,tw,th);
+                double sourceMean=((double)sr*sr+(double)sg*sg+(double)sb*sb)/n;
+                double sourceEnergy=Sum(squared,x,y,tw,th)-sourceMean;
+                if(sourceEnergy<=0) continue;
+                double denominator=Math.Sqrt(sourceEnergy*templateEnergy);
+                double meanDot=((double)sr*tr+(double)sg*tg+(double)sb*tb)/n;
+                double blockDot=-meanDot, blockEnergy=-sourceMean;
+                foreach(Block p in parts)
+                {
+                    int l=x+p.Left, t=y+p.Top;
+                    double r=Sum(red,l,t,p.Width,p.Height), g=Sum(green,l,t,p.Width,p.Height), b=Sum(blue,l,t,p.Width,p.Height);
+                    blockDot+=(r*p.R+g*p.G+b*p.B)*p.InverseCount;
+                    blockEnergy+=(r*r+g*g+b*b)*p.InverseCount;
+                }
+                double upper=blockDot+Math.Sqrt(residualT*Math.Max(0,sourceEnergy-blockEnergy));
+                if(upper + 1e-6 < denominator*best) continue;
+                int product=0;
+                for (int ty=0;ty<th;ty++)
+                {
+                    int at=((y+ty)*width+x)*4, ti=ty*tw*3;
+                    for (int end=at+tw*4;at<end;at+=4,ti+=3)
+                        product += values[at+2]*template[ti]+values[at+1]*template[ti+1]+values[at]*template[ti+2];
+                }
+                double score=(product-meanDot)/denominator;
+                if(score>=best) { best=score; result=score; }
+            }
+            return result;
+        }
+    }
+
+    // Original OKWW annotated crop, independent of the legacy 900p rank
+    // features. Keep the original bounds and pixels for reference matching.
+    internal sealed class ReferenceFeature
+    {
+        private readonly int sourceWidth, sourceHeight;
+        private readonly Rectangle sourceBounds;
+        private readonly byte[] pixels;
+        private VisualPattern cached;
+        private int cachedWidth, cachedHeight;
+
+        internal ReferenceFeature(int sourceWidth, int sourceHeight, Rectangle bounds, byte[] pixels)
+        {
+            this.sourceWidth = sourceWidth;
+            this.sourceHeight = sourceHeight;
+            sourceBounds = bounds;
+            this.pixels = pixels;
+            if (pixels != null && pixels.Length != bounds.Width * bounds.Height * 3)
+                throw new InvalidDataException("Invalid original feature pixels.");
+        }
+
+        internal Rectangle Map(int width, int height)
+        {
+            return Map(sourceWidth, sourceHeight, sourceBounds, width, height);
+        }
+
+        internal static Rectangle Map(int sourceWidth, int sourceHeight, Rectangle bounds, int width, int height)
+        {
+            double scale = Math.Min(width / (double)sourceWidth, height / (double)sourceHeight);
+            int x = bounds.X > sourceWidth / 2 ? width - (int)Math.Round((sourceWidth - bounds.X) * scale) : (int)Math.Round(bounds.X * scale);
+            int y = bounds.Y > sourceHeight / 2 ? height - (int)Math.Round((sourceHeight - bounds.Y) * scale) : (int)Math.Round(bounds.Y * scale);
+            return new Rectangle(x, y, Math.Max(1, (int)Math.Round(bounds.Width * scale)), Math.Max(1, (int)Math.Round(bounds.Height * scale)));
+        }
+
+        internal VisualPattern At(string label, string fighter, int width, int height)
+        {
+            if (pixels == null) return null;
+            lock (this)
+            {
+                if (cached != null && width == cachedWidth && height == cachedHeight) return cached;
+                Rectangle area = Map(width, height);
+                byte[] rgb = pixels;
+                if (area.Size != sourceBounds.Size)
+                {
+                    rgb = new byte[area.Width * area.Height * 3];
+                    for (int y = 0; y < area.Height; y++)
+                    for (int x = 0; x < area.Width; x++)
+                    {
+                        double sx = Math.Max(0, Math.Min(sourceBounds.Width - 1, (x + .5) * sourceBounds.Width / area.Width - .5));
+                        double sy = Math.Max(0, Math.Min(sourceBounds.Height - 1, (y + .5) * sourceBounds.Height / area.Height - .5));
+                        int x0 = (int)sx, y0 = (int)sy;
+                        int x1 = Math.Min(sourceBounds.Width - 1, x0 + 1), y1 = Math.Min(sourceBounds.Height - 1, y0 + 1);
+                        double dx = sx - x0, dy = sy - y0;
+                        for (int c = 0; c < 3; c++)
+                        {
+                            double top = pixels[(y0 * sourceBounds.Width + x0) * 3 + c] * (1 - dx) + pixels[(y0 * sourceBounds.Width + x1) * 3 + c] * dx;
+                            double bottom = pixels[(y1 * sourceBounds.Width + x0) * 3 + c] * (1 - dx) + pixels[(y1 * sourceBounds.Width + x1) * 3 + c] * dx;
+                            rgb[(y * area.Width + x) * 3 + c] = (byte)Math.Round(top * (1 - dy) + bottom * dy);
+                        }
+                    }
+                }
+                cachedWidth = width;
+                cachedHeight = height;
+                return cached = new VisualPattern(label, fighter, area, null, null, rgb: rgb);
+            }
+        }
+    }
+
     internal static class PatternBank
     {
         private const string Resource = "TideCombat.Signatures.tsv";
@@ -267,12 +478,21 @@ namespace TideCombat
                     {
                         if (row.Length == 0 || row[0] == '#') continue;
                         var cells = row.Split('\t');
-                        if (cells.Length < 7 || cells.Length > 9) throw new InvalidDataException("Invalid visual signature row.");
+                        if (cells.Length < 7 || cells.Length > 12) throw new InvalidDataException("Invalid visual signature row.");
                         int[] coordinates = cells.Skip(2).Take(4).Select(x => int.Parse(x, CultureInfo.InvariantCulture)).ToArray();
+                        ReferenceFeature reference = null;
+                        if (cells.Length >= 11 && cells[10].Length != 0)
+                        {
+                            int[] source = cells[10].Split(',').Select(x => int.Parse(x, CultureInfo.InvariantCulture)).ToArray();
+                            if (source.Length != 6) throw new InvalidDataException("Invalid original feature bounds.");
+                            reference = new ReferenceFeature(source[0], source[1], new Rectangle(source[2], source[3], source[4], source[5]),
+                                cells.Length == 12 && cells[11].Length > 0 ? Convert.FromBase64String(cells[11]) : null);
+                        }
                         result.Add(new VisualPattern(cells[0], cells[1] == "-" ? null : cells[1],
                             new Rectangle(coordinates[0], coordinates[1], coordinates[2], coordinates[3]),
                             VisualSignature.Parse(cells[6]), cells.Length >= 8 && cells[7].Length != 0 ? Convert.FromBase64String(cells[7]) : null,
-                            cells.Length == 9 ? Convert.FromBase64String(cells[8]) : null));
+                            cells.Length >= 9 && cells[8].Length != 0 ? Convert.FromBase64String(cells[8]) : null,
+                            cells.Length >= 10 && cells[9].Length != 0 ? Convert.FromBase64String(cells[9]) : null, reference));
                     }
                 }
             }

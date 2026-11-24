@@ -27,10 +27,38 @@ namespace TideCombat
         public bool? CheckMonthlyCard { get; set; }
         public int? MonthlyCardHour { get; set; }
         public bool RestoreCursor { get; set; }
+        public bool? StartWithUtility { get; set; }
+        public bool? StartManagedCloudWithUtility { get; set; }
+        public bool? StartBattleWithUtility { get; set; }
         public string[] PickUpAllow { get; set; }
         public string[] PickUpBlock { get; set; }
 
         internal bool NeedsVision { get { return PickUp || SkipDialog || Login || Travel; } }
+        internal bool StartsAutomatically { get { return StartWithUtility != false; } }
+        internal bool StartsBattleAutomatically { get { return StartsAutomatically && StartBattleWithUtility == true; } }
+
+        internal bool AllowsStartup(GameSource source)
+        {
+            if (!StartsAutomatically || source == GameSource.Cloud) return false;
+            return source == GameSource.ManagedCloud ? StartManagedCloudWithUtility == true :
+                source == GameSource.Foreground || source == GameSource.Background || source == GameSource.AutoLocal;
+        }
+
+        internal WorldAssistOptions ForStartup()
+        {
+            // Ordinary reference triggers can be resident at app start. Keep
+            // session/login/recovery actions restricted to the existing manual
+            // start path; startup must not expand account-access authorization.
+            return new WorldAssistOptions
+            {
+                StartWithUtility = StartWithUtility, StartManagedCloudWithUtility = StartManagedCloudWithUtility,
+                StartBattleWithUtility = StartBattleWithUtility, PickUp = PickUp, SkipDialog = SkipDialog,
+                Login = false, Travel = Travel, RestoreCursor = RestoreCursor,
+                CheckMonthlyCard = CheckMonthlyCard, MonthlyCardHour = MonthlyCardHour,
+                PickUpAllow = PickUpAllow == null ? null : (string[])PickUpAllow.Clone(),
+                PickUpBlock = PickUpBlock == null ? null : (string[])PickUpBlock.Clone()
+            };
+        }
     }
 
     internal sealed class MonthlyCardSchedule
@@ -42,8 +70,12 @@ namespace TideCombat
         internal MonthlyCardSchedule(WorldAssistOptions options)
         {
             enabled = options == null || options.CheckMonthlyCard != false;
-            hour = Math.Max(0, Math.Min(23, options == null ? 4 : options.MonthlyCardHour ?? 4));
+            hour = NormalizeHour(options == null ? 4 : options.MonthlyCardHour ?? 4);
         }
+
+        // The reference exposes hours 1–24. Treat 24 as midnight instead of
+        // allowing its invalid datetime.replace(hour=24) path to throw.
+        internal static int NormalizeHour(int hour) { return hour == 24 ? 0 : Math.Max(0, Math.Min(23, hour)); }
 
         internal bool Due(DateTime now)
         {
@@ -95,28 +127,32 @@ namespace TideCombat
         private readonly OcrReader ocr;
         private readonly bool ownsOcr;
         private readonly bool recoveringLogin;
-        private long nextAction, nextLogin, nextCursor;
+        private readonly Func<long> clock;
+        private long nextAction, nextLogin;
         private long reconnectUntil;
         private readonly LoginScreen login;
         private bool entered;
         private enum DialogAction { None, Check, Confirm, Summary }
         private DialogAction pendingDialog;
         private Rectangle pendingButton;
-        private Point? previousCursor;
-        private bool cursorFailed;
+        private readonly CursorResetTracker cursorTracker = new CursorResetTracker();
+        private CursorRestoreSampler cursorSampler;
         private int pendingPickups;
+        private long skipConfirmUntil;
         private static readonly string[] TravelIcons = { "fast_travel_custom", "gray_teleport", "remove_custom" };
         private string travelIcon;
         private int travelStep;
+        private int travelCandidate = -1;
         private long travelUntil;
 
         internal WorldAssist(WorldAssistOptions options, FarmVision vision, OcrReader sharedOcr = null, GameUpdateRecovery updates = null,
-            bool recoveringLogin = false)
+            bool recoveringLogin = false, Func<long> clock = null)
         {
             this.options = options;
             this.vision = vision;
             login = new LoginScreen(updates == null ? (Func<Func<bool>,bool>)null : updates.Confirm);
             this.recoveringLogin = recoveringLogin;
+            this.clock = clock;
             ocr = sharedOcr;
             ownsOcr = sharedOcr == null;
             if (options.NeedsVision && ownsOcr)
@@ -131,27 +167,43 @@ namespace TideCombat
             }
         }
 
+        internal static WorldAssist CreateCursorOnly(WorldAssistOptions options, FarmVision vision)
+        {
+            return options == null || !options.RestoreCursor ? null :
+                new WorldAssist(new WorldAssistOptions { PickUp = false, Login = false,
+                    SkipDialog = false, Travel = false, RestoreCursor = true }, vision);
+        }
+
         internal void ResetWindow()
         {
             entered = false;
-            previousCursor = null;
-            cursorFailed = false;
-            nextLogin = nextAction = nextCursor = 0;
+            cursorTracker.Reset();
+            ResetCursorRoute();
+            nextLogin = nextAction = 0;
             reconnectUntil = 0;
             pendingDialog = DialogAction.None;
+            skipConfirmUntil = 0;
             login.Reset();
-            pendingPickups = travelStep = 0;
+            ResetPickups();
+            travelStep = 0;
             travelIcon = null;
+            travelCandidate = -1;
+        }
+
+        internal void ResetPickups()
+        {
+            pendingPickups = 0;
         }
 
         internal bool NeedsNativeFrame(long captureTime) { return options.NeedsVision && captureTime >= nextAction; }
+        private long ActionTime(long observedTime) { return clock == null ? observedTime : Math.Max(observedTime, clock()); }
 
         internal string Observe(PixelFrame frame, HudSnapshot hud, bool fighting, long now,
-            Func<Point, bool> click, Func<bool> pressF, bool cloud = false, long? capturedAt = null)
+            Func<Point, bool> click, Func<bool> pressF, bool cloud = false, long? capturedAt = null, Func<bool> scrollPickup = null)
         {
             if (!options.NeedsVision)
                 return null;
-            bool inTeam = hud.Valid && !hud.Dead;
+            bool inTeam = !hud.Dead && (hud.Valid || vision.HasTeamNumbers(frame));
             if (options.Login && !entered && !hud.Dead && vision.HasTeamNumbers(frame))
             {
                 entered = true;
@@ -160,45 +212,50 @@ namespace TideCombat
             }
             if (inTeam)
             {
-                pendingDialog = DialogAction.None;
-                travelStep = 0;
+                skipConfirmUntil = 0;
+                // A map can briefly retain the previous team HUD. Do not drop
+                // a validated travel sequence just because that HUD is visible.
+                if (!options.Travel || travelStep == 0)
+                {
+                    pendingDialog = DialogAction.None;
+                    travelStep = 0;
+                }
             }
-            if (fighting || hud.EnemyHealth || hud.Locked || hud.Dead)
+            if (hud.Dead || fighting)
             {
                 pendingDialog = DialogAction.None;
+                skipConfirmUntil = 0;
                 travelStep = 0;
-                pendingPickups = 0;
+                ResetPickups();
                 return null;
             }
             if (!NeedsNativeFrame(capturedAt ?? now))
                 return null;
             if (inTeam)
             {
+                if (options.Travel && !hud.EnemyHealth && !hud.Locked)
+                {
+                    if (TryTravel(frame, now, click)) { ResetPickups(); return "自动快速旅行"; }
+                    if (travelStep != 0) { ResetPickups(); return null; }
+                }
                 if (pendingPickups > 0)
                 {
-                    Rectangle prompt;
-                    if (vision.FindPickupKey(frame, out prompt) && HasAstriteIcon(frame, vision, prompt))
-                    {
-                        pendingPickups = 0;
-                        nextAction = now + 350;
-                        return null;
-                    }
                     if (!pressF()) { pendingPickups = 0; return null; }
                     pendingPickups--;
-                    nextAction = now + 200;
+                    nextAction = ActionTime(now) + 200;
                     return "自动拾取";
                 }
-                if (options.PickUp && ocr != null && TryPick(frame, pressF))
+                if (options.PickUp && ocr != null)
                 {
-                    nextAction = now + (pendingPickups > 0 ? 200 : 800);
-                    return "自动拾取";
+                    string pickup = TryPick(frame, now, pressF, scrollPickup);
+                    if (pickup != null) return pickup;
                 }
-                pendingPickups = 0;
                 nextAction = now + 350;
                 return null;
             }
 
-            pendingPickups = 0;
+            ResetPickups();
+            if (hud.EnemyHealth || hud.Locked) return null;
             nextAction = now + 400;
             bool disconnected = false;
             bool relogging = recoveringLogin || now < reconnectUntil;
@@ -208,10 +265,16 @@ namespace TideCombat
                 return null;
             if (options.Travel && travelStep != 0)
                 return TryTravel(frame, now, click) ? "自动快速旅行" : null;
-            if (options.SkipDialog && TrySkip(frame, now, click))
-                return "自动跳过剧情";
-            if (options.Travel && TryTravel(frame, now, click))
-                return "自动快速旅行";
+            if (options.SkipDialog)
+            {
+                if (TrySkip(frame, now, click)) return "自动跳过剧情";
+                if (skipConfirmUntil > now) return null;
+            }
+            if (options.Travel)
+            {
+                if (TryTravel(frame, now, click)) return "自动快速旅行";
+                if (travelStep != 0) return null;
+            }
             bool confirmDue = login.ConfirmationTime >= 0;
             if (options.Login && !entered && now >= (confirmDue ? login.ConfirmationTime : nextLogin))
             {
@@ -229,6 +292,23 @@ namespace TideCombat
         private bool TryTravel(PixelFrame frame, long now, Func<Point, bool> click)
         {
             Rectangle button;
+            // The reference checks each candidate in order, waits 500ms and
+            // continues to the next candidate if the first one disappeared.
+            // Do not restart the initial gray-map/OCR gate midway through it.
+            if (travelStep == 1)
+            {
+                travelStep = 0;
+                if (!vision.FindLabel(frame, travelIcon, .70, out button))
+                {
+                    QueueTravelCandidate(frame, travelCandidate + 1, now);
+                    return false;
+                }
+                if (!click(Center(button))) return false;
+                travelStep = travelIcon == "fast_travel_custom" ? 2 : travelIcon == "gray_teleport" ? 5 : 0;
+                nextAction = ActionTime(now) + 1000;
+                travelUntil = nextAction + (travelStep == 5 ? 3000 : 2000);
+                return true;
+            }
             if (travelStep != 0 && now > travelUntil && pendingDialog == DialogAction.None)
             {
                 if (travelStep == 2 || travelStep == 4)
@@ -237,15 +317,6 @@ namespace TideCombat
                     travelUntil = now + 3000;
                 }
                 else travelStep = 0;
-            }
-            if (travelStep == 1)
-            {
-                travelStep = 0;
-                if (!vision.FindLabel(frame, travelIcon, .70, out button) || !click(Center(button))) return false;
-                travelStep = travelIcon == "fast_travel_custom" ? 2 : travelIcon == "gray_teleport" ? 5 : 0;
-                nextAction = now + 1000;
-                travelUntil = nextAction + (travelStep == 5 ? 3000 : 2000);
-                return true;
             }
             if (travelStep == 5)
             {
@@ -266,41 +337,73 @@ namespace TideCombat
                     if (!click(Center(button))) return false;
                     travelStep++;
                 }
-                nextAction = now + 500;
+                nextAction = ActionTime(now) + 500;
                 travelUntil = nextAction + (travelStep == 4 ? 1000 : travelStep == 5 ? 3000 : 2000);
                 return true;
             }
             if (!vision.FindLabel(frame, "gray_teleport", .76, out button)) return false;
             var labels = Read(frame, Region(frame, .70, .89, 1, 1));
-            if (!labels.Any(line => line.Score >= .65f && ContainsAny(new[] { line.Text ?? "" }, TravelButtons)))
+            if (!labels.Any(line => ContainsAny(new[] { line.Text ?? "" }, TravelButtons)))
                 return false;
-            foreach (string icon in TravelIcons)
-                if (vision.FindLabel(frame, icon, .70, out button))
-                {
-                    travelIcon = icon;
-                    travelStep = 1;
-                    nextAction = now + 500;
-                    travelUntil = nextAction + 2000;
-                    break;
-                }
+            QueueTravelCandidate(frame, 0, now);
             return false;
         }
 
-        private bool TryPick(PixelFrame frame, Func<bool> pressF)
+        internal static int NextTravelCandidate(int start, Func<string, bool> visible)
+        {
+            for (int i = Math.Max(0, start); i < TravelIcons.Length; i++)
+                if (visible(TravelIcons[i])) return i;
+            return -1;
+        }
+
+        private void QueueTravelCandidate(PixelFrame frame, int start, long now)
+        {
+            Rectangle ignored;
+            travelCandidate = NextTravelCandidate(start, icon => vision.FindLabel(frame, icon, .70, out ignored));
+            if (travelCandidate < 0)
+            {
+                travelStep = 0;
+                travelIcon = null;
+                return;
+            }
+            travelIcon = TravelIcons[travelCandidate];
+            travelStep = 1;
+            nextAction = ActionTime(now) + 500;
+            travelUntil = nextAction + 2000;
+        }
+
+        private string TryPick(PixelFrame frame, long now, Func<bool> pressF, Func<bool> scrollPickup)
         {
             Rectangle key, ignored;
-            if (!vision.FindPickupKey(frame, out key) || !WhiteEnough(frame, key))
-                return false;
-            if (HasAstriteIcon(frame, vision, key))
-                return false;
+            if (!vision.FindPickupKey(frame, out key)) return null;
+            if (!WhiteEnough(frame, key) || HasAstriteIcon(frame, vision, key)) return null;
             Rectangle dot = new Rectangle(key.X + key.Width * 3, key.Y - key.Height, key.Width * 3, key.Height * 3);
             bool hasDialog = vision.FindFirst(frame, "dialog_3_dots", dot, 1, .60, .64, out ignored);
-            int textLeft = dot.Right;
-            List<OcrLine> text = Read(frame, new Rectangle(textLeft, dot.Top, key.Width * 10, key.Height * 3));
-            if (!CanPick(hasDialog, text, options, key) || !pressF())
-                return false;
+            var textArea = PickupTextArea(key);
+            OcrLine matched = FindPickupMatch(hasDialog, Read(frame, textArea), options);
+            // Both lists use the reference's multi-row region. A lower match
+            // scrolls the options before the whitelist's F sequence (or blocks it
+            // when the lower line matched the blacklist). The route callback must
+            // still acknowledge delivery before any subsequent action.
+            if (matched != null && matched.Box.Top > textArea.Top + key.Height)
+            {
+                if (scrollPickup == null || !scrollPickup()) return null;
+                if (!hasDialog)
+                {
+                    nextAction = ActionTime(now) + 200;
+                    return "切换拾取选项";
+                }
+            }
+            if (hasDialog != (matched != null) || !pressF()) return null;
             pendingPickups = 2;
-            return true;
+            nextAction = ActionTime(now) + 200;
+            return "自动拾取";
+        }
+
+        internal static Rectangle PickupTextArea(Rectangle key)
+        {
+            return new Rectangle(key.Left + (int)(key.Width * 5.2), key.Top - (int)(key.Height * .8),
+                key.Width * 7, (int)(key.Height * 5.5));
         }
 
         internal static bool HasAstriteIcon(PixelFrame frame, FarmVision vision, Rectangle key)
@@ -310,16 +413,18 @@ namespace TideCombat
             return vision.FindFirst(frame, "pick_up_xinyao_icon", icon, 1, .80, .66, out ignored);
         }
 
-        internal static bool CanPick(bool hasDialog, IEnumerable<OcrLine> lines, WorldAssistOptions options,
-            Rectangle selectedKey = default(Rectangle))
+        internal static bool CanPick(bool hasDialog, IEnumerable<OcrLine> lines, WorldAssistOptions options)
         {
-            int center = Center(selectedKey).Y;
-            string[] texts = lines.Where(line => line.Score >= .62f && (selectedKey.IsEmpty ||
-                !line.Box.IsEmpty && Math.Abs(Center(line.Box).Y - center) <= selectedKey.Height * .75))
-                .Select(line => OcrText.Compact(line.Text)).Where(value => value.Length > 0).ToArray();
-            if (hasDialog)
-                return ContainsAny(texts, options.PickUpAllow ?? WorldAssistOptions.DefaultAllow);
-            return !ContainsAny(texts, options.PickUpBlock ?? WorldAssistOptions.DefaultBlock);
+            return hasDialog == (FindPickupMatch(hasDialog, lines, options) != null);
+        }
+
+        private static OcrLine FindPickupMatch(bool hasDialog, IEnumerable<OcrLine> lines, WorldAssistOptions options)
+        {
+            string[] terms = hasDialog ? options.PickUpAllow ?? WorldAssistOptions.DefaultAllow :
+                options.PickUpBlock ?? WorldAssistOptions.DefaultBlock;
+            // OcrReader already filters rejected recognitions. Do not add a
+            // separate confidence gate to this task's text matching.
+            return lines.FirstOrDefault(line => line != null && ContainsAny(new[] { line.Text ?? "" }, terms));
         }
 
         private static bool ContainsAny(IEnumerable<string> texts, string[] terms)
@@ -348,10 +453,24 @@ namespace TideCombat
             if (pendingDialog == DialogAction.None && FindSkipIcon(frame, vision, out box))
             {
                 if (!click(Center(box))) return false;
-                nextAction = now + 200;
+                nextAction = ActionTime(now) + 200;
+                // Keep clicking a visible skip icon before starting the
+                // three-second confirmation window, as in the reference.
+                skipConfirmUntil = -1;
                 return true;
             }
-            if (ObserveDialog(frame, now, click, true)) return true;
+            if (skipConfirmUntil == -1) skipConfirmUntil = now + 3000;
+            if (ObserveDialog(frame, now, click, true))
+            {
+                if (pendingDialog == DialogAction.None) skipConfirmUntil = 0;
+                return true;
+            }
+            if (skipConfirmUntil > now)
+            {
+                nextAction = now + 200;
+                return false;
+            }
+            skipConfirmUntil = 0;
             if (vision.FindLabel(frame, "message", .85, out box) &&
                 vision.FindLabel(frame, "message_dialog", .84, out box))
             {
@@ -368,9 +487,9 @@ namespace TideCombat
             pendingDialog = DialogAction.None;
             if (action == DialogAction.Summary)
             {
-                if (FindSkipConfirmation(frame, vision, out button) && pendingButton.IntersectsWith(button) && click(Center(button)))
+                if (FindSkipConfirmation(frame, vision, out button, skipConfirmUntil > now) && pendingButton.IntersectsWith(button) && click(Center(button)))
                 {
-                    nextAction = now + 200;
+                    nextAction = ActionTime(now) + 200;
                     return true;
                 }
                 return false;
@@ -380,7 +499,7 @@ namespace TideCombat
                 if (action == DialogAction.Confirm && pendingButton.IntersectsWith(button))
                 {
                     if (!click(Center(button))) { pendingDialog = action; return false; }
-                    nextAction = now + 200;
+                    nextAction = ActionTime(now) + 200;
                     return true;
                 }
                 if (vision.FindOptionalCheckbox(frame, out check))
@@ -392,11 +511,11 @@ namespace TideCombat
                         pendingDialog = DialogAction.Confirm;
                     }
                     pendingButton = button;
-                    nextAction = now + 500;
+                    nextAction = ActionTime(now) + 500;
                     return true;
                 }
             }
-            if (allowSummary && FindSkipConfirmation(frame, vision, out pendingButton))
+            if (allowSummary && FindSkipConfirmation(frame, vision, out pendingButton, skipConfirmUntil > now))
             {
                 pendingDialog = DialogAction.Summary;
                 nextAction = now + 200;
@@ -412,15 +531,15 @@ namespace TideCombat
                 .74, .83, out box, WideUiScales) != null;
         }
 
-        internal static bool FindSkipConfirmation(PixelFrame frame, FarmVision vision, out Rectangle box)
+        internal static bool FindSkipConfirmation(PixelFrame frame, FarmVision vision, out Rectangle box, bool knownStory = false)
         {
             int middle = frame.Width / 2;
             var search = new Rectangle(middle + 90, 548, 160, 124);
             foreach (string label in SkipConfirmations)
             {
-                if (vision.FindLabel(frame, label, .80, out box) && HasStoryButtons(frame, box)) return true;
+                if (vision.FindLabel(frame, label, .80, out box) && (knownStory || HasStoryButtons(frame, box))) return true;
                 if (vision.BestMatchInRegion(frame, new[] { label }, search, 1, .78, .86, out box,
-                    WideUiScales, (name, candidate) => HasStoryButtons(frame, candidate)) != null) return true;
+                    WideUiScales, (name, candidate) => knownStory || HasStoryButtons(frame, candidate)) != null) return true;
             }
             box = Rectangle.Empty;
             return false;
@@ -478,38 +597,25 @@ namespace TideCombat
 
         internal void UpdateCursor(GameWindow window, Rectangle gameBounds, long now)
         {
-            UpdateCursor(window.Mode, gameBounds, now, () => !window.StillForeground() && window.Available(),
-                () => Cursor.Position, position =>
-                {
-                    if (!Native.SetCursorPos(position.X, position.Y)) throw new Win32Exception();
-                    return true;
-                });
+            // The independent sampler is only armed by a successfully verified
+            // local background route. It cannot discover or redirect to any
+            // other window. Suspend it when that route is not available.
+            if (!options.RestoreCursor || Environment.OSVersion.Platform != PlatformID.Win32NT ||
+                window.Mode != GameSource.Background || window.InputBlockedByIntegrity || gameBounds.IsEmpty || !window.Available())
+            {
+                ResetCursorRoute();
+                return;
+            }
+            if (cursorSampler == null) cursorSampler = new CursorRestoreSampler();
+            cursorSampler.SetRoute(window.Handle, window.ProcessId, gameBounds);
         }
+
+        internal void ResetCursorRoute() { if (cursorSampler != null) cursorSampler.ClearRoute(); }
 
         internal void UpdateCursor(GameSource mode, Rectangle gameBounds, long now, Func<bool> canRestore,
             Func<Point> readCursor, Func<Point, bool> setCursor)
         {
-            if (!options.RestoreCursor || cursorFailed || mode == GameSource.Cloud || mode == GameSource.ManagedCloud || now < nextCursor)
-                return;
-            try
-            {
-                Point current = readCursor();
-                nextCursor = now + 2;
-                if (mode == GameSource.Background && previousCursor.HasValue &&
-                    ShouldRestoreCursor(previousCursor.Value, current, Center(gameBounds)) && canRestore())
-                {
-                    if (setCursor(previousCursor.Value))
-                        nextCursor = now + 1000;
-                    return;
-                }
-                previousCursor = current;
-            }
-            catch (ExternalException error)
-            {
-                cursorFailed = true;
-                previousCursor = null;
-                RunLog.Error("战斗辅助", "鼠标位置恢复不可用", error);
-            }
+            if (options.RestoreCursor) cursorTracker.Observe(mode, gameBounds, now, canRestore, readCursor, setCursor);
         }
 
         internal static bool ShouldRestoreCursor(Point previous, Point current, Point center)
@@ -521,6 +627,19 @@ namespace TideCombat
         {
             long dx = (long)a.X - b.X, dy = (long)a.Y - b.Y;
             return dx * dx + dy * dy;
+        }
+
+        internal double ReadAbyssTimer(PixelFrame frame)
+        {
+            var viewport = new Rectangle(0, 0, frame.Width, frame.Height);
+            Rectangle area = FramePatch.ScaleCentered(viewport, 3840, 2160, 1820, 266, 2100, 340);
+            foreach (OcrLine line in Read(frame, area))
+            {
+                string label = (line.Text ?? string.Empty).Normalize(System.Text.NormalizationForm.FormKC).Trim();
+                double seconds = HudGlyphs.ParseChallengeClock(label);
+                if (!double.IsNaN(seconds)) return seconds;
+            }
+            return double.NaN;
         }
 
         private List<OcrLine> Read(PixelFrame frame, Rectangle area)
@@ -546,7 +665,148 @@ namespace TideCombat
 
         public void Dispose()
         {
+            if (cursorSampler != null) cursorSampler.Dispose();
             if (ownsOcr && ocr != null) ocr.Dispose();
+        }
+    }
+
+    // Shared pure cursor policy; the independent timer and deterministic
+    // regression harness use exactly the same state and cooldown transitions.
+    internal sealed class CursorResetTracker
+    {
+        private long next;
+        private Point? previous;
+        private bool failed;
+
+        internal void Reset() { next = 0; previous = null; failed = false; }
+
+        internal int Delay(long now)
+        {
+            return failed ? Timeout.Infinite : (int)Math.Max(1, next - now);
+        }
+
+        internal void Observe(GameSource mode, Rectangle bounds, long now, Func<bool> canRestore,
+            Func<Point> readCursor, Func<Point, bool> setCursor)
+        {
+            if (failed || mode == GameSource.Cloud || mode == GameSource.ManagedCloud || now < next) return;
+            try
+            {
+                Point current = readCursor();
+                next = now + 2;
+                Point center = new Point(bounds.Left + bounds.Width / 2, bounds.Top + bounds.Height / 2);
+                if (mode == GameSource.Background && previous.HasValue &&
+                    WorldAssist.ShouldRestoreCursor(previous.Value, current, center) && canRestore())
+                {
+                    if (setCursor(previous.Value)) next = now + 1000;
+                    return;
+                }
+                previous = current;
+            }
+            catch (ExternalException error)
+            {
+                failed = true;
+                previous = null;
+                RunLog.Error("战斗辅助", "鼠标位置恢复不可用", error);
+            }
+        }
+    }
+
+    internal sealed class CursorRestoreSampler : IDisposable
+    {
+        private static readonly object leaseGate = new object();
+        private static CursorRestoreSampler active;
+        private readonly object gate = new object();
+        private readonly ManualResetEvent stop = new ManualResetEvent(false);
+        private readonly AutoResetEvent change = new AutoResetEvent(false);
+        private readonly CursorResetTracker tracker = new CursorResetTracker();
+        private readonly System.Diagnostics.Stopwatch clock = System.Diagnostics.Stopwatch.StartNew();
+        private readonly Thread worker;
+        private IntPtr window;
+        private uint process;
+        private Rectangle bounds;
+
+        internal CursorRestoreSampler()
+        {
+            worker = new Thread(Run) { IsBackground = true, Name = "TideCombat cursor recovery" };
+            worker.Start();
+        }
+
+        internal void SetRoute(IntPtr target, uint owner, Rectangle area)
+        {
+            // Nested one-time tasks can share the same window. Allow only the
+            // most recently armed route's sampler to act on the global cursor.
+            lock (leaseGate)
+            {
+                if (active != null && active != this) active.SetLocalRoute(IntPtr.Zero, 0, Rectangle.Empty);
+                active = this;
+                SetLocalRoute(target, owner, area);
+            }
+        }
+
+        private void SetLocalRoute(IntPtr target, uint owner, Rectangle area)
+        {
+            lock (gate)
+            {
+                if (window == target && process == owner && bounds == area) return;
+                window = target;
+                process = owner;
+                bounds = area;
+                tracker.Reset();
+            }
+            change.Set();
+        }
+
+        internal void ClearRoute()
+        {
+            lock (leaseGate)
+            {
+                SetLocalRoute(IntPtr.Zero, 0, Rectangle.Empty);
+                if (active == this) active = null;
+            }
+        }
+
+        private bool CanRestore()
+        {
+            if (!GameWindow.Owns(window, process) || Native.GetForegroundWindow() == window ||
+                !Native.IsWindowVisible(window) || Native.IsIconic(window)) return false;
+            Native.Rect client;
+            var origin = new Native.Point();
+            return Native.GetClientRect(window, out client) && Native.ClientToScreen(window, ref origin) &&
+                bounds == new Rectangle(origin.X, origin.Y, client.Right - client.Left, client.Bottom - client.Top);
+        }
+
+        private void Run()
+        {
+            var events = new WaitHandle[] { stop, change };
+            while (!stop.WaitOne(0))
+            {
+                int delay;
+                lock (gate)
+                {
+                    if (window == IntPtr.Zero) delay = Timeout.Infinite;
+                    else
+                    {
+                        long now = clock.ElapsedMilliseconds;
+                        tracker.Observe(GameSource.Background, bounds, now, CanRestore, () => Cursor.Position,
+                            point => {
+                                if (!CanRestore()) return false;
+                                if (!Native.SetCursorPos(point.X, point.Y)) throw new Win32Exception();
+                                return true;
+                            });
+                        delay = tracker.Delay(clock.ElapsedMilliseconds);
+                    }
+                }
+                if (WaitHandle.WaitAny(events, delay) == 0) break;
+            }
+        }
+
+        public void Dispose()
+        {
+            ClearRoute();
+            stop.Set();
+            worker.Join();
+            change.Dispose();
+            stop.Dispose();
         }
     }
 }

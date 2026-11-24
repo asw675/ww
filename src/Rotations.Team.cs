@@ -724,7 +724,10 @@ namespace TideCombat
                 yield break;
             }
             long start = c.Now;
-            while (c.Now - start < 6000)
+            // The reference's intro/flight helper has no 6s phase timer.
+            // A permanently stuck input is still bounded by the common 15s
+            // no-progress limit, never by a fabricated early phase transition.
+            while (true)
             {
                 long elapsed = c.Now - start;
                 if (c.Hud.Skills[0] == SkillState.Cooling)
@@ -739,9 +742,12 @@ namespace TideCombat
                     if (elapsed > 1500) break;
                     yield return Move.Wait(50);
                 }
-                else yield return Move.Tap(Skill, 100);
+                else
+                {
+                    if (elapsed >= 15000) yield break;
+                    yield return Move.Tap(Skill, 100);
+                }
             }
-            if (c.Hud.Skills[0] != SkillState.Cooling) yield break;
             yield return Move.Liberation(animation: AnimationInput.InteractAndAttack);
             yield return Move.Attacks(c.Succeeded ? 300 : 1400);
             c.Memory.Phase = 2;
@@ -771,7 +777,7 @@ namespace TideCombat
                 c.Memory.EncoreStageAt = c.Now;
                 yield break;
             }
-            if (c.Hud.InRealm && !c.NeedFastPerform)
+            if (!c.IsOpenWorldAutoCombat && !c.NeedFastPerform)
             {
                 yield return Move.Liberation(400);
                 if (c.Succeeded)

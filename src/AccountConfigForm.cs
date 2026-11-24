@@ -35,9 +35,13 @@ namespace TideCombat
             Width = 400, Height = 220, ShowItemToolTips = true
         };
         private readonly TextBox key = new TextBox { Width = 200, Margin = new Padding(0, 2, 8, 6) };
-        private readonly ComboBox task = Theme.Select(AccountTasks.Choices);
+        private readonly ComboBox task = Theme.Select(AccountTasks.DisplayChoices);
         private readonly Label hint = Theme.Text("账号 ID 使用登录列表去掉 * 后的文本；任务 None 表示只登录。", Theme.Muted);
         private readonly Button options = Theme.Button("任务设置");
+        private readonly CheckBox exitAfter = new CheckBox
+        {
+            Text = "多账号完成后退出游戏与程序", AutoSize = true, Margin = new Padding(4, 6, 4, 0)
+        };
         private readonly TextBox historyDetail = new TextBox
         {
             Dock = DockStyle.Fill, Multiline = true, ReadOnly = true, WordWrap = true,
@@ -50,6 +54,7 @@ namespace TideCombat
         {
             this.store = store;
             this.settings = settings;
+            exitAfter.Checked = settings.ExitAfterMultiAccount;
             Text = "多账号配置";
             StartPosition = FormStartPosition.CenterParent;
             MaximizeBox = false;
@@ -152,6 +157,7 @@ namespace TideCombat
             actions.Controls.Add(save);
             actions.Controls.Add(saveOnly);
             actions.Controls.Add(options);
+            actions.Controls.Add(exitAfter);
             Controls.Add(actions);
 
             try { history = store.LoadResults(); }
@@ -237,6 +243,7 @@ namespace TideCombat
         }
 
         internal bool StartRequested { get; private set; }
+        internal bool ExitAfterTask { get { return exitAfter.Checked; } }
 
         internal static int ChoiceIndex(AccountTaskReference reference)
         {
@@ -252,12 +259,12 @@ namespace TideCombat
             var row = (AccountEditorRow)item.Tag;
             if (task.SelectedIndex == ChoiceIndex(row.Account.task)) return;
             row.SelectTask(SelectedTask());
-            item.SubItems[1].Text = task.SelectedItem.ToString();
+            item.SubItems[1].Text = row.Account.task == null ? "None" : row.Account.task.@class;
         }
 
         private AccountTaskReference SelectedTask()
         {
-            string name = task.SelectedItem.ToString();
+            string name = AccountTasks.Choices[task.SelectedIndex];
             return name == "None" ? null : new AccountTaskReference { module = "src.task." + name, @class = name };
         }
 
@@ -306,7 +313,7 @@ namespace TideCombat
 
         private void UpdateOptions()
         {
-            options.Enabled = list.SelectedItems.Count == 1 && task.SelectedIndex > 0 && HasOptions(task.SelectedItem.ToString());
+            options.Enabled = list.SelectedItems.Count == 1 && task.SelectedIndex > 0 && HasOptions(AccountTasks.Choices[task.SelectedIndex]);
         }
 
         private void EditOptions()

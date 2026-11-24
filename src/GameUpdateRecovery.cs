@@ -163,17 +163,63 @@ namespace TideCombat
                     string display = name + " " + ReadRegistry(() => entry.GetValue("DisplayName"));
                     if (!display.Contains("鸣潮") && !display.Contains("鳴潮") &&
                         display.IndexOf("wuthering waves", StringComparison.OrdinalIgnoreCase) < 0) continue;
+                    var values = new Dictionary<string, string>();
                     foreach (string location in RegisteredLocations)
                     {
-                        string found = FindLauncherNear(ReadRegistry(() => entry.GetValue(location)) as string);
+                        string registered = ReadRegistry(() => entry.GetValue(location)) as string;
+                        values[location] = registered;
+                        string found = FindLauncherNear(registered);
                         if (found != null) return found;
                     }
+                    // A relative field can only be considered if this same
+                    // matching installation record supplies a single trusted
+                    // absolute install directory. Never resolve against the
+                    // utility's current directory or search the PATH.
+                    string relative = ResolveRegisteredRelativeLauncher(values);
+                    if (relative != null) return relative;
                 }
             }
             return null;
         }
 
-        internal static string FindLauncherNear(string registered)
+        internal static string ResolveRegisteredRelativeLauncher(IDictionary<string, string> values)
+        {
+            if (values == null) return null;
+            var roots = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (string key in new[] { "InstallPath", "InstallLocation" })
+            {
+                string value;
+                if (!values.TryGetValue(key, out value) || string.IsNullOrWhiteSpace(value)) continue;
+                try
+                {
+                    string root = Environment.ExpandEnvironmentVariables(value.Trim().Trim('"'));
+                    if (!IsFullyQualifiedPath(root) || !Directory.Exists(root)) continue;
+                    root = Path.GetFullPath(root).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+                    if (root.Length == 0 || string.Equals(root, Path.GetPathRoot(root), StringComparison.OrdinalIgnoreCase) ||
+                        !NoReparsePoints(root, null)) continue;
+                    roots.Add(root);
+                }
+                catch (Exception error)
+                {
+                    if (!IsPathError(error)) throw;
+                }
+            }
+            if (roots.Count != 1) return null;
+            string basePath = roots.Single();
+            var candidates = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (string location in RegisteredLocations)
+            {
+                string value;
+                if (!values.TryGetValue(location, out value) || string.IsNullOrWhiteSpace(value)) continue;
+                string path = Environment.ExpandEnvironmentVariables(value.Trim().Trim('"'));
+                if (Path.IsPathRooted(path)) continue;
+                string found = FindLauncherNear(value, basePath);
+                if (found != null) candidates.Add(found);
+            }
+            return candidates.Count == 1 ? candidates.Single() : null;
+        }
+
+        internal static string FindLauncherNear(string registered, string trustedInstallDirectory = null)
         {
             if (string.IsNullOrWhiteSpace(registered)) return null;
             string path = Environment.ExpandEnvironmentVariables(registered.Trim().Trim('"'));
@@ -181,18 +227,83 @@ namespace TideCombat
             if (extension >= 0) path = path.Substring(0, extension + 4);
             try
             {
-                if (!Path.IsPathRooted(path)) return null;
+                bool relative = !Path.IsPathRooted(path);
+                string root = null;
+                if (!IsFullyQualifiedPath(path))
+                {
+                    if (!relative || string.IsNullOrEmpty(trustedInstallDirectory) ||
+                        !IsFullyQualifiedPath(trustedInstallDirectory) || !Directory.Exists(trustedInstallDirectory)) return null;
+                    root = Path.GetFullPath(trustedInstallDirectory).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+                    if (root.Length == 0 || string.Equals(root, Path.GetPathRoot(root), StringComparison.OrdinalIgnoreCase) ||
+                        !NoReparsePoints(root, null)) return null;
+                    // Refuse drive-relative/device paths, environment leftovers,
+                    // traversal and ambiguous roots even with an install anchor.
+                    if (path.IndexOf(':') >= 0 || path.IndexOf('%') >= 0 || path.IndexOf('$') >= 0 ||
+                        path.Split(new[] { '\\', '/' }, StringSplitOptions.RemoveEmptyEntries).Any(part => part == "..")) return null;
+                    path = Path.GetFullPath(Path.Combine(root, path));
+                    if (!WithinDirectory(root, path)) return null;
+                }
                 var folder = new DirectoryInfo(extension >= 0 ? Path.GetDirectoryName(path) : path);
                 string first = Path.Combine(folder.FullName, GameExecutable);
-                if (File.Exists(first)) return first;
                 string nested = Path.Combine(folder.FullName, "Wuthering Waves Game", GameExecutable);
-                if (File.Exists(nested)) return nested;
                 string sibling = folder.Parent == null ? null : Path.Combine(folder.Parent.FullName, "Wuthering Waves Game", GameExecutable);
-                return File.Exists(sibling) ? sibling : null;
+                if (root == null) return File.Exists(first) ? first : File.Exists(nested) ? nested : File.Exists(sibling) ? sibling : null;
+                string[] candidates = new[] { first, nested, sibling }.Where(candidate => candidate != null &&
+                    WithinDirectory(root, candidate) && File.Exists(candidate) && NoReparsePoints(candidate, root))
+                    .Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+                return candidates.Length == 1 ? candidates[0] : null;
             }
-            catch (ArgumentException) { return null; }
-            catch (NotSupportedException) { return null; }
-            catch (PathTooLongException) { return null; }
+            catch (Exception error)
+            {
+                if (!IsPathError(error)) throw;
+                return null;
+            }
+        }
+
+        private static bool IsFullyQualifiedPath(string path)
+        {
+            if (string.IsNullOrEmpty(path) || !Path.IsPathRooted(path)) return false;
+            if (Path.DirectorySeparatorChar != '\\') return true;
+            // Windows drive-relative paths (C:foo) and root-relative paths
+            // (\foo) depend on process state, not a verified install path.
+            return path.Length >= 3 && char.IsLetter(path[0]) && path[1] == ':' &&
+                (path[2] == '\\' || path[2] == '/') || path.StartsWith("\\\\", StringComparison.Ordinal) &&
+                !path.StartsWith("\\\\?\\", StringComparison.Ordinal) && !path.StartsWith("\\\\.\\", StringComparison.Ordinal);
+        }
+
+        private static bool WithinDirectory(string root, string path)
+        {
+            string full = Path.GetFullPath(path);
+            return full.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static bool NoReparsePoints(string path, string boundary)
+        {
+            try
+            {
+                string current = Path.GetFullPath(path);
+                while (!string.IsNullOrEmpty(current))
+                {
+                    if ((File.GetAttributes(current) & FileAttributes.ReparsePoint) != 0) return false;
+                    if (boundary != null && string.Equals(current, boundary, StringComparison.OrdinalIgnoreCase)) return true;
+                    string parent = Path.GetDirectoryName(current);
+                    if (string.IsNullOrEmpty(parent) || string.Equals(parent, current, StringComparison.OrdinalIgnoreCase))
+                        return boundary == null;
+                    current = parent;
+                }
+                return boundary == null;
+            }
+            catch (Exception error)
+            {
+                if (!IsPathError(error)) throw;
+                return false;
+            }
+        }
+
+        private static bool IsPathError(Exception error)
+        {
+            return error is ArgumentException || error is NotSupportedException || error is IOException ||
+                error is UnauthorizedAccessException || error is System.Security.SecurityException;
         }
 
         private static T ReadRegistry<T>(Func<T> read) where T : class

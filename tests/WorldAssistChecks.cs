@@ -250,11 +250,67 @@ namespace TideCombat
             }
         }
 
+        internal static void TrustedRelativeLauncher()
+        {
+            // Use a real directory rather than a macOS /tmp or /var symlink;
+            // the production relative path deliberately rejects reparse escape.
+            string temp = Directory.Exists("/private/tmp") ? "/private/tmp" : Path.GetTempPath();
+            string root = Path.Combine(temp, "ww-trusted-launcher-" + Guid.NewGuid().ToString("N"));
+            string install = Path.Combine(root, "install"), deep = Path.Combine(install, "deep");
+            string launcherFolder = Path.Combine(deep, "launcher"), game = Path.Combine(deep, "Wuthering Waves Game");
+            string executable = Path.Combine(game, "Wuthering Waves.exe"), ambiguous = Path.Combine(launcherFolder, "Wuthering Waves.exe");
+            Directory.CreateDirectory(launcherFolder);
+            Directory.CreateDirectory(game);
+            try
+            {
+                File.WriteAllBytes(executable, new byte[0]);
+                string relative = Path.Combine("deep", "launcher", "launcher.exe");
+                var values = new Dictionary<string, string> { { "InstallLocation", install }, { "LauncherPath", relative } };
+                Require(GameUpdateRecovery.FindLauncherNear(relative) == null &&
+                    GameUpdateRecovery.FindLauncherNear(relative, install) == executable &&
+                    GameUpdateRecovery.ResolveRegisteredRelativeLauncher(values) == executable,
+                    "registered relative launcher must use a single verified install root, never current directory");
+                Require(GameUpdateRecovery.FindLauncherNear(Path.Combine("..", "escape", "launcher.exe"), install) == null,
+                    "relative traversal must remain rejected");
+                string unexpected = Path.Combine(game, "Client", "Binaries", "Win64", "other.exe");
+                Require(GameUpdateRecovery.LauncherPath(unexpected) == null, "unrecognized process basename must remain rejected");
+                values["InstallPath"] = deep;
+                Require(GameUpdateRecovery.ResolveRegisteredRelativeLauncher(values) == null, "conflicting installation roots are ambiguous");
+                values.Remove("InstallPath");
+                File.WriteAllBytes(ambiguous, new byte[0]);
+                Require(GameUpdateRecovery.FindLauncherNear(relative, install) == null &&
+                    GameUpdateRecovery.ResolveRegisteredRelativeLauncher(values) == null,
+                    "multiple relative launcher candidates must not be chosen automatically");
+            }
+            finally
+            {
+                File.Delete(ambiguous);
+                File.Delete(executable);
+                Directory.Delete(game);
+                Directory.Delete(launcherFolder);
+                Directory.Delete(deep);
+                Directory.Delete(install);
+                Directory.Delete(root);
+            }
+        }
+
         internal static void Rules()
         {
             var options = new WorldAssistOptions();
             Require(WorldAssist.CanPick(false, new[] { new OcrLine { Text = "野花", Score = .9f } }, options), "allow material prompts");
             Require(!WorldAssist.CanPick(false, new[] { new OcrLine { Text = "领取奖励", Score = .9f } }, options), "block reward menus");
+            Require(OcrText.Compact("Ａ Ｂ Ｃ１２") == "ABC12", "compact full-width Latin OCR text");
+            if (Environment.OSVersion.Platform == PlatformID.Win32NT)
+            {
+                Require(OcrText.Compact("領 取 獎勵 ＡＢＣ１２") == "领取奖励ABC12", "normalize OCR to simplified Chinese");
+                Require(!WorldAssist.CanPick(false, new[] { new OcrLine { Text = "領取獎勵", Score = .9f } }, options), "block traditional Chinese reward menus");
+            }
+            Require(WorldSession.MenuClickHoldMilliseconds == 200, "coordinate-targeted world menu clicks use reference press duration");
+            string browserCode, browserKey;
+            CloudBrowser.BrowserKey(0x09, out browserCode, out browserKey);
+            Require(browserCode == "Tab" && browserKey == "Tab", "a named jump binding translates consistently to the managed browser");
+            CloudBrowser.BrowserKey(0x20, out browserCode, out browserKey);
+            Require(browserCode == "Space" && browserKey == " ", "keep the default browser jump binding");
             Require(!WorldAssist.CanPick(true, new[] { new OcrLine { Text = "对话", Score = .9f } }, options), "block unapproved dialogue");
             Require(WorldAssist.CanPick(true, new[] { new OcrLine { Text = "吸收", Score = .9f } }, options), "allow configured echo absorption");
             DateTime hour = new DateTime(2026, 11, 22, 4, 0, 0);
@@ -269,16 +325,51 @@ namespace TideCombat
             var disabled = new MonthlyCardSchedule(new WorldAssistOptions { CheckMonthlyCard = false });
             disabled.Handled(hour);
             Require(!disabled.Due(hour.AddDays(1)), "disabled schedule stays dormant after a visible card");
+            var midnight = new MonthlyCardSchedule(new WorldAssistOptions { MonthlyCardHour = 24 });
+            midnight.Handled(hour);
+            Require(midnight.Due(hour.Date.AddDays(1)) && !midnight.Due(hour.Date.AddDays(1).AddHours(23)),
+                "24 in the reference-style hour field means the next midnight");
+            Require(MonthlyCardSchedule.NormalizeHour(0) == 0 && MonthlyCardSchedule.NormalizeHour(24) == 0,
+                "legacy 0 and reference 24 denote the same midnight");
             Require(WorldAssist.CanPick(true, new[] { new OcrLine { Text = "吸收领取奖励", Score = .9f } }, options),
                 "dialogue checks only the allow list");
             var key = new Rectangle(120, 100, 20, 22);
-            Require(!WorldAssist.CanPick(true, new[]
+            Require(WorldAssist.CanPick(true, new[]
             {
                 new OcrLine { Text = "对话", Score = .9f, Box = new Rectangle(240, 102, 40, 16) },
-                new OcrLine { Text = "吸收", Score = .9f, Box = new Rectangle(240, 132, 40, 16) }
-            }, options, key), "a second-row whitelist match cannot authorize the selected dialogue");
-            Require(WorldAssist.CanPick(false, new OcrLine[0], options, key), "ordinary prompts pass when no blocked text is found");
+                new OcrLine { Text = "吸收", Score = .58f, Box = new Rectangle(240, 132, 40, 16) }
+            }, options), "reference checks a recognized second-row whitelist match without another score threshold");
+            Require(WorldAssist.PickupTextArea(key) == new Rectangle(224, 83, 140, 121), "the pickup text search is relative to F and contains several rows");
+            Require(WorldAssist.CanPick(false, new OcrLine[0], options), "ordinary prompts pass when no blocked text is found");
+            Require(!WorldAssist.CanPick(false, new[]
+            {
+                new OcrLine { Text = "材料", Score = .9f, Box = new Rectangle(240, 102, 40, 16) },
+                new OcrLine { Text = "领取奖励", Score = .58f, Box = new Rectangle(240, 132, 40, 16) }
+            }, options), "ordinary interactions block a blacklist match anywhere in the search area");
             Require(options.Login && options.SkipDialog && options.PickUp && options.RestoreCursor && !options.Travel, "reference trigger defaults");
+            Require(options.StartsAutomatically, "ordinary reference triggers start with the utility by default");
+            Require(options.AllowsStartup(GameSource.AutoLocal) && options.AllowsStartup(GameSource.Foreground) &&
+                options.AllowsStartup(GameSource.Background) && !options.AllowsStartup(GameSource.Cloud) &&
+                !options.AllowsStartup(GameSource.ManagedCloud) && !options.StartsBattleAutomatically,
+                "startup defaults do not grant automatic battle or cloud-session input authorization");
+            WorldAssistOptions startup = options.ForStartup();
+            Require(startup.PickUp && startup.SkipDialog && startup.RestoreCursor && !startup.Travel && !startup.Login && options.Login,
+                "the startup copy includes ordinary triggers but never expands configured manual login authorization");
+            options.StartManagedCloudWithUtility = true;
+            options.StartBattleWithUtility = true;
+            startup = options.ForStartup();
+            Require(startup.AllowsStartup(GameSource.ManagedCloud) && !startup.AllowsStartup(GameSource.Cloud) &&
+                startup.StartsBattleAutomatically && !startup.Login,
+                "explicit saved authorization can opt into the dedicated cloud and resident battle, without automatic login");
+            options.StartWithUtility = false;
+            Require(!options.StartsAutomatically && !options.AllowsStartup(GameSource.ManagedCloud) && !options.StartsBattleAutomatically,
+                "the user can disable all resident triggers");
+            var observedTravelCandidates = new List<string>();
+            int firstTravel = WorldAssist.NextTravelCandidate(0, name => { observedTravelCandidates.Add(name); return name == "fast_travel_custom"; });
+            int nextTravel = WorldAssist.NextTravelCandidate(firstTravel + 1, name => { observedTravelCandidates.Add(name); return name == "remove_custom"; });
+            Require(firstTravel == 0 && nextTravel == 2 && observedTravelCandidates.SequenceEqual(new[] { "fast_travel_custom", "gray_teleport", "remove_custom" }) &&
+                WorldAssist.NextTravelCandidate(nextTravel + 1, name => true) == -1,
+                "a candidate disappearing after the settle delay advances in original priority without restarting the gray-map gate");
             Require(WorldAssist.ShouldRestoreCursor(new Point(10, 100), new Point(805, 450), new Point(800, 450)) &&
                 !WorldAssist.ShouldRestoreCursor(new Point(710, 450), new Point(803, 450), new Point(800, 450)) &&
                 !WorldAssist.ShouldRestoreCursor(new Point(10, 100), new Point(690, 450), new Point(800, 450)),
@@ -311,6 +402,15 @@ namespace TideCombat
 
         internal static void CursorRestore()
         {
+            // The worker's cadence is calculated from this shared pure tracker;
+            // neither the unit test nor the idle-worker lifetime touches the OS cursor.
+            using (new CursorRestoreSampler()) { }
+            var tracker = new CursorResetTracker();
+            var bounds = new Rectangle(200, 100, 1600, 900);
+            tracker.Observe(GameSource.Background, bounds, 0, () => true, () => new Point(400, 300), point => true);
+            Require(tracker.Delay(0) == 2, "the independent idle sample schedules its next observation after 2ms");
+            tracker.Observe(GameSource.Background, bounds, 2, () => true, () => new Point(1000, 550), point => true);
+            Require(tracker.Delay(2) == 1000, "the independent restore sample keeps the reference one-second cooldown");
             var options = new WorldAssistOptions { PickUp = false, Login = false, SkipDialog = false, Travel = false };
             using (var assist = new WorldAssist(options, new FarmVision()))
             {
@@ -429,7 +529,63 @@ namespace TideCombat
                 count = 0;
                 assist.Observe(reader.Read(ordinary, true), hud, false, 1000, click, key);
                 assist.Observe(reader.Read(source, true), hud, false, 1200, click, key);
-                Require(count == 1, "pending follow-up pickup must stop when Astrite replaces the prompt");
+                assist.Observe(reader.Read(source, true), hud, false, 1400, click, key);
+                Require(count == 3, "the reference sends the three-key sequence after the first prompt was approved");
+                assist.Observe(reader.Read(source, true), hud, false, 1600, click, key);
+                Require(count == 3, "a new initially selected Astrite prompt still does not start a pickup sequence");
+                assist.ResetWindow();
+                count = 0;
+                var staleCombat = new HudSnapshot { Valid = true, EnemyHealth = true, Locked = true };
+                assist.Observe(reader.Read(ordinary, true), staleCombat, false, 1800, click, key);
+                Require(count == 1, "a verified F prompt with team HUD can run while a stale lock/health bar remains");
+                assist.ResetWindow();
+                count = 0;
+                assist.Observe(reader.Read(ordinary, true), staleCombat, true, 2000, click, key);
+                Require(count == 0, "do not send competing input while the battle planner owns the route");
+            }
+        }
+
+        internal static void PickupBelowReplay(string root)
+        {
+            var options = new WorldAssistOptions { SkipDialog = false, Travel = false, Login = false };
+            var hud = new HudSnapshot { Valid = true };
+            using (var source = new Bitmap(Path.Combine(root, "tests", "images", "absorb.png")))
+            using (var below = new Bitmap(source))
+            using (var astrite = new Bitmap(Path.Combine(root, "ok_templates", "62.png")))
+            using (var unrelated = new Bitmap(astrite))
+            using (var reader = new FrameReader())
+            using (var assist = new WorldAssist(options, new FarmVision()))
+            {
+                var text = new Rectangle(1342, 540, 57, 29);
+                using (var patch = source.Clone(text, source.PixelFormat))
+                using (var draw = Graphics.FromImage(below))
+                {
+                    draw.FillRectangle(Brushes.Black, text);
+                    draw.DrawImageUnscaled(patch, text.X, text.Y + 44);
+                }
+                using (var draw = Graphics.FromImage(unrelated))
+                    draw.FillRectangle(Brushes.Black, 1076, 449, 30, 31);
+                int keys = 0, scrolls = 0;
+                Func<bool> press = () => { keys++; return true; };
+                Func<bool> scroll = () => { scrolls++; return true; };
+                Func<Point, bool> click = point => { throw new InvalidOperationException("pickup must not click"); };
+                Require(assist.Observe(reader.Read(below, true), hud, false, 1000, click, press) == null && keys == 0,
+                    "an unsupported scroll route sends no input for a lower row");
+                Require(assist.Observe(reader.Read(below, true), hud, false, 2000, click, press,
+                    scrollPickup: scroll) == "自动拾取" && keys == 1 && scrolls == 1,
+                    "a visible allowed lower row sends one wheel step followed by the first F");
+                Require(assist.Observe(reader.Read(source, true), hud, false, 5000, click, press,
+                    capturedAt: 2000, scrollPickup: scroll) == null && keys == 1,
+                    "an older route capture cannot trigger a follow-up");
+                Require(assist.Observe(reader.Read(below, true), hud, false, 6000, click, press,
+                    scrollPickup: scroll) == "自动拾取" && keys == 2 && scrolls == 1,
+                    "a follow-up F does not require selection confirmation or repeat the wheel");
+                Require(assist.Observe(reader.Read(unrelated, true), hud, false, 6200, click, press,
+                    scrollPickup: scroll) == "自动拾取" && keys == 3 && scrolls == 1,
+                    "the approved sequence completes after three presses");
+                Require(assist.Observe(reader.Read(astrite, true), hud, false, 6400, click, press,
+                    scrollPickup: scroll) == null && keys == 3 && scrolls == 1,
+                    "a new Astrite prompt does not begin another sequence");
             }
         }
 
@@ -460,6 +616,14 @@ namespace TideCombat
                     Rectangle button;
                     Require(WorldAssist.FindSkipConfirmation(frame, vision, out button) && button.X > frame.Width / 2,
                         "find the right-hand skip confirmation in " + path);
+                }
+                using (var image = new Bitmap(Path.Combine(root, "ok_templates/10.png")))
+                {
+                    using (Graphics draw = Graphics.FromImage(image)) draw.FillRectangle(Brushes.Black, 0, 0, image.Width / 2, image.Height);
+                    PixelFrame frame = reader.Read(image);
+                    Rectangle button;
+                    Require(WorldAssist.FindSkipConfirmation(frame, vision, out button, knownStory: true) && button.X > frame.Width / 2,
+                        "a visible summary confirmation is enough after a known story skip even if the Continue Watching button is obscured");
                 }
             }
         }
@@ -512,6 +676,22 @@ namespace TideCombat
                 var clicks = new List<Point>();
                 Func<Point, bool> click = p => { clicks.Add(p); return true; };
                 Func<bool> key = () => { throw new InvalidOperationException("dialog requested a keyboard event"); };
+                using (var skip = new Bitmap(Path.Combine(templates, "47.png")))
+                using (var summary = new Bitmap(Path.Combine(templates, "10.png")))
+                {
+                    PixelFrame visible = reader.Read(skip);
+                    assist.Observe(visible, hud, false, 0, click, key);
+                    assist.Observe(visible, hud, false, 199, click, key);
+                    assist.Observe(visible, hud, false, 200, click, key);
+                    Require(clicks.Count == 2, "repeat a visible skip icon at 200ms intervals");
+                    assist.Observe(reader.Read(empty), hud, false, 400, click, key);
+                    Require(clicks.Count == 2, "wait on fresh frames while the summary appears");
+                    PixelFrame confirmed = reader.Read(summary);
+                    assist.Observe(confirmed, hud, false, 600, click, key);
+                    assist.Observe(confirmed, hud, false, 800, click, key);
+                    Require(clicks.Count == 3 && clicks[2].X > confirmed.Width / 2,
+                        "the confirmation window starts when the skip icon disappears");
+                }
                 foreach (string name in new[] { "10.png", "9.png", "../tests/images/skip_quest_confirm_21_9.jpg" })
                 using (var image = new Bitmap(Path.Combine(templates, name)))
                 {
@@ -588,6 +768,41 @@ namespace TideCombat
                 var ui = new FarmVision().Read(frame, true);
                 Require(ui.SkipDialog && ui.SkipCheckBox.Contains(clicks[1]) && ui.ConfirmBox.Contains(clicks[2]),
                     "domain and farm navigation detect both compact controls on the same frame");
+                // Do not require the team HUD to have vanished if the map
+                // supplies independent evidence of its travel button.
+                assist.ResetWindow();
+                clicks.Clear();
+                var staleTeam = new HudSnapshot { Valid = true };
+                frame = reader.Read(map);
+                assist.Observe(frame, staleTeam, false, 0, click, () => false);
+                assist.Observe(frame, staleTeam, false, 500, click, () => false);
+                Require(clicks.Count == 1 && clicks[0].Y > frame.Height * .85, "map evidence still works when the HUD was retained");
+                // The reference after_sleep is measured after the emitted
+                // input completed, not from the frame's pre-click timestamp.
+                long time = 0;
+                using (var timed = new WorldAssist(options, new FarmVision(), clock: () => time))
+                {
+                    var timedClicks = new List<Point>();
+                    Func<Point, bool> slowClick = p => { timedClicks.Add(p); time += 200; return true; };
+                    timed.Observe(reader.Read(map), hud, false, time, slowClick, () => false);
+                    time = 500;
+                    timed.Observe(reader.Read(map), hud, false, time, slowClick, () => false);
+                    Require(timedClicks.Count == 1, "the candidate click follows its 500ms settle check");
+                    time = 1500;
+                    Require(timed.Observe(reader.Read(dialog), hud, false, time, slowClick, () => false) == null && timedClicks.Count == 1,
+                        "the next stage is blocked until one second after click release");
+                    time = 1700;
+                    timed.Observe(reader.Read(dialog), hud, false, time, slowClick, () => false);
+                    time = 2200;
+                    timed.Observe(reader.Read(dialog), hud, false, time, slowClick, () => false);
+                    Require(timedClicks.Count == 2 && timedClicks[1].X < frame.Width / 2, "the optional checkbox follows its post-release settle delay");
+                    time = 2700;
+                    timed.Observe(reader.Read(dialog), hud, false, time, slowClick, () => false);
+                    Require(timedClicks.Count == 2, "the checkbox's hold duration must not shorten the 500ms delay");
+                    time = 2900;
+                    timed.Observe(reader.Read(dialog), hud, false, time, slowClick, () => false);
+                    Require(timedClicks.Count == 3, "the confirmed travel prompt completes on its reference delay");
+                }
             }
         }
 
@@ -629,6 +844,63 @@ namespace TideCombat
                     vision.ReadScene(reader.Read(image), hud);
                     Require(hud.ChallengeInteractVisible && !hud.ChallengeMarker, "exclude the left quest list " + name);
                 }
+            }
+        }
+
+        internal static void PartyTemplateFallback(string root)
+        {
+            string templates = Path.Combine(root, "ok_templates");
+            string images = Path.Combine(root, "tests", "images");
+            var settings = CombatSettings.Defaults();
+            using (var reader = new FrameReader())
+            using (var source = new Bitmap(Path.Combine(templates, "55.png")))
+            {
+                PixelFrame frame = reader.Read(source);
+                Require(!PartyHud.Read(frame, new HudSnapshot()), "test requires an ambiguous generic party badge");
+                HudSnapshot hud = new HudVision(settings).Read(frame);
+                Require(hud.Valid && hud.PartySize == 3 && hud.Current == 1,
+                    "two bright number templates confirm the active middle slot");
+                Require(new HudVision(settings).Read(frame, cloud: true).Valid,
+                    "the reference uses the same team numeral rule on PC and cloud");
+
+                using (var withoutSkills = new Bitmap(source, 1600, 900))
+                using (Graphics paint = Graphics.FromImage(withoutSkills))
+                {
+                    paint.FillRectangle(Brushes.Black, new Rectangle(1280, 825, 320, 75));
+                    HudSnapshot unavailable = new HudVision(settings).Read(reader.Read(withoutSkills));
+                    Require(!unavailable.Valid, "a recognizable party cannot substitute for a visible skill bar");
+                }
+            }
+
+            foreach (string path in new[]
+            {
+                Path.Combine(templates, "664081ea-WindowsGraphicsCaptureMethod_3840x2160_title_None_Client-Win64-Shippin_HFdZtL0.png"),
+                Path.Combine(images, "big_map.png"),
+                Path.Combine(templates, "hiyuki3.png")
+            })
+            using (var reader = new FrameReader())
+            using (var source = new Bitmap(path))
+                Require(!new HudVision(settings).Read(reader.Read(source)).Valid,
+                    "unverified teammate, map or health evidence must not promote " + Path.GetFileName(path));
+        }
+
+        internal static void LevitatorEntryWithShortBars(string root)
+        {
+            foreach (string name in new[] { "in_combat.png", "in_combat3.png" })
+            using (var source = new Bitmap(Path.Combine(root, "tests", "images", name)))
+            using (var image = new Bitmap(1600, 900, System.Drawing.Imaging.PixelFormat.Format32bppRgb))
+            using (var reader = new FrameReader())
+            using (Graphics paint = Graphics.FromImage(image))
+            {
+                paint.DrawImage(source, new Rectangle(0, 0, 1600, 900));
+                var vision = new HudVision(CombatSettings.Defaults());
+                HudSnapshot entry = vision.Read(reader.Read(image), allowShortEnemyBar: true, activeFight: false);
+                Require(entry.Valid && entry.LevitatorKnown && entry.Airborne == (name == "in_combat.png"),
+                    "allowing short enemy bars must not suppress entry-time levitator recognition");
+                paint.FillRectangle(Brushes.Black, new Rectangle(1256, 786, 34, 34));
+                HudSnapshot airborne = vision.Read(reader.Read(image), allowShortEnemyBar: true, activeFight: true);
+                Require(airborne.Valid && airborne.LevitatorKnown && airborne.Airborne,
+                    "an active fight must retain a recognized levitator even after its icon dims");
             }
         }
 

@@ -1,0 +1,68 @@
+<!doctype html><meta charset="UTF-8"><style>
+html,body{margin:0;background:#111;overflow:hidden}
+video,#render{position:absolute;left:5vw;top:5vh;width:90vw;height:90vh;object-fit:contain}
+#cover{position:absolute;left:43vw;top:43vh;width:14vw;height:14vh;background:blue;pointer-events:none}
+</style>
+<video muted playsinline autoplay></video><div id="cover"></div><script>
+const video = document.querySelector('video');
+const cover = document.querySelector('#cover');
+function setTrack(color) {
+    if (window.stream) window.stream.getTracks().forEach(track => track.stop());
+    clearInterval(window.painter);
+    const canvas = document.createElement('canvas');
+    canvas.width = 1280;
+    canvas.height = 720;
+    const context = canvas.getContext('2d');
+    let n = 0;
+    const paint = () => {
+        context.fillStyle = color;
+        context.fillRect(0,0,1280,720);
+        context.fillStyle = '#ffffff';
+        context.fillRect(n++ % 100,1,2,2);
+    };
+    paint();
+    window.stream = canvas.captureStream(30);
+    video.srcObject = window.stream;
+    video.play().catch(() => {});
+    window.painter = setInterval(paint, 33);
+}
+async function setCanvasReceiver() {
+    setTrack('#c03e0c');
+    video.remove();
+    cover.remove();
+    const canvas = document.createElement('canvas');
+    canvas.id = 'render';
+    canvas.width = 1280;
+    canvas.height = 720;
+    document.body.append(canvas);
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#182ad0';
+    ctx.fillRect(0, 0, 1280, 720);
+    // Use a deterministic receiver backed by a local test track. No ICE server
+    // or live game account is required for this decoder and screenshot test.
+    const peer = new RTCPeerConnection();
+    Object.defineProperty(peer, 'connectionState', { get: () => 'connected' });
+    peer.getReceivers = () => [{ track: stream.getVideoTracks()[0] }];
+    window.fixturePeer = peer;
+    try { await peer.setRemoteDescription({ type: 'offer', sdp: '' }); } catch (_) {}
+}
+setTrack('#dc2314');
+video.addEventListener('pointerdown', () => { cover.style.pointerEvents = 'auto'; });
+document.addEventListener('keydown', event => {
+    if (event.code === 'KeyW') {
+        cover.style.pointerEvents = 'none';
+        setTrack('#11ba26');
+    }
+    if (event.code === 'KeyQ') {
+        video.pause();
+        stream.getTracks()[0].stop();
+        clearInterval(painter);
+    }
+    if (event.code === 'KeyC') setCanvasReceiver();
+    if (event.code === 'KeyX' && window.fixturePeer) {
+        stream.getTracks()[0].stop();
+        clearInterval(painter);
+        fixturePeer.close();
+    }
+});
+</script>

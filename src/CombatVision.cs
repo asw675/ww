@@ -6,6 +6,7 @@ namespace TideCombat
 {
     internal sealed class CombatVision
     {
+        private const double KnownPortrait = .92, TemplateThreshold = .60;
         private static readonly int[] Search = { 0, -2, 2, -4, 4 };
         private static readonly int[] IconSearch = { 0, -1, 1, -2, 2, -4, 4 };
         private static readonly int[] WideSearch = { -12, -8, -4, 0, 4, 8, 12 };
@@ -20,9 +21,13 @@ namespace TideCombat
         private readonly CombatSettings settings;
         private readonly int[] comparison = VisualSignature.Buffer();
         private readonly string[] known = new string[3];
+        private readonly double[] knownConfidence = new double[3];
         private readonly byte[][] lastPortrait = new byte[3][];
+        private readonly string[] ringOwners = new string[3];
+        private readonly ConcertoColor[] ringIndices = { ConcertoColor.Unknown, ConcertoColor.Unknown, ConcertoColor.Unknown };
+        private readonly ConcertoColor[] pendingRing = { ConcertoColor.Unknown, ConcertoColor.Unknown, ConcertoColor.Unknown };
+        private bool ringBattleActive;
         private readonly ConcertoMeter concerto;
-        private int frames;
         private bool toolWasVisible;
         private Rectangle lastChallengeMarker;
         private readonly FrameIndex challengeIndex = new FrameIndex();
@@ -34,16 +39,17 @@ namespace TideCombat
             this.concerto = concerto ?? new ConcertoMeter();
         }
 
-        internal void Read(PixelFrame frame, HudSnapshot hud, bool activeFight, bool scanExecutionPrompt = true)
+        internal void Read(PixelFrame frame, HudSnapshot hud, bool allowShortEnemyBar, bool scanExecutionPrompt = true,
+            bool? activeFight = null)
         {
             CharacterKit fighter = CharacterRoster.Find(hud.Fighters[hud.Current]);
-            ReadConcerto(frame, hud);
+            ReadConcerto(frame, hud, activeFight ?? allowShortEnemyBar);
             hud.Forte = EstimateForte(frame);
             hud.ForteFullColor = ReadFullForte(frame);
             hud.ChallengeSeconds = HudGlyphs.ReadChallengeClock(frame);
             hud.Countdown = hud.ChallengeSeconds > 0;
-            ReadLevitator(frame, hud, activeFight);
-            if (!hud.Locked && !hud.EnemyHealth && !activeFight)
+            ReadLevitator(frame, hud, activeFight ?? allowShortEnemyBar);
+            if (!hud.Locked && !hud.EnemyHealth && !allowShortEnemyBar)
                 return;
 
             var middle = new AreaPixels(frame, new Rectangle(frame.Width / 2 - 178, 725, 365, 145));
@@ -96,7 +102,6 @@ namespace TideCombat
 
         private void ReadLevitator(PixelFrame frame, HudSnapshot hud, bool activeFight)
         {
-            if (!settings.CheckLevitator) return;
             var box = new Rectangle(frame.Width - 344, 786, 34, 34);
             if (!activeFight)
                 toolWasVisible = Find(frame, new AreaPixels(frame, Rectangle.Inflate(box, 12, 6)), "edge_levitator", .65);
@@ -129,7 +134,7 @@ namespace TideCombat
 
         internal void ReadTransformation(PixelFrame frame, HudSnapshot hud, bool cloud)
         {
-            ReadParty(frame, hud);
+            ReadParty(frame, hud, true);
             string fighter = hud.Fighters[hud.Current];
             if (fighter == "Lily")
             {
@@ -143,7 +148,7 @@ namespace TideCombat
                 if (fighter == "Lucilla") ReadLucillaTransform(frame, hud, hud.Current, cloud);
                 return;
             }
-            ReadConcerto(frame, hud);
+            ReadConcerto(frame, hud, true);
             hud.Valid = true;
             hud.Detail = "Lily 梦乡中";
         }
@@ -158,7 +163,7 @@ namespace TideCombat
             hud.LockOffset = offset;
             hud.Locked = hud.LucillaTransform = hud.Valid = true;
             hud.EnemyHealth = EnemyHud.HasHealth(frame, true, cloud) || HasBossMarker(frame);
-            ReadConcerto(frame, hud);
+            ReadConcerto(frame, hud, true);
             hud.Detail = "洛瑟菈变身中";
             return true;
         }
@@ -168,64 +173,92 @@ namespace TideCombat
             return HasRegionSignal(frame, "target_box_short", .82, 14) || EnemyHud.ShortLockOffset(frame) > 0;
         }
 
-        internal int DesktopLockOffset(PixelFrame frame, out bool recognized, out bool shifted, out int longLayout)
+        internal int DesktopLockOffset(PixelFrame frame, out bool recognized, out bool shifted, out int longLayout, bool allowShort = false)
         {
             int labelOffset = frame.SourceWidth == 1600 ? 2 : 0;
+            int normalizedWidth = frame.Width;
+            frame = frame.FullResolution;
             string lockedLabel = DesktopTargetLabels[labelOffset], unlockedLabel = DesktopTargetLabels[labelOffset + 1];
             VisualPattern[] locked = PatternBank.For(lockedLabel), unlocked = PatternBank.For(unlockedLabel);
             recognized = shifted = false;
             longLayout = 0;
             if (locked.Length == 0 || unlocked.Length == 0) return 0;
-            Rectangle normal = locked[0].Map(frame.Width, 0);
-            Rectangle icon = FindDesktopTargetIn(frame, Rectangle.Inflate(normal, 2, 2), locked, unlocked);
+            Rectangle normal = TargetArea(locked[0], frame);
+            bool matchedLocked;
+            Rectangle icon = FindDesktopTargetIn(frame, ScaleTargetArea(normal, 1.1, 1.1), locked, unlocked, out matchedLocked);
             if (!icon.IsEmpty)
             {
                 recognized = true;
-                return TargetOffset(frame, icon);
+                return matchedLocked ? NormalizedTargetOffset(frame, icon, normalizedWidth) : 0;
             }
             for (int layout = 0; layout < DesktopTargetAreas.Length; layout++)
             {
                 foreach (VisualPattern area in PatternBank.For(DesktopTargetAreas[layout]))
                 {
-                    icon = FindDesktopTargetIn(frame, area.Map(frame.Width, 0), locked, unlocked);
+                    icon = FindDesktopTargetIn(frame, TargetArea(area, frame), locked, unlocked, out matchedLocked);
                     if (icon.IsEmpty) continue;
                     recognized = true;
                     longLayout = layout + 1;
-                    return TargetOffset(frame, icon);
+                    return matchedLocked ? NormalizedTargetOffset(frame, icon, normalizedWidth) : 0;
                 }
             }
-            icon = FindDesktopTargetIn(frame, Rectangle.Inflate(normal, 2, normal.Height / 2), locked, unlocked);
+            if (allowShort)
+            {
+                foreach (VisualPattern area in PatternBank.For("target_box_short"))
+                {
+                    icon = FindDesktopTargetIn(frame, TargetArea(area, frame), locked, unlocked, out matchedLocked);
+                    if (icon.IsEmpty) continue;
+                    recognized = true;
+                    return NormalizedTargetOffset(frame, icon, normalizedWidth); // reference short-action accepts either label
+                }
+            }
+            icon = FindDesktopTargetIn(frame, ScaleTargetArea(normal, 1.1, 2), locked, unlocked, out matchedLocked);
             if (icon.IsEmpty) return 0;
             recognized = shifted = true;
-            return TargetOffset(frame, icon);
+            return matchedLocked ? NormalizedTargetOffset(frame, icon, normalizedWidth) : 0;
         }
 
-        private static int TargetOffset(PixelFrame frame, Rectangle icon)
+        private static Rectangle TargetArea(VisualPattern pattern, PixelFrame frame)
         {
-            int x = icon.X + icon.Width / 2, y = icon.Y + icon.Height / 2;
-            return HasGold(frame, icon) || EnemyHud.HasDesktopLockColor(frame, x, y) ? frame.Width - x : 0;
+            return pattern.Reference == null ? pattern.Map(frame.Width, 0) : pattern.Reference.Map(frame.Width, frame.Height);
+        }
+
+        internal static Rectangle ScaleTargetArea(Rectangle area, double widthRatio, double heightRatio)
+        {
+            int width = (int)Math.Round(area.Width * widthRatio), height = (int)Math.Round(area.Height * heightRatio);
+            return new Rectangle((int)Math.Round(area.X + (area.Width - width) / 2.0),
+                (int)Math.Round(area.Y + (area.Height - height) / 2.0), width, height);
+        }
+
+        private static int NormalizedTargetOffset(PixelFrame frame, Rectangle icon, int normalizedWidth)
+        {
+            return (int)Math.Round((frame.Width - icon.X - icon.Width / 2.0) * normalizedWidth / frame.Width);
         }
 
         private static Rectangle FindDesktopTargetIn(PixelFrame frame, Rectangle limits, VisualPattern[] locked,
-            VisualPattern[] unlocked)
+            VisualPattern[] unlocked, out bool matchedLocked)
         {
             limits.Intersect(new Rectangle(0, 0, frame.Width, frame.Height));
             Rectangle found = Rectangle.Empty;
-            double best = .60;
+            double best = TemplateThreshold;
+            matchedLocked = false;
             for (int type = 0; type < 2; type++)
             {
-                foreach (VisualPattern template in type == 0 ? locked : unlocked)
+                foreach (VisualPattern pattern in type == 0 ? locked : unlocked)
                 {
+                    VisualPattern template = pattern.Reference == null ? pattern :
+                        pattern.Reference.At(pattern.Label, pattern.Fighter, frame.Width, frame.Height) ?? pattern;
                     int width = template.Area.Width, height = template.Area.Height;
                     for (int y = limits.Top; y <= limits.Bottom - height; y++)
                     {
                         for (int x = limits.Left; x <= limits.Right - width; x++)
                         {
                             var location = new Rectangle(x, y, width, height);
-                            double score = template.LightSimilarity(frame, location);
-                            if (score <= best) continue;
+                            double score = template.HasColorCorrelation ? template.ColorCorrelation(frame, location) : template.LightSimilarity(frame, location);
+                            if (score < TemplateThreshold || !found.IsEmpty && score <= best) continue;
                             best = score;
                             found = location;
+                            matchedLocked = type == 0;
                         }
                     }
                 }
@@ -692,27 +725,44 @@ namespace TideCombat
             return (double)count / (area.Width * area.Height);
         }
 
-        internal void ReadParty(PixelFrame frame, HudSnapshot hud)
+        internal void ReadParty(PixelFrame frame, HudSnapshot hud, bool activeFight = false)
         {
-            frames++;
             for (int slot = 0; slot < known.Length; slot++)
             {
+                if (hud.PartySize > 0 && slot >= hud.PartySize)
+                {
+                    ClearPortrait(slot);
+                    continue;
+                }
                 string manual = settings.PartyCharacters[slot];
                 if (CharacterRoster.Find(manual) != null)
                 {
+                    ClearPortrait(slot);
                     hud.Fighters[slot] = manual;
                     continue;
                 }
-                if (hud.Health[slot] <= 0)
+                if (hud.Health[slot] <= 0 && !hud.HealthUnknown[slot])
                     continue;
-                byte[] seen = PortraitReader.Sample(frame, slot);
-                bool changed = lastPortrait[slot] == null || PortraitReader.Distance(lastPortrait[slot], seen) > 18;
-                if (changed || known[slot] == null && frames % 13 == 1)
+                // OKWW loads chars before entering combat and holds those
+                // identities inside the fight (except explicit scene/roster
+                // transitions). Do not re-identify an actor from an animation.
+                if (!activeFight || lastPortrait[slot] == null)
                 {
-                    string candidate = Identify(frame, slot);
-                    if (candidate != null || changed)
+                    Rectangle region = PortraitBox(frame, slot);
+                    var seen = new byte[region.Width * region.Height * 4];
+                    frame.CopyBgra(region, seen);
+                    // The matcher is deterministic for exactly the same ROI;
+                    // cache only identical pixels, not approximate similarity.
+                    if (!EqualPortraitPixels(lastPortrait[slot], seen))
                     {
-                        known[slot] = candidate;
+                        double confidence;
+                        string recheck = knownConfidence[slot] > KnownPortrait ? known[slot] : null;
+                        string candidate = Identify(frame, slot, recheck, out confidence);
+                        if (candidate != null)
+                        {
+                            known[slot] = candidate;
+                            knownConfidence[slot] = confidence;
+                        }
                         lastPortrait[slot] = seen;
                     }
                 }
@@ -720,30 +770,109 @@ namespace TideCombat
             }
         }
 
+        internal void ResetParty()
+        {
+            toolWasVisible = false;
+            ringBattleActive = false;
+            for (int slot = 0; slot < known.Length; slot++)
+            {
+                ClearPortrait(slot);
+                ringOwners[slot] = null;
+                ringIndices[slot] = pendingRing[slot] = ConcertoColor.Unknown;
+            }
+        }
+
+        private void ClearPortrait(int slot)
+        {
+            known[slot] = null;
+            knownConfidence[slot] = 0;
+            lastPortrait[slot] = null;
+        }
+
+        private static bool EqualPortraitPixels(byte[] previous, byte[] current)
+        {
+            if (previous == null || previous.Length != current.Length) return false;
+            for (int i = 0; i < current.Length; i++) if (previous[i] != current[i]) return false;
+            return true;
+        }
+
+        // box_char_1/2/3 from the OKWW annotated 3840x2160 reference.
+        private static readonly Rectangle[] PortraitBoxes = { new Rectangle(3515, 418, 129, 157),
+            new Rectangle(3515, 686, 126, 151), new Rectangle(3516, 954, 133, 149) };
+
+        internal static Rectangle PortraitBox(PixelFrame frame, int slot)
+        {
+            return ReferenceFeature.Map(3840, 2160, PortraitBoxes[slot], frame.Width, frame.Height);
+        }
+
         internal string Identify(PixelFrame frame, int slot)
         {
-            var area = new AreaPixels(frame, new Rectangle(frame.Width - 160, 165 + slot * 110, 120, 80));
-            var scores = new Dictionary<string, double>(StringComparer.Ordinal);
+            double confidence;
+            return Identify(frame, slot, null, out confidence);
+        }
+
+        private string Identify(PixelFrame frame, int slot, string recheck, out double confidence)
+        {
+            Rectangle region = PortraitBox(frame, slot);
+            var area = new AreaPixels(frame, region);
+            var colorArea = new ColorMatchArea(frame, region);
+            if (recheck != null)
+                foreach (VisualPattern pattern in PatternBank.Portraits)
+                {
+                    if (pattern.Fighter == recheck && PortraitCorrelation(frame, area, colorArea, pattern, slot, TemplateThreshold) >= TemplateThreshold)
+                    {
+                        confidence = knownConfidence[slot];
+                        return recheck;
+                    }
+                }
+            string selected = null;
+            double first = 0;
             foreach (VisualPattern pattern in PatternBank.Portraits)
             {
-                double match = Best(area, pattern, pattern.Map(frame.Width, slot), Search);
-                double existing;
-                if (!scores.TryGetValue(pattern.Fighter, out existing) || match > existing)
-                    scores[pattern.Fighter] = match;
-            }
-            string selected = null;
-            double first = 0, second = 0;
-            foreach (KeyValuePair<string, double> candidate in scores)
-            {
-                if (candidate.Value > first)
+                double match = PortraitCorrelation(frame, area, colorArea, pattern, slot, Math.Max(TemplateThreshold, first));
+                if (match > first)
                 {
-                    second = first;
-                    first = candidate.Value;
-                    selected = candidate.Key;
+                    first = match;
+                    selected = pattern.Fighter;
                 }
-                else second = Math.Max(second, candidate.Value);
+                if (first >= 1) break;
             }
-            return first >= .83 && first - second >= .040 ? selected : null;
+            confidence = first;
+            return first >= TemplateThreshold ? selected : null;
+        }
+
+        private double PortraitCorrelation(PixelFrame frame, AreaPixels area, ColorMatchArea colorArea, VisualPattern pattern, int slot, double minimum)
+        {
+            if (pattern.Reference != null)
+            {
+                // Search every valid placement of the complete uncropped
+                // registered template in the actual slot box, not an assumed
+                // portrait center and a handful of offsets.
+                VisualPattern complete = pattern.Reference.At(pattern.Label, pattern.Fighter, frame.Width, frame.Height);
+                if (complete != null)
+                {
+                    return complete.BestColorCorrelation(colorArea, minimum);
+                }
+            }
+            Rectangle expected = pattern.Map(frame.Width, slot);
+            if (!pattern.HasColorCorrelation) return Best(area, pattern, expected, Search);
+            double best = 0;
+            int bestX = 0, bestY = 0;
+            foreach (int dy in Search)
+            foreach (int dx in Search)
+            {
+                var trial = new Rectangle(expected.X + dx, expected.Y + dy, expected.Width, expected.Height);
+                if (!area.Contains(trial)) continue;
+                double score = pattern.ColorCorrelation(frame, trial);
+                if (score > best) { best = score; bestX = dx; bestY = dy; }
+            }
+            for (int dy = bestY - 1; dy <= bestY + 1; dy++)
+            for (int dx = bestX - 1; dx <= bestX + 1; dx++)
+            {
+                var trial = new Rectangle(expected.X + dx, expected.Y + dy, expected.Width, expected.Height);
+                if (area.Contains(trial)) best = Math.Max(best, pattern.ColorCorrelation(frame, trial));
+            }
+            return best;
         }
 
         private bool Find(PixelFrame frame, AreaPixels region, string indicator, double confidence)
@@ -889,11 +1018,30 @@ namespace TideCombat
             return white > 20;
         }
 
-        private void ReadConcerto(PixelFrame frame, HudSnapshot hud)
+        private void ReadConcerto(PixelFrame frame, HudSnapshot hud, bool active)
         {
-            string current = hud.Fighters[hud.Current];
+            if (ringBattleActive && !active)
+            {
+                for (int i = 0; i < ringIndices.Length; i++)
+                    ringIndices[i] = pendingRing[i] = ConcertoColor.Unknown;
+            }
+            ringBattleActive = active;
+            int slot = hud.Current;
+            string current = hud.Fighters[slot];
+            if (ringOwners[slot] != current)
+            {
+                ringOwners[slot] = current;
+                ringIndices[slot] = pendingRing[slot] = ConcertoColor.Unknown;
+            }
+            ConcertoColor expected = CharacterKit.Ring(current);
+            if (expected == ConcertoColor.Unknown && active)
+                expected = ringIndices[slot] != ConcertoColor.Unknown ? ringIndices[slot] : pendingRing[slot];
             ConcertoColor observed;
-            hud.Concerto = concerto.Read(frame, CharacterKit.Ring(current), out observed);
+            hud.Concerto = concerto.Read(frame, expected, out observed);
+            if (active && ringIndices[slot] == ConcertoColor.Unknown)
+                ringIndices[slot] = observed == ConcertoColor.Unknown ? ConcertoColor.Spectro : observed;
+            else if (!active)
+                pendingRing[slot] = observed == ConcertoColor.Unknown ? ConcertoColor.Spectro : observed;
             hud.ConcertoFull = hud.Concerto == 1;
             if (current != "Rover") return;
             switch (observed)
@@ -902,6 +1050,10 @@ namespace TideCombat
                 case ConcertoColor.Electro: hud.RoverForm = "RoverElectro"; break;
                 case ConcertoColor.Aero: hud.RoverForm = "RoverAero"; break;
                 case ConcertoColor.Havoc: hud.RoverForm = "RoverHavoc"; break;
+                case ConcertoColor.Fusion:
+                case ConcertoColor.Glacio:
+                    hud.RoverForm = "Rover";
+                    break;
             }
         }
     }

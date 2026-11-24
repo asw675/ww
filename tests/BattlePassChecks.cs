@@ -35,6 +35,17 @@ namespace TideCombat
                 nothingRecognized.ClaimAll.IsEmpty, "an invisible claim control is not evidence of an empty queue");
             var empty = BattlePassVision.Inspect(new[] { title, free, premium, At("暂无可领取奖励", 700, 570) }, size);
             Require(empty.Page == BattlePassPage.Rewards && empty.NoPendingRewards, "explicit empty status was lost");
+            Require(BattlePassVision.IsSeasonUnavailable(new[] { At("本期先约电台已结束", 680, 420) }, size) &&
+                BattlePassVision.IsSeasonUnavailable(new[] { At("Pioneer Podcast is not currently available", 650, 400) }, size) &&
+                BattlePassVision.IsSeasonUnavailable(new[] { title, At("本期已结束", 680, 430) }, size),
+                "only explicit unavailable-season evidence may skip a battle pass");
+            Require(!BattlePassVision.IsSeasonUnavailable(new OcrLine[0], size) &&
+                !BattlePassVision.IsSeasonUnavailable(new[] { At("活动已结束", 680, 420) }, size) &&
+                !BattlePassVision.IsSeasonUnavailable(new[] { title }, size) &&
+                !BattlePassVision.IsSeasonUnavailable(new[] { title, daily, weekly, claimAll, At("本期先约电台已结束", 680, 420) }, size),
+                "missing OCR, unrelated activity or active claimable panel is not a verified season closure");
+            OcrLine uncertainSeason = At("先约电台暂未开放", 680, 420); uncertainSeason.Score = .5f;
+            Require(!BattlePassVision.IsSeasonUnavailable(new[] { uncertainSeason }, size), "low confidence season text is not explicit evidence");
         }
 
         internal static void VerifyTerminalEntryReference(string root)

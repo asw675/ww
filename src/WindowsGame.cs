@@ -63,6 +63,7 @@ namespace TideCombat
         [DllImport("user32.dll")] internal static extern bool IsIconic(IntPtr hwnd);
         [DllImport("user32.dll", SetLastError = true)] internal static extern bool SetCursorPos(int x, int y);
         [DllImport("user32.dll")] internal static extern bool GetClientRect(IntPtr hwnd, out Rect rect);
+        [DllImport("user32.dll")] internal static extern bool GetWindowRect(IntPtr hwnd, out Rect rect);
         [DllImport("user32.dll")] internal static extern bool ClientToScreen(IntPtr hwnd, ref Point point);
         [DllImport("user32.dll")] internal static extern bool ScreenToClient(IntPtr hwnd, ref Point point);
         [DllImport("user32.dll")] internal static extern IntPtr ChildWindowFromPointEx(IntPtr parent, Point point, uint flags);
@@ -229,7 +230,7 @@ namespace TideCombat
             var size = new Size(client.Right - client.Left, client.Bottom - client.Top);
             if (!SupportedSize(size))
             {
-                reason = "请使用 1280×720 或更高的 16:9／21:9 游戏画面";
+                reason = "请使用 1280×720 或更高的 16:9 游戏画面";
                 return false;
             }
             bounds = new Rectangle(position.X, position.Y, size.Width, size.Height);
@@ -323,12 +324,13 @@ namespace TideCombat
             return SupportedSize(size) ? (long)size.Width * size.Height : 0;
         }
 
-        private static bool SupportedSize(Size size)
+        internal static bool SupportedSize(Size size)
         {
             if (size.Width < 1280 || size.Height < 720)
                 return false;
-            double aspect = (double)size.Width / size.Height;
-            return aspect >= 1.74 && aspect <= 2.48;
+            // Match the reference 16:9 capture contract, allowing the nearest
+            // pixel when a display's nominal ratio is rounded (e.g. 1366x768).
+            return Math.Abs((long)size.Width * 9 - (long)size.Height * 16) <= 9;
         }
 
         private string WaitingText()

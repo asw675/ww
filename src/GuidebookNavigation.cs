@@ -15,16 +15,24 @@ namespace TideCombat
         private readonly WorldSession world;
         private readonly Action<string> report;
         private readonly GuideTab target;
+        private readonly bool referenceSequence;
+        internal const int ReferenceOpenDelayMs = 4000;
+        internal const int ReferenceBeforeTabDelayMs = 2000;
+        internal const int ReferenceAfterTabDelayMs = 1500;
         private string TabName { get { return target == GuideTab.Quest ? "任务图鉴" : target == GuideTab.Monsters ? "全部怪物" : "Boss 图鉴"; } }
         internal bool ChangedPage { get; private set; }
         internal string Failure { get; private set; }
 
-        internal GuidebookNavigation(WorldSession world, Action<string> report, GuideTab target = GuideTab.Boss)
+        internal GuidebookNavigation(WorldSession world, Action<string> report, GuideTab target = GuideTab.Boss,
+            bool referenceSequence = false)
         {
             this.world = world;
             this.target = target;
             this.report = report;
+            this.referenceSequence = referenceSequence;
         }
+
+        internal static bool ShouldClickTab(bool selected) { return !selected; }
 
         internal bool Open(Func<bool> returnToWorld = null)
         {
@@ -89,7 +97,7 @@ namespace TideCombat
                     return false;
                 }
             }
-            if (selected)
+            if (!ShouldClickTab(selected))
             {
                 RunLog.Info(LogArea, "识别到已选中的" + TabName + "页签");
                 return true;
@@ -97,8 +105,28 @@ namespace TideCombat
 
             ChangedPage = true;
             report("切换到" + TabName);
-            if (world.ClickMenuButton(tab) && WaitForSelectedBookTab(4500))
-                return true;
+            if (referenceSequence)
+            {
+                int route = world.InputRouteVersion;
+                world.Sleep(ReferenceBeforeTabDelayMs);
+                if (!FindBookTab(out tab, out selected) || world.InputRouteVersion != route)
+                {
+                    SetFailure("参考页签等待后未确认同一输入路径的目标页签。");
+                    return false;
+                }
+                if (!ShouldClickTab(selected)) return true;
+                if (world.ClickOnRoute(tab, route))
+                {
+                    world.Sleep(ReferenceAfterTabDelayMs);
+                    if (world.InputRouteVersion == route && WaitForSelectedBookTab(4500, route)) return true;
+                }
+                if (world.InputRouteVersion != route)
+                {
+                    SetFailure("切换页签期间输入路径已变化。");
+                    return false;
+                }
+            }
+            else if (world.ClickMenuButton(tab) && WaitForSelectedBookTab(4500)) return true;
             if (!requestedForeground && CanRecoverBookInForeground())
                 RecoverBookInForeground();
             if (!world.Token.IsCancellationRequested && world.Window.Mode != GameSource.Background &&
@@ -127,19 +155,26 @@ namespace TideCombat
             bool selected;
             if (!FindBookTab(out tab, out selected))
                 return false;
-            if (selected)
+            if (!ShouldClickTab(selected))
                 return true;
+            if (referenceSequence)
+            {
+                int route = world.InputRouteVersion;
+                if (!world.ClickOnRoute(tab, route)) return false;
+                world.Sleep(ReferenceAfterTabDelayMs);
+                return world.InputRouteVersion == route && WaitForSelectedBookTab(4500, route);
+            }
             var center = new Point(tab.X + tab.Width / 2, tab.Y + tab.Height / 2);
             return world.ClickMenuButton(center, retry: true) && WaitForSelectedBookTab(4500);
         }
 
-        private bool WaitForSelectedBookTab(int timeoutMs)
+        private bool WaitForSelectedBookTab(int timeoutMs, int? route = null)
         {
             bool confirmed = world.WaitUntil(delegate
             {
                 Rectangle ignored;
                 bool active;
-                return InspectTab(out ignored, out active) && active;
+                return (!route.HasValue || world.InputRouteVersion == route.Value) && InspectTab(out ignored, out active) && active;
             }, timeoutMs);
             if (confirmed)
                 RunLog.Info(LogArea, "已确认切换到" + TabName);
@@ -264,10 +299,19 @@ namespace TideCombat
         {
             if (ReadBookView(out tab, out selected, out view) || view != GuideView.World)
                 return;
+            int route = world.InputRouteVersion;
             bool sent = world.GuideKey(requireForeground);
             GameSource mode = world.Window.Mode;
             if (sent)
+            {
+                if (referenceSequence)
+                {
+                    world.Sleep(ReferenceOpenDelayMs);
+                    if (world.InputRouteVersion != route) { tab = Rectangle.Empty; selected = false; view = GuideView.Other; return; }
+                }
                 WaitForBookTab(4000, out tab, out selected, out view, stopAtTerminal: true);
+                if (referenceSequence && world.InputRouteVersion != route) { tab = Rectangle.Empty; selected = false; view = GuideView.Other; return; }
+            }
             else
                 ReadBookView(out tab, out selected, out view);
             LogBookAttempt(world.Settings.GuidebookKey ?? "F2", sent, mode, tab, view);
@@ -278,10 +322,19 @@ namespace TideCombat
             // The menu shortcuts are in the world HUD. Avoid sending this click from other game screens.
             if (ReadBookView(out tab, out selected, out view) || view != GuideView.World)
                 return;
+            route = world.InputRouteVersion;
             sent = world.ClickWithAlt(.77, .05, 50);
             mode = world.Window.Mode;
             if (sent)
+            {
+                if (referenceSequence)
+                {
+                    world.Sleep(ReferenceOpenDelayMs);
+                    if (world.InputRouteVersion != route) { tab = Rectangle.Empty; selected = false; view = GuideView.Other; return; }
+                }
                 WaitForBookTab(4000, out tab, out selected, out view);
+                if (referenceSequence && world.InputRouteVersion != route) { tab = Rectangle.Empty; selected = false; view = GuideView.Other; return; }
+            }
             else
                 ReadBookView(out tab, out selected, out view);
             LogBookAttempt("游戏内入口", sent, mode, tab, view);

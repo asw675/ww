@@ -55,8 +55,18 @@ namespace TideCombat
                     Rectangle placement;
                     VisualSignature descriptor;
                     string light = null;
+                    string rgb = null;
+                    string referenceGeometry = null, referenceRgb = null;
                     using (var source = new Bitmap(path))
                     {
+                        bool originalMatch = fighterId != null || CombatVision.DesktopTargetLabels.Contains(label);
+                        if (originalMatch || CombatVision.DesktopTargetAreas.Contains(label) || label == "target_box_short")
+                        {
+                            referenceGeometry = string.Join(",", new[] { referenceWidth, Number(filename, 3), Number(filename, 4),
+                                Number(filename, 5), source.Width, source.Height }.Select(Format));
+                            if (originalMatch)
+                                referenceRgb = EncodeRgb(Scale(source, source.Width, source.Height), new Rectangle(0, 0, source.Width, source.Height));
+                        }
                         int width = Math.Max(1, (int)Math.Round(source.Width * scale));
                         int height = Math.Max(1, (int)Math.Round(source.Height * scale));
                         PixelFrame frame = Scale(source, width, height);
@@ -77,6 +87,8 @@ namespace TideCombat
                             label == "echo_dropped" || label == "echo_not_dropped")
                             light = EncodeLocalContrast(frame, crop);
                         placement = new Rectangle(x + insetX, y + insetY, crop.Width, crop.Height);
+                        if (fighterId != null || CombatVision.DesktopTargetLabels.Contains(label) || TaskIndicators.TeamNumbers.Contains(label))
+                            rgb = EncodeRgb(frame, crop);
                         if (label == "forte_cartethyia_sword2" || label == "forte_cartethyia_sword3")
                         {
                             crop.Height /= 2;
@@ -99,6 +111,17 @@ namespace TideCombat
                     {
                         if (light == null) row += "\t";
                         row += "\t" + Convert.ToBase64String(File.ReadAllBytes(path));
+                    }
+                    else if (rgb != null)
+                    {
+                        if (light == null) row += "\t";
+                        row += "\t\t" + rgb;
+                    }
+                    if (referenceGeometry != null)
+                    {
+                        while (row.Count(c => c == '\t') < 9) row += "\t";
+                        row += "\t" + referenceGeometry;
+                        if (referenceRgb != null) row += "\t" + referenceRgb;
                     }
                     destination.WriteLine(row);
                 }
@@ -152,6 +175,20 @@ namespace TideCombat
                     samples[y * crop.Width + x] = frame.Light(crop.X + x, crop.Y + y);
             double mean = samples.Average();
             return Convert.ToBase64String(samples.Select(value => unchecked((byte)(sbyte)Math.Round((value - mean) / 4))).ToArray());
+        }
+
+        private static string EncodeRgb(PixelFrame frame, Rectangle crop)
+        {
+            byte[] bytes = new byte[crop.Width * crop.Height * 3];
+            int index = 0;
+            for (int y = crop.Top; y < crop.Bottom; y++)
+            for (int x = crop.Left; x < crop.Right; x++)
+            {
+                int r, g, b;
+                frame.Rgb(x, y, out r, out g, out b);
+                bytes[index++] = (byte)r; bytes[index++] = (byte)g; bytes[index++] = (byte)b;
+            }
+            return Convert.ToBase64String(bytes);
         }
 
         private static PixelFrame Scale(Bitmap source, int width, int height)

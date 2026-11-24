@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Drawing;
+using System.Linq;
 using System.Text;
 using System.Text.RegularExpressions;
 
@@ -50,6 +51,20 @@ namespace TideCombat
             "点击任意位置关闭", "點擊任意位置關閉", "点击空白处关闭", "點擊空白處關閉",
             "点击屏幕关闭", "點擊螢幕關閉", "ClickAnywhereToClose"
         };
+        private static readonly string[] SeasonUnavailableLabels =
+        {
+            "先约电台暂未开启", "先約電台暫未開啟", "先约电台尚未开启", "先約電台尚未開啟",
+            "先约电台暂未开放", "先約電台暫未開放", "先约电台未开放", "先約電台未開放",
+            "先约电台已结束", "先約電台已結束", "本期先约电台已结束", "本期先約電台已結束",
+            "先约电台活动已结束", "先約電台活動已結束", "先约电台本期已结束", "先約電台本期已結束",
+            "PioneerPodcastisnotavailable", "PioneerPodcastisnotcurrentlyavailable", "PioneerPodcasthasended",
+            "PioneerPodcasthasnotstartedyet", "PioneerPodcastisnotopen"
+        };
+        private static readonly string[] TitledSeasonUnavailableLabels =
+        {
+            "本期已结束", "本期已結束", "本期电台已结束", "本期電台已結束", "暂未开放", "暫未開放",
+            "尚未开启", "尚未開啟", "Seasonhasended", "Seasonnotavailable"
+        };
         private static readonly Regex LevelProgress = new Regex(@"(?:^|[^0-9])\d{1,5}/(?:1000|10000|12000)(?:$|[^0-9])");
 
         internal static Rectangle FindTerminalEntry(IEnumerable<OcrLine> lines, Size size)
@@ -80,6 +95,19 @@ namespace TideCombat
                 state.ClaimAll = Unique(lines, FooterClaimLabels, Relative(size, .53, .85, .81, .97));
             state.NoPendingRewards = !Unique(lines, EmptyLabels, Relative(size, .12, .27, .89, .98)).IsEmpty;
             return state;
+        }
+
+        internal static bool IsSeasonUnavailable(IEnumerable<OcrLine> lines, Size size)
+        {
+            var observations = lines.ToArray();
+            // A still-open task or rewards page may have claimable rewards
+            // even when a timer has expired. Never skip such a page.
+            if (Inspect(observations, size).Page != BattlePassPage.Unknown ||
+                HasLevelProgress(observations, Relative(size, .00, .00, .60, .24))) return false;
+            Rectangle message = Relative(size, .12, .10, .88, .85);
+            if (CountMatches(observations, SeasonUnavailableLabels, message) > 0) return true;
+            return !Unique(observations, EntryLabels, Relative(size, .00, .00, .60, .24)).IsEmpty &&
+                CountMatches(observations, TitledSeasonUnavailableLabels, Relative(size, .24, .25, .76, .75)) > 0;
         }
 
         internal static int[] ButtonPatch(PixelFrame frame, Rectangle button)

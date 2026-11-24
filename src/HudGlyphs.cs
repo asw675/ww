@@ -301,7 +301,17 @@ namespace TideCombat
                 }
             }
             lit = dark > 420 && (white >= 38 || bright >= 122);
-            return cooling ? SkillState.Cooling : lit ? SkillState.Ready : SkillState.Unavailable;
+            return CooldownState(cooling, cooldownSeconds, lit);
+        }
+
+        internal static SkillState CooldownState(bool digitsDetected, double seconds, bool lit)
+        {
+            // The reference treats the final 0.2 s as ready for the next input.
+            // The production reference OCR path initializes an absent reading
+            // to zero. This glyph fallback still guards a visible but unreadable
+            // numeric timer when the OCR engine itself is unavailable.
+            return digitsDetected && (double.IsNaN(seconds) || seconds > .2) ?
+                SkillState.Cooling : lit ? SkillState.Ready : SkillState.Unavailable;
         }
 
         private static bool ReadDecimalTimer(PixelFrame frame, int cx, int cy, int brightness, out double seconds)

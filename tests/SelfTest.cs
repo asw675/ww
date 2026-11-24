@@ -37,6 +37,12 @@ namespace TideCombat
                 Check("headless browser captures an offline page and routes input events", () => BrowserFixture(args[1]));
                 return failed == 0 ? 0 : 1;
             }
+            if (args.Length == 2 && args[0] == "--browser-stream-fixture")
+            {
+                Check("headless browser reads current video tracks and falls back for interactive overlays",
+                    () => BrowserFixture(args[1], VerifyBrowserVideo));
+                return failed == 0 ? 0 : 1;
+            }
             if (args.Length == 3 && args[0] == "--browser-protocol")
             {
                 using (var browser = new CloudBrowser(args[1], address => address == args[2]))
@@ -45,7 +51,10 @@ namespace TideCombat
             }
             Check("two-frame lock confirmation and stop on HUD loss", LockConfirmation);
             Check("auto-target is gated by repeated enemy evidence", AutoTarget);
-            Check("automated combat opens with an attack and keeps fighting visible enemies without a lock", AttackWithoutLock);
+            Check("standalone PC combat requires a lock before attacking", StandaloneRequiresLock);
+            Check("standalone combat clears a dead character turn before resuming", StandaloneStopsOnDeath);
+            Check("task combat requires a PC lock and accepts cloud enemy health", TaskCombatEntry);
+            Check("blind search does not replace evidence-based targeting or advance combat capture", TaskBlindSearchAndCapture);
             Check("combat clearance needs sustained valid frames and resets when enemies return", CombatClearance);
             Check("active fights retry targets at the reference cadence and stop when the health bar disappears", ActiveRetarget);
             Check("cooldowns, disabled liberation, and detected skill key", SkillSelection);
@@ -54,9 +63,11 @@ namespace TideCombat
             Check("rotation waits for concerto and verifies switches", RotationAndSwitch);
             Check("switching honors party size and living teammates below eight percent", SmallPartyRotation);
             Check("challenge interaction distinguishes F and marker transitions", ChallengeTransitions);
+            Check("standalone Abyss entry is gated by pickup and uses a cached OCR clock", StandaloneAbyssClock);
             Check("failed switch backs off and resumes safely", FailedSwitch);
             Check("low-health support follows the learned character", LowHealthSupport);
             Check("fight cleanup runs the character's own handoff before its healer switch", FightEndHandoff);
+            Check("task fight waits for all character handoffs and a settled HUD", TaskFightEndHandoff);
             Check("configuration round-trip and validation", SettingsRoundTrip);
             Check("automatic local mode follows focus without changing fixed modes", GameSourceChecks.AutomaticMode);
             Check("automatic local mode serializes without renumbering saved modes", GameSourceChecks.SavedSource);
@@ -75,15 +86,16 @@ namespace TideCombat
             Check("4C farm retries map opening and travels only by the confirmed healing waypoint", FarmChecks.HealWaypointRecovery);
             Check("4C farm closes claim popups and restarts the challenge", FarmChecks.ClaimRestart);
             Check("4C farm teleport clicks the configured boss row", FarmChecks.TeleportBossRow);
-            Check("4C farm keeps fighting a visible enemy even when an echo is detected", FarmChecks.EchoEndsCombat);
+            Check("4C farm uses the reference PC drop condition and cloud health grace", FarmChecks.EchoEndsCombat);
             Check("4C farm probes from a standstill without a reliable route", FarmChecks.StationaryTargetSearch);
-            Check("4C farm releases movement when guidance disappears or the start prompt appears", FarmChecks.ApproachStopsOnLostEvidence);
+            Check("4C farm releases movement when the verified scene disappears or a prompt appears; a missing marker follows zero angle", FarmChecks.ApproachStopsOnLostEvidence);
             Check("4C farm caps unguided forward movement after a confirmed teleport", FarmChecks.TravelWalkIsBounded);
             Check("4C farm can start on the team screen without an exploration HUD", FarmChecks.ManualStartAcceptsTeamScreen);
             Check("4C farm starts a verified interaction while skill HUD is incomplete", FarmChecks.ManualStartRecognizesVerifiedPartialHud);
             Check("4C farm approaches briefly when manually started inside a confirmed instance", FarmChecks.ManualRealmStartupWalkIsBounded);
             Check("4C farm stops loot movement and resumes the same fight when the target returns", FarmChecks.TargetReturnsDuringLoot);
             Check("4C farm starts at the settlement marker and selects rechallenge without claiming", FarmChecks.RechallengeFromSettlement);
+            Check("4C farm approaches Nameless Explorer after verified rechallenge", FarmChecks.NamelessRechallengeApproach);
             Check("4C farm distinguishes selected and stacked rechallenge text from the reward objective", FarmChecks.RechallengeChoiceUsesSelectedRow);
             Check("4C farm opens the instance restart dialog when the only interaction is claim reward", FarmChecks.RechallengeFromRewardOnly);
             Check("4C farm keeps the confirmed instance when the treasure and realm markers disappear", FarmChecks.RechallengeKeepsConfirmedSettlement);
@@ -106,10 +118,15 @@ namespace TideCombat
             Check("OCR matches detector and recognizer input pixels", OcrChecks.Inputs);
             Check("OCR excludes the slanted decoration above the activity counter", OcrChecks.DetectionScore);
             Check("OCR filters narrow rotated components with tied bounding-box areas", OcrChecks.NarrowRotatedBox);
+            Check("OCR preserves reference box order, source bounds and rectified recognition batch width", OcrChecks.ReferenceOrdering);
+            Check("OCR normalizes traditional Chinese with the system converter while preserving raw text", OcrChecks.TextNormalization);
+            OcrDetectionChecks.Run(Check);
+            OcrRecognitionChecks.Run(Check);
             Check("login rechecks the current button and phone form after four seconds", WorldAssistChecks.LoginSettle);
             Check("login privacy, quadrant, switch-account and disconnect controls", WorldAssistChecks.LoginControls);
             Check("client update confirmation waits, relaunch and cancellation", WorldAssistChecks.UpdateRestart);
             Check("game update recovery finds the attached, recent or registered launcher in order", WorldAssistChecks.LauncherFallback);
+            Check("relative launcher resolution requires one verified install root and rejects ambiguity", WorldAssistChecks.TrustedRelativeLauncher);
             Check("client update reads the current installation's launcher package", WorldAssistChecks.UpdatePackage);
             Check("echo enhancement parses OCR stats", EnhanceChecks.Parsing);
             Check("echo enhancement removes stray marks from complete stat values", EnhanceChecks.NumberNoise);
@@ -144,11 +161,11 @@ namespace TideCombat
             Check("Second Sola recognizes the date, event marker and exam answer", SecondSolaChecks.Decisions);
             Check("nightmare nest counts and cache keys", NightmareChecks.Counts);
             Check("nightmare nest cache keys tolerate jitter", NightmareChecks.Keys);
-            Check("nightmare options require a selection", NightmareChecks.Options);
+            Check("nightmare options fall back to both categories when empty", NightmareChecks.Options);
             Check("nightmare skips clipped buttons and tries the next visible nest", NightmareChecks.VisibleVisitButtons);
             Check("named nightmare nests are identified across scroll positions without merging other nests", NightmareChecks.NamedTargetsAcrossPages);
             Check("purification associates direct challenge buttons with the correct visible nest", NightmareChecks.PurificationTargets);
-            Check("nightmare retries partial progress and verifies completion on that same named row", NightmareChecks.SameNestProgress);
+            Check("nightmare reads partial and full progress on the same named row", NightmareChecks.SameNestProgress);
             Check("nightmare pickup looks for the absorb interaction", NightmareChecks.AbsorbLabels);
             Check("nightmare requires a new pickup receipt after F", NightmareChecks.ReceiptMustBeNew);
             Check("garden progress detection", GardenChecks.Progress);
@@ -170,6 +187,7 @@ namespace TideCombat
             Check("account key normalisation", AccountChecks.Keys);
             Check("account dropdown, duplicate list entries and scoped login button", AccountChecks.LoginLabels);
             Check("account plans reject malformed types and nested account tasks before execution", AccountChecks.InvalidPlans);
+            Check("already-cancelled account runners never start account operations", AccountChecks.CancelledPlans);
             Check("account editor retains isolated task drafts and unregistered references", AccountChecks.EditorDrafts);
             Check("account editor displays previous success, failure and cancellation", AccountChecks.EditorHistory);
             Check("account store round-trip and validation", AccountChecks.Store);
@@ -185,6 +203,8 @@ namespace TideCombat
                 Console.WriteLine("SKIP automatic task window fixture (TideCombat or the game is already running)");
             Check("input privilege preflight detects elevated clients and reads native process tokens", InputPrivilegePreflight);
             Check("administrator restart preserves domain and nightmare tasks", TaskResumeRouting);
+            Check("the command line resolves one daily task and rejects unknown options", DailyCommandLineRouting);
+            Check("daily command-line exit is scoped to successful runs", DailyCommandLineExit);
             Check("cloud combat uses health evidence and a bounded grace period", CloudGrace);
             Check("retargeting keeps the long health window and uses the short window without health", HealthRetargetWindows);
             Check("visible cloud health starts combat without sending a needless lock", CloudEntry);
@@ -203,6 +223,7 @@ namespace TideCombat
             Check("explicit execution is separate from Phrolova's automated switch gate", PhrolovaExplicitExecution);
             Check("Shorekeeper's intro and airborne states survive loss of lock until the guard ends", ShoreKeeperCombatGrace);
             Check("a rotation waits five seconds for a hidden party HUD before ending the failed switch", SwitchTimeout);
+            Check("a rotation gives visible party slots ten seconds to confirm the switch", VisiblePartySwitchTimeout);
             Check("task-specific healer settings override global opening and closing switches", ConfiguredHealerSwitch);
             Check("freeze-adjusted buffs and Hecate execution windows mirror the reference", FreezeAdjustedDecisions);
             Check("confirmed hidden-HUD animation records its duration in the shared clock", AnimationFreezeObservation);
@@ -212,6 +233,8 @@ namespace TideCombat
             Check("dim liberation gets the short retry window and skips true cooldown", DimLiberationFlow);
             Check("liberation varies attack inputs before and during the animation", LiberationAttackFlow);
             Check("resonance retries with normal attack and delays F only inside its animation", ResonanceAnimationFlow);
+            Check("liberation timeout terminates the task rotation rather than starting another", LiberationAbort);
+            Check("the final 0.2 seconds of a visible cooldown are not cooling", SkillCooldownBoundary);
             Check("a persistently shifted PC target layout gets one timed pair of menu presses", RecoverShiftedTarget);
             Check("a valid Abyss countdown keeps combat active beyond five seconds without a lock", ChallengeTimerCombat);
             Check("challenge clock rejects health and invalid seconds and accepts both fraction separators", ChallengeClockFormat);
@@ -229,6 +252,7 @@ namespace TideCombat
             Check("Camellya visual charge separates striped fill from interference", VisualCharge);
             Check("concerto measures the connected arc against the last full ring of its element", ConcertoCalibration);
             RotationChecks.Run(Check);
+            CombatReferenceChecks.Run(Check);
             if (args.Length == 2 && args[0] == "--reference")
             {
                 Check("echo enhancement replays bag, stat rows and the real overflow dialog",
@@ -366,27 +390,118 @@ namespace TideCombat
                 "a health-led retry should end after 1.2 seconds with no health bar");
         }
 
-        private static void AttackWithoutLock()
+        private static void StandaloneRequiresLock()
         {
             CombatSettings settings = CustomSlotOptions();
             settings.RotateParty = false;
-            var planner = new BattlePlanner(settings, targetForTask: true, attackVisibleEnemies: true);
+            var planner = BattleLoop.CreateStandalonePlanner(settings, cloud: false);
             HudSnapshot hud = BattleHud();
             hud.Locked = false;
-            hud.ChallengePrompt = true;
             Require(planner.Observe(hud, 0).Kind == ActionKind.Wait && !planner.Fighting,
-                "challenge prompts must not start a fight");
+                "one health-bar observation should not start the fight");
+            BattleAction target = planner.Observe(hud, 100);
+            Require(target.Kind == ActionKind.Target && !planner.Fighting,
+                "a visible enemy without a lock should receive a middle-click attempt first");
+            planner.Sent(target, 100);
+            Require(planner.Observe(hud, 299).Kind == ActionKind.Wait && !planner.Fighting,
+                "no attack while the lock is unconfirmed");
+            Require(planner.Observe(hud, 300).Kind == ActionKind.Target && !planner.Fighting,
+                "retry targeting without starting to attack");
+            Require(planner.Observe(hud, 3100).Kind == ActionKind.Wait && !planner.Fighting,
+                "a targeting timeout must not fall back to attacking");
+
+            settings.AutoTarget = false;
+            Require(planner.Observe(hud, 3400).Kind == ActionKind.Wait && !planner.Fighting,
+                "manual lock mode should not send input before the player locks on");
+            hud.Locked = true;
+            Require(planner.Observe(hud, 3500).Kind == ActionKind.Wait && !planner.Fighting,
+                "wait for a stable lock");
+            Require(planner.Observe(hud, 3600).Kind == ActionKind.Attack && planner.Fighting,
+                "start attacking after the confirmed lock");
+        }
+
+        private static void StandaloneStopsOnDeath()
+        {
+            CombatSettings settings = CustomSlotOptions();
+            var planner = BattleLoop.CreateStandalonePlanner(settings, cloud: false);
+            HudSnapshot hud = BattleHud();
+            planner.Observe(hud, 0);
+            Require(planner.Observe(hud, 100).Kind == ActionKind.Attack && planner.Fighting,
+                "start a turn on a stable lock before testing the defeat");
+
+            var defeated = new HudSnapshot { Dead = true };
+            Require(planner.Observe(defeated, 200).Kind == ActionKind.Wait && !planner.Fighting,
+                "seeing the defeat prompt must end the turn without input");
+            Require(planner.Observe(defeated, 400).Kind == ActionKind.Wait && !planner.Fighting,
+                "an ongoing defeat prompt must not trigger another action");
+            Require(planner.Observe(hud, 500).Kind == ActionKind.Wait && !planner.Fighting,
+                "manual recovery must start a fresh lock confirmation");
+            Require(planner.Observe(hud, 600).Kind == ActionKind.Attack && planner.Fighting,
+                "after manual recovery, a new confirmed lock may start another turn");
+        }
+
+        private static void TaskCombatEntry()
+        {
+            CombatSettings settings = CustomSlotOptions();
+            settings.AutoTarget = settings.RotateParty = false;
+            var planner = CombatRunner.CreateTaskPlanner(settings, cloud: false);
+            HudSnapshot hud = BattleHud();
+            hud.Locked = false;
+            Require(planner.Observe(hud, 0).Kind == ActionKind.Wait && !planner.Fighting,
+                "first frame of visible enemy health should only start confirmation");
+            BattleAction target = planner.Observe(hud, 100);
+            Require(target.Kind == ActionKind.Target && !planner.Fighting,
+                "one-time PC tasks should try the lock even when standalone auto-target is disabled");
+            planner.Sent(target, 100);
+            Require(planner.Observe(hud, 299).Kind == ActionKind.Wait && !planner.Fighting,
+                "give the lock time to land without attacking");
+            target = planner.Observe(hud, 300);
+            Require(CombatRunner.AddBlindTargetProbe(target, hud, false).Kind == ActionKind.Target && !planner.Fighting,
+                "the blind search timer must not throttle the 200 ms health-backed retry");
+            planner.Sent(target, 300);
+            Require(planner.Observe(hud, 3100).Kind == ActionKind.Wait && !planner.Fighting,
+                "an unconfirmed lock must time out without opening a rotation");
+            hud.Locked = true;
+            Require(planner.Observe(hud, 3200).Kind == ActionKind.Wait && !planner.Fighting,
+                "a single lock observation does not yet confirm entry");
+            Require(planner.Observe(hud, 3300).Kind == ActionKind.Attack && planner.Fighting,
+                "a stable PC lock starts combat");
+
+            var cloud = CombatRunner.CreateTaskPlanner(settings, cloud: true);
+            hud = BattleHud();
+            hud.Locked = false;
+            Require(cloud.Observe(hud, 0).Kind == ActionKind.Wait && !cloud.Fighting,
+                "cloud starts with a confirmation frame");
+            Require(cloud.Observe(hud, 100).Kind == ActionKind.Attack && cloud.Fighting,
+                "cloud tasks may use enemy health directly with standalone auto-target disabled");
+        }
+
+        private static void TaskBlindSearchAndCapture()
+        {
+            HudSnapshot hud = BattleHud();
+            hud.Locked = hud.EnemyHealth = false;
+            BattleAction wait = default(BattleAction);
+            Require(CombatRunner.AddBlindTargetProbe(wait, hud, false).Kind == ActionKind.Wait &&
+                CombatRunner.AddBlindTargetProbe(wait, hud, true).Kind == ActionKind.Target,
+                "only enabled, due blind search sends an input without enemy evidence");
+            hud.ChallengePrompt = true;
+            Require(CombatRunner.AddBlindTargetProbe(wait, hud, true).Kind == ActionKind.Wait,
+                "a challenge interaction suppresses blind probes");
             hud.ChallengePrompt = false;
-            Require(planner.Observe(hud, 100).Kind == ActionKind.Wait && !planner.Fighting, "wait for two observations");
-            BattleAction opening = planner.Observe(hud, 200);
-            Require(opening.Kind == ActionKind.Attack && planner.Fighting, "visible enemies should receive an immediate attack");
-            planner.Sent(opening, 200);
-            BattleAction probe = planner.Observe(hud, 400);
-            Require(probe.Kind == ActionKind.Target, "preserve middle-button targeting during combat");
-            planner.Sent(probe, 400);
-            Require(planner.Observe(hud, 600).Kind == ActionKind.Attack, "a failed lock must not block the next attack");
-            hud.Valid = false;
-            Require(planner.Observe(hud, 850).Kind == ActionKind.Wait, "never attack without a usable HUD");
+            hud.EnemyHealth = true;
+            Require(CombatRunner.AddBlindTargetProbe(wait, hud, true).Kind == ActionKind.Wait,
+                "health-backed entry waits for the planner instead of blind search");
+            hud.EnemyHealth = hud.Valid = false;
+            Require(CombatRunner.AddBlindTargetProbe(wait, hud, true).Kind == ActionKind.Wait,
+                "blind probes require a valid HUD");
+
+            int captures = 0;
+            Func<long, bool> capture = now => { captures++; return now == 300; };
+            Require(!CombatRunner.TryCaptureDuringCombat(true, false, capture, 100) &&
+                !CombatRunner.TryCaptureDuringCombat(false, true, capture, 200) && captures == 0,
+                "unconfirmed combat or an unusable HUD cannot invoke the capture callback");
+            Require(CombatRunner.TryCaptureDuringCombat(true, true, capture, 300) && captures == 1,
+                "a confirmed fight can still exit as soon as the capture is verified");
         }
 
         private static void CombatClearance()
@@ -589,6 +704,61 @@ namespace TideCombat
             Require(!ordinary.InChallenge, "a second planner cannot consume the same start twice");
         }
 
+        private static void StandaloneAbyssClock()
+        {
+            CombatSettings settings = CustomSlotOptions();
+            settings.AutoTarget = false;
+            settings.WorldAssist.PickUp = false;
+            var planner = BattleLoop.CreateStandalonePlanner(settings, cloud: false);
+            HudSnapshot hud = BattleHud();
+            hud.OpenWorld = hud.Locked = hud.EnemyHealth = false;
+            hud.ChallengePrompt = hud.ChallengeMarker = true;
+            planner.Observe(hud, 100);
+            hud.ChallengePrompt = hud.ChallengeMarker = false;
+            planner.Observe(hud, 200);
+            Require(!hud.InChallenge && !planner.Fighting, "disabled pickup must not force an Abyss start");
+
+            int reads = 0;
+            double seconds = 42;
+            Func<double> read = () => { reads++; return seconds; };
+            hud.Locked = hud.Countdown = true;
+            planner.Observe(hud, 300, read);
+            planner.Observe(hud, 400, read);
+            hud.Locked = false;
+            Require(planner.Observe(hud, 500, read).Kind == ActionKind.Target && reads == 0 && !hud.InChallenge,
+                "a manually locked fight does not let a glyph countdown activate Abyss protection");
+
+            settings.WorldAssist.PickUp = true;
+            planner = BattleLoop.CreateStandalonePlanner(settings, cloud: false);
+            hud.ChallengePrompt = hud.ChallengeMarker = true;
+            planner.Observe(hud, 100, read);
+            hud.ChallengePrompt = hud.ChallengeMarker = hud.Countdown = false;
+            planner.Observe(hud, 200, read);
+            planner.Observe(hud, 300, read);
+            Require(planner.Fighting && hud.InChallenge && reads == 0,
+                "confirmed disappearance starts the challenge without OCR within the initial window");
+            hud.InChallenge = false;
+            planner.Observe(hud, 5100, read);
+            Require(reads == 1 && hud.InChallenge, "positive OCR maintains a confirmed challenge");
+
+            seconds = 0;
+            hud.InChallenge = false;
+            planner.Observe(hud, 5499, read);
+            Require(reads == 1 && hud.InChallenge, "reuse the read result for 400 milliseconds");
+            hud.InChallenge = false;
+            planner.Observe(hud, 5500, read);
+            Require(reads == 2 && !hud.InChallenge, "zero clears countdown evidence");
+            hud.InChallenge = false;
+            planner.Observe(hud, 5501, read);
+            Require(reads == 2 && !hud.InChallenge, "an expired timer is also cached");
+
+            seconds = double.NaN;
+            hud.InChallenge = false;
+            planner.Observe(hud, 5900, read);
+            planner.Observe(hud, 5999, read);
+            Require(reads == 3 && !hud.InChallenge, "unreadable OCR stays unconfirmed for the cache interval");
+        }
+
         private static void FailedSwitch()
         {
             var planner = new BattlePlanner(CustomSlotOptions());
@@ -651,12 +821,56 @@ namespace TideCombat
             }
         }
 
+        private static void TaskFightEndHandoff()
+        {
+            foreach (string fighter in new[] { "Camellya", "Iuno", "Linnai", "Mornye", "Aemeath", "Ciaccona" })
+            {
+                var options = CombatSettings.Defaults();
+                options.SupportOpener = false;
+                var planner = CombatRunner.CreateTaskPlanner(options, cloud: false);
+                HudSnapshot hud = BattleHud();
+                hud.Fighters[0] = fighter;
+                hud.Fighters[1] = "Chixia";
+                hud.Fighters[2] = "Verina";
+                planner.Observe(hud, 0);
+                planner.Observe(hud, 100);
+                var roster = (FighterMemory[])typeof(BattlePlanner).GetField("roster", BindingFlags.Instance | BindingFlags.NonPublic)
+                    .GetValue(planner);
+                roster[0].InRecital = fighter == "Ciaccona";
+                hud.Locked = hud.EnemyHealth = false;
+                planner.Observe(hud, 200);
+                BattleAction first = planner.Observe(hud, 3200);
+                Require(first.Kind == ActionKind.Switch && first.Slot == 2 && planner.RecoveringAfterBattle,
+                    fighter + " must do its task-only handoff even with healer opener disabled");
+                planner.Sent(first, 3200);
+                Require(planner.Observe(hud, 3399).Kind == ActionKind.Wait && planner.RecoveringAfterBattle,
+                    "wait for the 200ms retry");
+                BattleAction retry = planner.Observe(hud, 3400);
+                Require(retry.Kind == ActionKind.Switch && retry.Slot == 2, "continue until the original slot changes");
+                planner.Sent(retry, 3400);
+                hud.Current = 1;
+                Require(planner.Observe(hud, 3600).Kind == ActionKind.Wait && !planner.RecoveringAfterBattle,
+                    "switch_other_char confirms departure, not only the requested target");
+            }
+            var check = new CombatPostFightCheck();
+            Require(!check.Observe(true, true, true, 1000), "the first handoff frame is not success");
+            Require(!check.Observe(true, true, true, 3200), "active recovery delays the world settle clock");
+            Require(!check.Observe(true, false, true, 3400) && !check.Observe(true, false, true, 3899),
+                "allow 500ms after recovery");
+            Require(check.Observe(true, false, true, 3900), "settled team HUD completes the task");
+            check.Observe(false, false, false, 4000);
+            Require(!check.Active && !check.Expired(50000), "reappearing enemies reset the completion state");
+            check.Observe(true, false, false, 5000);
+            Require(!check.Expired(14999) && check.Expired(15000), "unverified HUD has a bounded ten-second grace");
+        }
+
         private static void SettingsRoundTrip()
         {
             string path = Path.Combine(Path.GetTempPath(), "TideCombat-test-" + Guid.NewGuid().ToString("N") + ".json");
             try
             {
                 var settings = CombatSettings.Defaults();
+                Require(settings.CheckLevitator, "reference compatibility checkbox defaults to on");
                 settings.Characters.Add(new CharacterProfile { Name = "治疗角色", Portrait = new byte[PortraitReader.SampleLength],
                     Rotation = Rotation.ForRole(BattleRole.Support) });
                 settings.Domain.Kind = DomainKind.Forgery;
@@ -665,20 +879,33 @@ namespace TideCombat
                 settings.Nightmare.CaptureOnce = true;
                 settings.Change.Target = "暴击伤害";
                 settings.Cultivation.Nightmare = false;
+                settings.JumpKey = "G";
+                settings.DodgeKey = "ALT";
+                settings.WheelKey = "F3";
                 SettingsFile.Save(path, settings);
                 settings.AutoTarget = false;
+                settings.CheckLevitator = false;
                 SettingsFile.Save(path, settings);
                 CombatSettings saved = SettingsFile.Load(path);
-                Require(!saved.AutoTarget && saved.Characters[0].Name == "治疗角色", "independent settings were not persisted");
+                Require(!saved.AutoTarget && !saved.CheckLevitator && saved.Characters[0].Name == "治疗角色", "independent settings were not persisted");
                 Require(saved.Domain.Kind == DomainKind.Forgery && saved.Domain.Index == 18 &&
                     !saved.Nightmare.TacetNest && saved.Nightmare.CaptureOnce && saved.Change.Target == "暴击伤害" &&
                     !saved.Cultivation.Nightmare,
                     "validation must retain domain selection, nightmare mode, and main-stat target");
+                Require(saved.JumpVirtualKey() == 'G' && saved.DodgeVirtualKey() == 0x12 && saved.WheelVirtualKey() == 0x72 &&
+                    CombatSettings.Defaults().JumpVirtualKey() == 0x20 && CombatSettings.Defaults().DodgeVirtualKey() == 0xa0 &&
+                    CombatSettings.Defaults().WheelVirtualKey() == 0x09, "movement hotkeys persist and resolve the reference defaults");
                 saved.EchoKey = saved.LiberationKey;
                 bool denied = false;
                 try { SettingsFile.Save(path, saved); }
                 catch (InvalidDataException) { denied = true; }
                 Require(denied && SettingsFile.Load(path).EchoKey != saved.EchoKey, "invalid config overwrote the saved config");
+                string legacy = File.ReadAllText(path);
+                string withoutField = System.Text.RegularExpressions.Regex.Replace(legacy,
+                    "\\\"CheckLevitator\\\"\\s*:\\s*false\\s*,", string.Empty);
+                Require(withoutField != legacy, "compatibility option was missing from the saved fixture");
+                File.WriteAllText(path, withoutField);
+                Require(SettingsFile.Load(path).CheckLevitator, "legacy configurations without the option keep the reference default");
             }
             finally
             {
@@ -726,6 +953,132 @@ namespace TideCombat
                 !Program.TryReadResume(new[] { Program.ResumeTask, "Preview" }, out mode) &&
                 !Program.TryReadResume(new[] { Program.ResumeTask, "999" }, out mode),
                 "restart accepted an invalid task");
+        }
+
+        private static void DailyCommandLineRouting()
+        {
+            bool exitAfter;
+            string error;
+            MainForm.WorkMode mode;
+            DomainKind? domain;
+            Require(Program.TryReadTaskStart(new[] { "-t", "DailyTask", "-e" }, out mode, out domain, out exitAfter, out error) &&
+                mode == MainForm.WorkMode.Daily && domain == null && exitAfter && error == null, "documented daily launch was rejected");
+            Require(Program.TryReadTaskStart(new[] { "--exit", "--task", "src.task.DailyTask.DailyTask" },
+                out mode, out domain, out exitAfter, out error) && exitAfter && error == null, "scheduler’s stable task name was rejected");
+            Require(Program.TryReadTaskStart(new[] { "--task=📅 Daily Task" }, out mode, out domain, out exitAfter, out error) &&
+                !exitAfter && error == null, "the daily display name was rejected or inherited a previous exit flag");
+            Require(Program.TryReadTaskStart(new[] { Program.ResumeDaily, "--exit" }, out mode, out domain, out exitAfter, out error) &&
+                mode == MainForm.WorkMode.Daily && exitAfter && error == null, "administrator restart lost the daily exit request");
+            Require(Program.TryReadTaskStart(new[] { Program.ResumeCommandTask, "-t", "5", "-e" }, out mode, out domain,
+                out exitAfter, out error) && mode == MainForm.WorkMode.Domain && domain == DomainKind.Forgery && exitAfter &&
+                error == null, "administrator restart lost the selected domain kind or exit request");
+            Require(!Program.TryReadTaskStart(new string[0], out mode, out domain, out exitAfter, out error) && error == null,
+                "normal GUI launch must not require a task");
+
+            var names = new[] { "DailyTask", "FarmEchoTask", "NightmareNestTask", "TacetTask", "ForgeryTask", "SimulationTask",
+                "MultiAccountDailyTask", "MultiAccountConfigTask", "MergeEchoTask", "EnhanceEchoTask", "ChangeEchoTask", "GardenTask" };
+            for (int i = 0; i < names.Length; i++)
+            {
+                Require(Program.TryReadTaskStart(new[] { "-t", (i + 1).ToString() }, out mode, out domain,
+                    out exitAfter, out error) && Program.ReferenceTaskNumber(mode, domain) == i + 1 && error == null,
+                    "reference registration number did not route correctly: " + (i + 1));
+                MainForm.WorkMode numberMode = mode;
+                DomainKind? numberDomain = domain;
+                Require(Program.TryReadTaskStart(new[] { "--task=" + names[i] }, out mode, out domain, out exitAfter, out error) &&
+                    mode == numberMode && domain == numberDomain && error == null, "registration name and number disagree: " + names[i]);
+            }
+
+            var names3814 = new[] { "DailyTask", "GalGameTask", "RahaiBlocksTask", "FarmEchoTask", "NightmareNestTask",
+                "TacetTask", "ForgeryTask", "SimulationTask", "CultivationTask", "MultiAccountDailyTask",
+                "MultiAccountConfigTask", "MergeEchoTask", "EnhanceEchoTask", "ChangeEchoTask", "GardenTask" };
+            for (int i = 0; i < names3814.Length; i++)
+            {
+                Require(Program.TryReadTaskStart(new[] { "-t", (i + 1).ToString(), "--task-version=3.8.14" },
+                    out mode, out domain, out exitAfter, out error) && error == null &&
+                    Program.ReferenceTaskName(mode, domain) == names3814[i], "new snapshot numeric order: " + (i + 1));
+                MainForm.WorkMode newMode = mode;
+                DomainKind? newDomain = domain;
+                Require(Program.TryReadTaskStart(new[] { Program.ResumeCommandTask, "--task", "src.task." + names3814[i] + "." + names3814[i], "-e" },
+                    out mode, out domain, out exitAfter, out error) && error == null && exitAfter &&
+                    mode == newMode && domain == newDomain, "stable named restart differs from version-specific numeric command");
+            }
+            Require(Program.TryReadTaskStart(new[] { "--task-version", "3.8.4", "-t", "2" },
+                out mode, out domain, out exitAfter, out error) && mode == MainForm.WorkMode.Farm && error == null,
+                "explicit old number must not be silently repurposed");
+            Require(Program.TryReadTaskStart(new[] { "-t", "GalGameTask" }, out mode, out domain, out exitAfter, out error) &&
+                mode == MainForm.WorkMode.SecondSola && !exitAfter && error == null, "named Second Sola entry");
+            Require(Program.TryReadTaskStart(new[] { "-t", "RahaiBlocksTask" }, out mode, out domain, out exitAfter, out error) &&
+                mode == MainForm.WorkMode.Rahai && !exitAfter && error == null, "named Rahai entry");
+            Require(MainForm.SupportsRahaiSource(GameSource.AutoLocal) && MainForm.SupportsRahaiSource(GameSource.Foreground) &&
+                !MainForm.SupportsRahaiSource(GameSource.Background) && !MainForm.SupportsRahaiSource(GameSource.Cloud) &&
+                !MainForm.SupportsRahaiSource(GameSource.ManagedCloud), "CLI must preserve the activity input route restriction");
+
+            foreach (string[] invalid in new[]
+            {
+                new[] { "-e" },
+                new[] { "-t" },
+                new[] { "-t", "--exit" },
+                new[] { "-t", "0" }, new[] { "-t", "13" }, new[] { "-t", "AutoCombatTask" },
+                new[] { "-t", "other.package.DailyTask" },
+                new[] { "--task-version", "3.8.14" },
+                new[] { "--task-version", "3.8.99", "-t", "2" },
+                new[] { "--task-version=3.8.14", "-t", "16" },
+                new[] { "--task-version=3.8.4", "--task-version=3.8.14", "-t", "2" },
+                new[] { "-t", "DailyTask", "--task=DailyTask" },
+                new[] { "-t", "DailyTask", "--typo" }
+            })
+                Require(!Program.TryReadTaskStart(invalid, out mode, out domain, out exitAfter, out error) && error != null,
+                    "invalid CLI unexpectedly started a task or normal GUI: " + string.Join(" ", invalid));
+        }
+
+        private static void DailyCommandLineExit()
+        {
+            var settings = CombatSettings.Defaults();
+            settings.Daily.ExitAfterTask = false;
+            Require(!MainForm.ShouldExitAfterTask(settings, MainForm.WorkMode.Daily, false, true) &&
+                MainForm.ShouldExitAfterTask(settings, MainForm.WorkMode.Daily, true, true),
+                "-e should opt a successful daily run into exit");
+            Require(!MainForm.ShouldExitAfterTask(settings, MainForm.WorkMode.Daily, true, false) &&
+                MainForm.ShouldExitAfterTask(settings, MainForm.WorkMode.MultiDaily, true, true) &&
+                MainForm.ShouldExitAfterTask(settings, MainForm.WorkMode.MultiConfig, true, true) &&
+                !MainForm.ShouldExitAfterTask(settings, MainForm.WorkMode.Battle, true, true),
+                "-e should work for successful registered one-time tasks only");
+            Require(!settings.Daily.ExitAfterTask, "-e mutated the saved daily setting");
+            foreach (MainForm.WorkMode activity in new[] { MainForm.WorkMode.SecondSola, MainForm.WorkMode.Rahai })
+                Require(MainForm.ShouldExitAfterTask(settings, activity, true, true) &&
+                    !MainForm.ShouldExitAfterTask(settings, activity, true, false) &&
+                    !MainForm.ShouldExitAfterTask(settings, activity, false, true),
+                    "activity CLI exit applies only to an explicitly requested, verified success");
+            settings.Daily.ExitAfterTask = true;
+            Require(MainForm.ShouldExitAfterTask(settings, MainForm.WorkMode.Daily, false, true) &&
+                !MainForm.ShouldExitAfterTask(settings, MainForm.WorkMode.MultiDaily, false, true) &&
+                !MainForm.ShouldExitAfterTask(settings, MainForm.WorkMode.MultiConfig, false, true) &&
+                !MainForm.ShouldExitAfterTask(settings, MainForm.WorkMode.Daily, true, false),
+                "standalone daily saved exit does not leak into either multi-account mode");
+            var serializer = new System.Runtime.Serialization.Json.DataContractJsonSerializer(typeof(CombatSettings));
+            string oldJson;
+            using (var memory = new MemoryStream())
+            {
+                serializer.WriteObject(memory, settings);
+                oldJson = Encoding.UTF8.GetString(memory.ToArray()).Replace("\"MultiAccountExitAfterTask\":false,", "");
+            }
+            CombatSettings legacy;
+            using (var memory = new MemoryStream(Encoding.UTF8.GetBytes(oldJson)))
+                legacy = (CombatSettings)serializer.ReadObject(memory);
+            Require(!legacy.MultiAccountExitAfterTask.HasValue, "fixture omits the new scope field");
+            legacy.Validate();
+            Require(legacy.ExitAfterMultiAccount, "a missing old multi-account exit setting inherits the previous daily preference once");
+            legacy.Daily.ExitAfterTask = false;
+            Require(!MainForm.ShouldExitAfterTask(legacy, MainForm.WorkMode.Daily, false, true) &&
+                MainForm.ShouldExitAfterTask(legacy, MainForm.WorkMode.MultiDaily, false, true) &&
+                MainForm.ShouldExitAfterTask(legacy, MainForm.WorkMode.MultiConfig, false, true) &&
+                !MainForm.ShouldExitAfterTask(legacy, MainForm.WorkMode.MultiDaily, true, false) &&
+                !MainForm.ShouldExitAfterTask(legacy, MainForm.WorkMode.MultiConfig, true, false),
+                "migrated preference remains independent, and explicit CLI does not bypass completion");
+            legacy.MultiAccountExitAfterTask = false;
+            Require(!MainForm.ShouldExitAfterTask(legacy, MainForm.WorkMode.MultiDaily, false, true) &&
+                MainForm.ShouldExitAfterTask(legacy, MainForm.WorkMode.MultiConfig, true, true) &&
+                !legacy.MultiAccountExitAfterTask.Value, "CLI exit applies only to this run and never mutates the saved option");
         }
 
         private static void HealthRetargetWindows()
@@ -814,6 +1167,11 @@ namespace TideCombat
 
         private static void BrowserFixture(string fixture)
         {
+            BrowserFixture(fixture, VerifyBrowserEvents);
+        }
+
+        private static void BrowserFixture(string fixture, Action<CloudBrowser, Func<bool>> verify)
+        {
             string browser = CloudBrowser.FindBrowser();
             Require(browser != null, "Edge or Chrome is required for this isolated offline browser check");
             string path = Path.GetFullPath(fixture);
@@ -826,7 +1184,7 @@ namespace TideCombat
             {
                 try
                 {
-                    VerifyBrowserEvents(session, () => !process.HasExited);
+                    verify(session, () => !process.HasExited);
                 }
                 finally
                 {
@@ -857,6 +1215,9 @@ namespace TideCombat
                 Require(session.Send(BattleAction.Attack(), time.Token), "click failed");
                 Require(session.TryRead(time.Token, out frame, out size) && CenterMatches(frame, 38, 60, 218),
                     "browser did not see the mouse event");
+                Require(session.Scroll(1, time.Token), "wheel step failed");
+                Require(session.TryRead(time.Token, out frame, out size) && CenterMatches(frame, 242, 148, 19),
+                    "browser did not see the upward wheel event");
             }
         }
 
@@ -865,6 +1226,38 @@ namespace TideCombat
             int r, g, b;
             frame.Rgb(frame.Width / 2, frame.Height / 2, out r, out g, out b);
             return Math.Abs(r - red) <= 8 && Math.Abs(g - green) <= 8 && Math.Abs(b - blue) <= 8;
+        }
+
+        private static void VerifyBrowserVideo(CloudBrowser session, Func<bool> isRunning)
+        {
+            using (var time = new CancellationTokenSource(20000))
+            {
+                PixelFrame frame = default(PixelFrame);
+                Size size;
+                Func<int, int, int, bool> awaitColor = (red, green, blue) =>
+                {
+                    while (!time.IsCancellationRequested && isRunning())
+                    {
+                        if (session.TryRead(time.Token, out frame, out size) && CenterMatches(frame, red, green, blue))
+                            return true;
+                        time.Token.WaitHandle.WaitOne(80);
+                    }
+                    return false;
+                };
+                Require(awaitColor(220, 35, 20), "decoded video should exclude the decorative blue DOM overlay");
+                var sizeInFrame = new Size(frame.Width, frame.Height);
+                Require(session.Click(new Point(frame.Width / 4, frame.Height / 4), sizeInFrame, time.Token),
+                    "input should still map into the offset video");
+                Require(awaitColor(0, 0, 255), "interactive covering element should switch back to the page screenshot");
+                Require(session.Send(new BattleAction { Kind = ActionKind.Cast, Key = 'W' }, time.Token), "replace track input");
+                Require(awaitColor(17, 186, 38), "the replacement track should be read without stale content");
+                Require(session.Send(new BattleAction { Kind = ActionKind.Cast, Key = 'Q' }, time.Token), "stop track input");
+                Require(awaitColor(0, 0, 255), "an ended track should switch back to the page screenshot");
+                Require(session.Send(new BattleAction { Kind = ActionKind.Cast, Key = 'C' }, time.Token), "start canvas receiver input");
+                Require(awaitColor(192, 62, 12), "a canvas renderer should read its one live receiver track");
+                Require(session.Send(new BattleAction { Kind = ActionKind.Cast, Key = 'X' }, time.Token), "stop canvas receiver input");
+                Require(awaitColor(24, 42, 208), "an ended canvas receiver should switch back to the page screenshot");
+            }
         }
 
         private static void ChallengeOpening()
@@ -1298,6 +1691,33 @@ namespace TideCombat
             }
         }
 
+        private static void VisiblePartySwitchTimeout()
+        {
+            var settings = CombatSettings.Defaults();
+            settings.SupportOpener = false;
+            foreach (bool skillsVisible in new[] { false, true })
+            {
+                var planner = new BattlePlanner(settings);
+                var hud = BattleHud();
+                hud.PartySize = 2;
+                hud.Fighters[0] = "Chixia";
+                hud.Fighters[1] = "Danjin";
+                planner.Observe(hud, 0);
+                BattleAction swap = planner.Observe(hud, 100);
+                Require(swap.Kind == ActionKind.Switch && swap.FollowWithAttack, "begin a routine switch");
+                planner.Sent(swap, 100);
+
+                hud.Valid = skillsVisible;
+                ActionKind retry = skillsVisible ? ActionKind.Switch : ActionKind.Wait;
+                Require(planner.Observe(hud, 5100).Kind == retry && planner.Fighting,
+                    "the shorter missing-party timeout does not apply to visible party slots");
+                Require(planner.Observe(hud, 10099).Kind == retry && planner.Fighting,
+                    "keep confirming the eligible slot until the visible-party deadline");
+                Require(planner.Observe(hud, 10100).Kind == ActionKind.Wait && !planner.Fighting,
+                    "clear the unconfirmed switch after ten seconds");
+            }
+        }
+
         private static void PhrolovaHandoff()
         {
             const long now = 50000;
@@ -1708,9 +2128,14 @@ namespace TideCombat
                     Require(first.Button == BattleButton.Resonance && !first.AttackBefore, "first E is sent without a normal attack");
                     turn.Sent(first, 1000);
                     Require(turn.Observe(hud, 1199).Kind == ActionKind.Wait, "animated E waits 200 ms before another try");
-                    BattleAction retry = turn.Observe(hud, 1200);
-                    Require(retry.Button == BattleButton.Resonance && retry.AttackBefore, "normal attack follows a prior E attempt");
-                    turn.Sent(retry, 1200);
+                    BattleAction attack = turn.Observe(hud, 1200);
+                    Require(attack.Kind == ActionKind.Button && attack.Button == BattleButton.Attack,
+                        "normal attack follows a prior E attempt in a separate observation");
+                    turn.Sent(attack, 1200);
+                    Require(turn.Observe(hud, 1200).Kind == ActionKind.Wait, "another E requires a fresh observation");
+                    BattleAction retry = turn.Observe(hud, 1201);
+                    Require(retry.Button == BattleButton.Resonance && !retry.AttackBefore, "still-ready E retries only after the attack sample");
+                    turn.Sent(retry, 1201);
                     Require(turn.ObserveUnavailable(1350, true).Kind == ActionKind.Wait, "no input on entry into the animation");
                     Require(turn.ObserveUnavailable(1849, true).Kind == ActionKind.Wait, "wait until the full 500 ms inside animation");
                     BattleAction pulse = turn.ObserveUnavailable(1850, true);
@@ -1729,6 +2154,47 @@ namespace TideCombat
                         "the first cast is recorded, and the turn finishes on the return of the HUD");
                     Require(context.Clock.Elapsed(900, 2000) == 550, "record the 650 ms animation minus the 100 ms allowance");
                 }
+            }
+        }
+
+        private static void SkillCooldownBoundary()
+        {
+            Require(SkillHud.CooldownState(true, .21, true) == SkillState.Cooling &&
+                SkillHud.CooldownState(true, .2, true) == SkillState.Ready &&
+                SkillHud.CooldownState(true, .1, false) == SkillState.Unavailable,
+                "only decoded residuals above 0.2 count as active cooldowns");
+            Require(SkillHud.CooldownState(true, double.NaN, true) == SkillState.Cooling,
+                "an unreadable cooldown still suppresses speculative input");
+        }
+
+        private static void LiberationAbort()
+        {
+            var settings = CombatSettings.Defaults();
+            settings.RotateParty = settings.SupportOpener = false;
+            var hud = BattleHud();
+            hud.Fighters[0] = "Hsin";
+            hud.Indicators.Add("hsin_lib1");
+            hud.Skills[2] = SkillState.Ready;
+            foreach (bool hidden in new[] { false, true })
+            {
+                var planner = CombatRunner.CreateTaskPlanner(settings, cloud: false);
+                planner.Observe(hud, 0);
+                BattleAction cast = planner.Observe(hud, 100);
+                Require(cast.Button == BattleButton.Liberation, "open the common liberation helper");
+                planner.Sent(cast, 100);
+                if (hidden)
+                {
+                    var animation = new HudSnapshot { TeamHudHidden = true };
+                    planner.Observe(animation, 200);
+                    planner.Observe(animation, 7200);
+                }
+                else planner.Observe(hud, 15100);
+                Require(planner.CombatAborted && !planner.Fighting && planner.TakeReleaseRequest(),
+                    "expired common cast or animation exits and requests key release");
+                Require(planner.Observe(hud, 15200).Kind == ActionKind.Wait && !planner.Fighting,
+                    "the same task cannot reenter an aborted fight just because the lock remains");
+                planner.Invalidate(15300);
+                Require(!planner.CombatAborted, "next task clears its failure state");
             }
         }
 
@@ -1765,18 +2231,31 @@ namespace TideCombat
             hud.OpenWorld = false;
             hud.ChallengeSeconds = 173.42;
             hud.Countdown = true;
+            double seconds = 173.42;
+            Func<double> read = () => seconds;
             planner.Observe(hud, 0);
             planner.Observe(hud, 100);
+            hud.Locked = hud.EnemyHealth = false;
+            Require(planner.Observe(hud, 200, read).Kind == ActionKind.Target && !hud.InChallenge,
+                "ordinary task cannot enter Abyss mode from glyph evidence alone");
+            planner = new BattlePlanner(settings);
+            hud.ChallengePrompt = hud.ChallengeMarker = true;
+            planner.Observe(hud, 0, read);
+            hud.ChallengePrompt = hud.ChallengeMarker = false;
+            planner.Observe(hud, 100, read);
+            planner.Observe(hud, 200, read);
+            Require(planner.Fighting, "confirmed Abyss marker may open a task fight");
             hud.EnemyHealth = hud.Locked = false;
-            for (int now = 200; now <= 8200; now += 100)
+            for (int now = 300; now <= 8200; now += 100)
             {
-                BattleAction action = planner.Observe(hud, now);
+                BattleAction action = planner.Observe(hud, now, read);
                 Require(action.Kind == ActionKind.Attack && planner.Fighting, "keep acting during a challenge with time left");
             }
             hud.Countdown = false;
             hud.ChallengeSeconds = 0;
-            Require(planner.Observe(hud, 8300).Kind == ActionKind.Target, "zero ends the timer's combat allowance");
-            planner.Observe(hud, 11400);
+            seconds = 0;
+            Require(planner.Observe(hud, 8600, read).Kind == ActionKind.Target, "zero OCR ends the timer's combat allowance");
+            planner.Observe(hud, 11700, read);
             Require(!planner.Fighting, "unresolved targeting then follows normal exit behavior");
         }
 
@@ -1875,7 +2354,10 @@ namespace TideCombat
                 window.Show();
                 window.Update();
                 PixelFrame frame;
-                Require(capture.TryRead(window.Handle, window.ClientSize, out frame), "off-screen client capture failed");
+                uint owner = (uint)System.Diagnostics.Process.GetCurrentProcess().Id;
+                Require(capture.TryRead(window.Handle, owner, window.ClientSize, out frame), "off-screen client capture failed");
+                Require(!capture.TryRead(window.Handle, owner + 1, window.ClientSize, out frame), "capture must reject a different window owner");
+                Require(capture.TryRead(window.Handle, owner, window.ClientSize, out frame), "valid owner must still capture after rejection");
                 int red, green, blue;
                 frame.Rgb(frame.Width / 2, frame.Height / 2, out red, out green, out blue);
                 Require(red == 220 && green == 35 && blue == 20,
@@ -2101,6 +2583,8 @@ namespace TideCombat
             if (File.Exists(Path.Combine(images, "xinyao_interaction_different_prompt.png")))
                 Check("world assist blocks both original Astrite prompts", () => WorldAssistChecks.ExcludesAstrite(root));
                 Check("automatic pickup preserves the selected prompt across resolutions and key presses", () => WorldAssistChecks.PickupReplay(root));
+            if (File.Exists(Path.Combine(images, "absorb.png")) && File.Exists(Path.Combine(root, "ok_templates", "62.png")))
+                Check("automatic pickup follows the reference lower-row wheel and three-key sequence", () => WorldAssistChecks.PickupBelowReplay(root));
             if (File.Exists(Path.Combine(images, "21-9_quest_skip.png")))
                 Check("delayed story summaries and optional checkboxes follow the actual click sequence",
                     () => WorldAssistChecks.DialogActions(root));
@@ -2108,10 +2592,17 @@ namespace TideCombat
                     () => WorldAssistChecks.TravelConfirmation(root));
                 Check("challenge markers track displaced HUD icons and ignore unrelated quest icons",
                     () => WorldAssistChecks.ChallengeMarkers(root));
+                Check("party number templates recover the active slot without accepting co-op or map badges",
+                    () => WorldAssistChecks.PartyTemplateFallback(root));
+                Check("levitator recognition on entry works with short enemy health bar scanning",
+                    () => WorldAssistChecks.LevitatorEntryWithShortBars(root));
                 Check("world assist recognizes the original story skip and widescreen confirmations", () => WorldAssistChecks.SkipDialog(root));
                 Check("tinted skip clicks follow the left anchor and ignore flat backgrounds", () => WorldAssistChecks.WideSkip(root));
             if (File.Exists(Path.Combine(images, "rahai_score.jpg")))
+            {
                 Check("Rahai board and placement matches the reference captures", () => RahaiChecks.Replay(images));
+                Check("Rahai title, score and rewards are recognized in native OCR regions", () => RahaiChecks.OcrReplay(images));
+            }
             Check("reference hotkey reading updates echo and liberation while retaining configured resonance and tool", delegate
             {
                 var options = CombatSettings.Defaults();

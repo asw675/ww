@@ -44,7 +44,7 @@
 
 `DailyTask`、`FarmEchoTask`、`EnhanceEchoTask`、`TacetTask`、`ForgeryTask`、`SimulationTask`、`NightmareNestTask`、`GardenTask`、`MergeEchoTask`、`ChangeEchoTask`、`CultivationTask`、`RahaiBlocksTask`、`GalGameTask`。
 
-在切换账号前，程序会核对全部已启用任务引用。接受 `TideCombat` 和对应的原版 `src.task.<类名>` 模块。拉海洛方块和第二索拉登录后会暂停，打开对应活动页后点击「继续」，再切回游戏。
+在切换账号前，程序会核对全部已启用任务引用。列表保留 v3.8.4 注册顺序，WW 的培养目标、拉海洛方块和第二索拉在该基准下标记为扩展（v3.8.14 已有对应注册），禁止递归选择多账号任务。接受规范的 `src.task.<类名>` 模块；仅旧 WW 文件加载时将已知 `TideCombat` 历史引用迁移为规范引用。拉海洛方块和第二索拉登录后会暂停，打开对应活动页后点击「继续」，再切回游戏。
 
 ## 按账号覆盖配置
 
@@ -55,15 +55,19 @@
 | `Farm` | Teleport、TeleportMode、BossIndex、BossLevel、RepeatCount、WaitSeconds、SwitchHealer、Pickup、Boss |
 | `Daily` | Tasks、NightmareMode、Farm、TacetIndex、ForgeryIndex、Material、FarmNightmareEcho、AutoNightmare、CheckGarden、MergeIfNeeded、Farm4C |
 | `Enhance` | RequireBothCrit、RequireValidBeforeCrit、CritTotalMinimum、FirstCritMinimum、ValidCountMinimum、FirstMustBeValid、ValidStats、PauseAfterSuccess |
-| `Domain` | Kind、Index、Material、MaxStamina |
+| `Domain` | Kind、Index、TacetIndex、ForgeryIndex、Material、MaxStamina |
 | `Nightmare` | TacetNest、Purification、CaptureOnce |
 | `Change` | Target |
 | `Cultivation` | Ascension、Skills、Tacet、Nightmare |
-| `Combat` | AutoTarget、AutoRevive、UseLiberation、RotateParty、PreferConcerto、SwitchAtLowHealth、SupportOpener、DetectSkillKeys、CheckLevitator、Source、各技能键 |
+| `Combat` | AutoTarget、AutoRevive、UseLiberation、RotateParty、PreferConcerto、SwitchAtLowHealth、SupportOpener、DetectSkillKeys、Source、各技能键 |
 
 枚举可用数字或名称；`ValidStats` 为字符串数组。
 
-也支持原版一条龙、副本、梦魇、培养目标和强化的对应字段。本地分组配置可覆盖同名选项，每个账号结束后恢复全局配置。
+也支持原版一条龙、副本、梦魇、培养目标、强化和改主属性的对应字段。原版顶层字段作用于所选任务；本地分组配置可覆盖同名选项，每个账号结束后恢复全局配置。无音区与材料本的序号独立保存，老配置只将 `Index` 用于它原来选中的副本类型。
+
+多账号日常和多账号配置共用独立的「多账号完成后退出游戏与程序」设置，可以在任一多账号设置窗口保存，不再与单独一条龙的退出设置联动。旧设置首次加载时沿用原来的退出偏好，此后独立保存。命令行指定 `-e` 可仅为本次运行请求退出。取消、失败或未核验完成时不退出。
+
+默认参考一条龙中，梦魇、周常乐园或合并子任务的可恢复失败经核验返回大世界后，允许后续项目以及已配置的后续账号继续；体力本或梦魇普通返回但结果未核验时，也只有确认同一个游戏窗口、输入路径和安全大世界边界才允许继续。失败或未核验账号不计入成功数，配置模式写入失败状态，整个多账号任务最终报告该失败，不自动退出。实际失败且未获允许恢复、账号/登录身份或返回环境不明均停止。
 
 任务为 `EnhanceEchoTask` 时，选中该账号并点「强化条件」可单独配置。登录后先在背包筛选声骸并按等级升序，再点击主界面的「继续」。开启成功暂停时，在同一账号继续执行。整批结束并返回大世界后才记录该账号成功。
 

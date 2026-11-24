@@ -127,7 +127,20 @@ namespace TideCombat
 
         internal static IEnumerable<Move> Calcharo(TurnContext c)
         {
-            if (c.Intro) yield return Move.Wait(1000);
+            if (c.Intro)
+            {
+                c.ContinueAfterLockLossUntil = c.Now + 4000;
+                yield return Move.Wait(1000);
+                yield return Move.Wait(3000, h => h.Valid);
+                if (c.Succeeded)
+                {
+                    c.ContinueAfterLockLossUntil = c.Now + 500;
+                    yield return Move.Wait(500);
+                }
+                c.ContinueAfterLockLossUntil = 0;
+                // Run the planner's normal combat check before the standard rotation.
+                yield return Move.Wait(1);
+            }
             foreach (Move move in Standard(c)) yield return move;
         }
 
@@ -278,8 +291,11 @@ namespace TideCombat
             if (c.Full || c.Since(started) >= 6500) yield break;
             if (c.EReady) yield return Move.Resonance();
             if (c.Full || c.Since(started) >= 6500) yield break;
+            c.ContinueAfterLockLossUntil = c.Now + 2000;
             if (c.QReady) yield return Move.Echo(0);
             if (c.Full || c.Since(started) >= 6500) yield break;
+            yield return Move.Wait(2000, h => h.Valid);
+            c.ContinueAfterLockLossUntil = 0;
             yield return Move.Wait(800);
             if (c.HeavyReady && c.Since(c.Memory.LastHeavy) >= 8000)
             {

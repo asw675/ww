@@ -1,6 +1,8 @@
 using System;
 using System.Drawing;
 using System.Collections.Generic;
+using System.Globalization;
+using System.Text.RegularExpressions;
 
 namespace TideCombat
 {
@@ -69,6 +71,23 @@ namespace TideCombat
             return (3 * red + 6 * green + blue) / 10;
         }
 
+        internal void FillHealthMask(Rectangle area, bool boss, byte[] mask)
+        {
+            int index = 0;
+            for (int y = area.Top; y < area.Bottom; y++)
+            {
+                int start = (y * Width + area.Left) * 4;
+                int end = start + area.Width * 4;
+                for (int i = start; i < end; i += 4)
+                {
+                    int b = pixels[i], g = pixels[i + 1], r = pixels[i + 2];
+                    bool color = boss ? r >= 245 && g >= 30 && g <= 185 && b >= 4 && b <= 75 :
+                        r >= 174 && r <= 225 && g >= 55 && g <= 85 && b >= 55 && b <= 76;
+                    mask[index++] = color ? (byte)1 : (byte)0;
+                }
+            }
+        }
+
         internal bool Pale(int x, int y, int minimum, int saturation)
         {
             int red, green, blue;
@@ -83,11 +102,13 @@ namespace TideCombat
         internal bool Valid, Locked, EnemyHealth, ConcertoFull;
         internal int Current = -1;
         internal int PartySize;
+        internal bool TeamVisible;
         internal readonly SkillState[] Skills = new SkillState[3];
         internal readonly double[] Cooldowns = { double.NaN, double.NaN, double.NaN };
         internal readonly bool[] SkillLit = new bool[3];
         internal readonly char[] Keys = new char[3];
         internal readonly double[] Health = new double[3];
+        internal readonly bool[] HealthUnknown = new bool[3];
         internal readonly CharacterProfile[] Profiles = new CharacterProfile[3];
         internal readonly string[] Fighters = new string[3];
         internal readonly HashSet<string> Indicators = new HashSet<string>(StringComparer.Ordinal);
@@ -114,27 +135,33 @@ namespace TideCombat
     {
         private readonly CombatSettings settings;
         private readonly CombatVision combatVision;
+        private readonly OcrReader cooldownOcr;
         private char detectedEcho, detectedLiberation;
         private bool skillKeysVerified;
 
-        internal HudVision(CombatSettings settings, ConcertoMeter concerto = null)
+        internal HudVision(CombatSettings settings, ConcertoMeter concerto = null, OcrReader cooldownOcr = null)
         {
             this.settings = settings;
             combatVision = new CombatVision(settings, concerto);
+            this.cooldownOcr = cooldownOcr;
         }
 
         internal HudSnapshot Read(PixelFrame frame, bool allowShortEnemyBar = false, bool cloud = false, int lucillaSlot = -1,
-            bool scanExecutionPrompt = true)
+            bool scanExecutionPrompt = true, bool? activeFight = null)
         {
             var snapshot = new HudSnapshot();
             if (frame.Height != FrameReader.StandardHeight || frame.Width < 1565 || frame.Width > 2232)
+            {
+                combatVision.ResetParty();
                 return snapshot;
+            }
 
-            bool party = PartyHud.Read(frame, snapshot);
+            bool party = PartyHud.ReadReferenceNumbers(frame, snapshot);
             Badge left = Badge.Find(frame, frame.Width - 251, 847, 30, 10, settings.ResonanceKey);
             string skillGlyphs = "EQRT" + settings.EchoKey + settings.LiberationKey;
             Badge middle = Badge.Find(frame, frame.Width - 168, 847, 23, 10, skillGlyphs);
             Badge right = Badge.Find(frame, frame.Width - 87, 847, 16, 10, skillGlyphs);
+            bool ordinarySkillsVisible = left.Found && middle.Found && right.Found;
             if (!party)
             {
                 combatVision.ClearChallengeMarker();
@@ -147,9 +174,10 @@ namespace TideCombat
                         return snapshot;
                     snapshot.TeamHudHidden = !snapshot.Dead && !left.Found && !middle.Found && !right.Found && HasSceneContents(frame);
                 }
+                if (!snapshot.TeamHudHidden) combatVision.ResetParty();
                 return snapshot;
             }
-            if (!left.Found || !middle.Found || !right.Found)
+            if (!ordinarySkillsVisible)
             {
                 snapshot.Detail = "队伍栏可见，技能栏未确认";
                 if (allowShortEnemyBar)
@@ -160,24 +188,32 @@ namespace TideCombat
             ReadSkill(frame, left, Skill.Resonance, snapshot);
             ReadSkill(frame, middle, Skill.Echo, snapshot);
             ReadSkill(frame, right, Skill.Liberation, snapshot);
-            combatVision.ReadParty(frame, snapshot);
+            combatVision.ReadParty(frame, snapshot, activeFight ?? allowShortEnemyBar);
             if (cloud) snapshot.LockOffset = combatVision.CloudLockOffset(frame, out snapshot.LongActionLayout);
             else
             {
                 bool recognized;
                 snapshot.LockOffset = combatVision.DesktopLockOffset(frame, out recognized, out snapshot.BearTargetShifted,
-                    out snapshot.LongActionLayout);
-                if (!recognized) snapshot.LockOffset = EnemyHud.LockOffset(frame, left.Y);
+                    out snapshot.LongActionLayout, snapshot.Fighters[snapshot.Current] == "Lucilla");
             }
             bool shortAction = !cloud && (snapshot.LockOffset == 0 || !skillKeysVerified && settings.DetectSkillKeys) &&
                 combatVision.HasShortTarget(frame);
-            if (snapshot.LockOffset == 0 && shortAction && snapshot.Fighters[snapshot.Current] == "Lucilla")
-            {
-                snapshot.LockOffset = 329;
-                snapshot.BearTargetShifted = false;
-            }
             snapshot.Locked = snapshot.LockOffset > 0;
             snapshot.EnemyHealth = EnemyHud.HasHealth(frame, allowShortEnemyBar, cloud, !snapshot.Locked) || combatVision.HasBossMarker(frame);
+            if (cooldownOcr != null && (snapshot.Locked || snapshot.EnemyHealth || (activeFight ?? allowShortEnemyBar)))
+            {
+                try
+                {
+                    double[] cooldown = CooldownOcr.Read(frame, cooldownOcr);
+                    for (int skill = 0; skill < cooldown.Length; skill++)
+                    {
+                        snapshot.Cooldowns[skill] = cooldown[skill];
+                        snapshot.Skills[skill] = SkillHud.CooldownState(cooldown[skill] > 0, cooldown[skill], snapshot.SkillLit[skill]);
+                    }
+                }
+                catch (Microsoft.ML.OnnxRuntime.OnnxRuntimeException error)
+                { RunLog.Error("战斗识别", "参考冷却数值 OCR 失败，保留字形识别", error); }
+            }
             if (settings.DetectSkillKeys && !skillKeysVerified && (snapshot.Locked || snapshot.EnemyHealth || allowShortEnemyBar))
             {
                 if (!shortAction)
@@ -199,7 +235,7 @@ namespace TideCombat
             snapshot.LayoutText = LabelKey(snapshot.Keys[0]) + " " + LabelKey(snapshot.Keys[1]) + " " + LabelKey(snapshot.Keys[2]);
             if (settings.Characters.Count > 0)
                 PortraitReader.Identify(frame, snapshot, settings.Characters);
-            combatVision.Read(frame, snapshot, allowShortEnemyBar, scanExecutionPrompt);
+            combatVision.Read(frame, snapshot, allowShortEnemyBar, scanExecutionPrompt, activeFight);
             combatVision.ReadScene(frame, snapshot);
             snapshot.Valid = true;
             snapshot.Detail = Array.IndexOf(snapshot.Keys, '\0') >= 0
@@ -241,8 +277,108 @@ namespace TideCombat
         }
     }
 
+    internal static class CooldownOcr
+    {
+        private static readonly Regex Decimal = new Regex(@"\d{1,2}\.\d", RegexOptions.CultureInvariant);
+
+        private static double RelativeX(int width, int height, double x)
+        {
+            double referenceWidth = Math.Min(width, height * (16.0 / 9));
+            return 1 - (1 - x) * referenceWidth / width;
+        }
+
+        internal static Rectangle ReferenceRegion(int width, int height)
+        {
+            double left = RelativeX(width, height, .82), right = RelativeX(width, height, .97);
+            // The reference rounds the extent independently of the origin.
+            return new Rectangle((int)Math.Round(left * width), (int)Math.Round(.86 * height),
+                (int)Math.Round((right - left) * width), (int)Math.Round((.93 - .86) * height));
+        }
+
+        internal static double[] Read(PixelFrame original, OcrReader ocr)
+        {
+            PixelFrame source = original.FullResolution;
+            Rectangle crop = ReferenceRegion(source.Width, source.Height);
+            var pixels = new byte[crop.Width * crop.Height * 4];
+            for (int y = 0; y < crop.Height; y++)
+            for (int x = 0; x < crop.Width; x++)
+            {
+                int r, g, b;
+                source.Rgb(crop.Left + x, crop.Top + y, out r, out g, out b);
+                byte value = r <= 240 && g <= 240 && b <= 240 ? (byte)255 : (byte)0;
+                int index = (y * crop.Width + x) * 4;
+                pixels[index] = pixels[index + 1] = pixels[index + 2] = value;
+                pixels[index + 3] = 255;
+            }
+            var isolated = new PixelFrame(pixels, crop.Width, crop.Height);
+            List<OcrLine> lines = ocr.Read(isolated, new Rectangle(0, 0, crop.Width, crop.Height));
+            return Parse(lines, source.Width, source.Height, crop.Left);
+        }
+
+        internal static double[] Parse(IEnumerable<OcrLine> lines, int width, int height, int cropLeft)
+        {
+            var cooldown = new double[3];
+            foreach (OcrLine line in lines)
+            {
+                string text = line.Text ?? string.Empty;
+                Match match = Decimal.Match(text);
+                if (!match.Success) continue;
+                double seconds;
+                if (!double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out seconds) &&
+                    !double.TryParse(match.Value, NumberStyles.Float, CultureInfo.InvariantCulture, out seconds)) seconds = 1;
+                int x = cropLeft + line.Box.X;
+                // width_of_screen truncates its product, unlike relative_box
+                // which rounds the crop origin and extent.
+                int skill = x < (int)(RelativeX(width, height, .86) * width) ? 0 :
+                    x > (int)(RelativeX(width, height, .91) * width) ? 2 : 1;
+                cooldown[skill] = seconds;
+            }
+            return cooldown;
+        }
+    }
+
     internal static class PartyHud
     {
+        // Equivalent to BaseWWTask.in_team: one or two visible side-slot
+        // numerals determine team size and first unnumbered active slot.
+        // Health extraction is information for the planner, not a team gate.
+        internal static bool ReadReferenceNumbers(PixelFrame frame, HudSnapshot snapshot)
+        {
+            var numbers = new bool[3];
+            int[] comparison = VisualSignature.Buffer();
+            for (int slot = 0; slot < numbers.Length; slot++)
+                numbers[slot] = HasBrightNumber(frame, TaskIndicators.TeamNumbers[slot], comparison);
+            int current, count;
+            if (!ResolveReferenceNumbers(numbers, out current, out count)) return false;
+            snapshot.Current = current;
+            snapshot.PartySize = count;
+            snapshot.TeamVisible = true;
+            for (int slot = 0; slot < count; slot++)
+            {
+                int fill = ReadHealthStrip(frame, slot);
+                snapshot.Health[slot] = Math.Min(1.0, fill / 65.0);
+                // No visible white body does not prove a character is dead.
+                // The explicit death cue/manual recovery path remains separate.
+                snapshot.HealthUnknown[slot] = fill == 0;
+            }
+            return true;
+        }
+
+        internal static bool ResolveReferenceNumbers(bool[] numbers, out int current, out int count)
+        {
+            current = -1;
+            int numbered = 0;
+            for (int slot = 0; slot < numbers.Length; slot++)
+            {
+                if (numbers[slot]) numbered++;
+                else if (current < 0) current = slot;
+            }
+            count = numbered + 1;
+            if (numbered == 1 || numbered == 2) return true;
+            current = -1;
+            return false;
+        }
+
         internal static bool Read(PixelFrame frame, HudSnapshot snapshot)
         {
             var candidates = new bool[3];
@@ -285,7 +421,60 @@ namespace TideCombat
             }
             if (snapshot.Current < 0 || !OwnHealthVisible(frame)) return false;
             snapshot.PartySize = count;
+            snapshot.TeamVisible = true;
             return true;
+        }
+
+        internal static bool TryReadTemplateFallback(PixelFrame frame, HudSnapshot snapshot)
+        {
+            // The normal read already found all three live health strips. The template
+            // path only resolves the active slot when a generic badge match is ambiguous.
+            if (snapshot.Health[0] <= 0 || snapshot.Health[1] <= 0 || snapshot.Health[2] <= 0 || !OwnHealthVisible(frame))
+                return false;
+
+            int numbered = 0, current = -1;
+            int[] comparison = VisualSignature.Buffer();
+            for (int slot = 0; slot < 3; slot++)
+            {
+                if (HasBrightNumber(frame, TaskIndicators.TeamNumbers[slot], comparison))
+                    numbered++;
+                else
+                    current = slot;
+            }
+            if (numbered != 2)
+                return false;
+
+            snapshot.Current = current;
+            snapshot.PartySize = 3;
+            return true;
+        }
+
+        private static bool HasBrightNumber(PixelFrame frame, string label, int[] comparison)
+        {
+            foreach (VisualPattern pattern in PatternBank.For(label))
+            {
+                Rectangle expected = pattern.Map(frame.Width, 0);
+                var pixels = new AreaPixels(frame, Rectangle.Inflate(expected, 6, 6));
+                for (int dy = -6; dy <= 6; dy++)
+                for (int dx = -6; dx <= 6; dx++)
+                {
+                    var trial = new Rectangle(expected.X + dx, expected.Y + dy, expected.Width, expected.Height);
+                    if (!pixels.Contains(trial) || !pattern.HasLightEdge(frame, trial, .50))
+                        continue;
+                    if ((pattern.HasColorCorrelation ? pattern.ColorCorrelation(frame, trial) : pattern.LightSimilarity(frame, trial)) >= .80)
+                        return true;
+                }
+            }
+            return false;
+        }
+
+        private static bool BrightBadge(PixelFrame frame, Rectangle bounds)
+        {
+            int pale = 0;
+            for (int y = bounds.Top; y < bounds.Bottom; y++)
+            for (int x = bounds.Left; x < bounds.Right; x++)
+                if (frame.Pale(x, y, 200, 48)) pale++;
+            return pale * 2 >= bounds.Width * bounds.Height;
         }
 
         private static int ReadHealthStrip(PixelFrame frame, int slot)
@@ -448,75 +637,169 @@ namespace TideCombat
 
         internal static bool HasHealth(PixelFrame frame, bool allowShort, bool cloud = false, bool searchFullFrame = true)
         {
-            int center = frame.Width / 2;
-            return ScanBars(frame, center - 256, center + 256, 33, 98, allowShort ? 31 : 75, true, cloud) ||
-                ScanBars(frame, (int)(frame.Width * 0.17), (int)(frame.Width * 0.83), 95, 693,
-                    allowShort ? (cloud ? 14 : 19) : 36, false, cloud) || searchFullFrame &&
-                (FindColorStrip(frame, new Rectangle(0, 0, frame.Width, frame.Height), allowShort, cloud, false) ||
-                    FindColorStrip(frame, new Rectangle(center - 271, 24, 527, 60), allowShort, cloud, true));
+            // Reference tests color rectangles over the entire frame even when
+            // lock-on is already known. Use source pixels where the capture
+            // route provides them, then the same screen-relative limits.
+            frame = frame.FullResolution;
+            var viewport = new Rectangle(0, 0, frame.Width, frame.Height);
+            if (FindColorRectangles(frame, viewport, allowShort, cloud, false) > 0) return true;
+            Rectangle boss = BossHealthRegion(frame.Width, frame.Height);
+            boss.Intersect(viewport);
+            return FindColorRectangles(frame, boss, allowShort, cloud, true) == 1;
         }
 
-        private sealed class ColorStrip
+        internal static Rectangle BossHealthRegion(int width, int height)
         {
-            internal int Left, Right, Top, LastRow, Pixels;
+            double sx = width / 3840.0, sy = height / 2160.0;
+            if (Math.Abs(width / (double)height - 16.0 / 9) <= .01)
+                return new Rectangle((int)Math.Round(1269 * sx), (int)Math.Round(58 * sy),
+                    (int)Math.Round(1264 * sx), (int)Math.Round(142 * sy));
+            // box_of_screen(..., hcenter=True, vcenter=True) centers the
+            // declared 16:9 base screen within other aspect ratios.
+            double scale = Math.Min(sx, sy);
+            return new Rectangle((int)Math.Round(width / 2.0 + (1269 - 1920) * scale),
+                (int)Math.Round(height / 2.0 + (58 - 1080) * scale),
+                (int)Math.Round(1264 * scale), (int)Math.Round(142 * scale));
         }
 
-        private static bool FindColorStrip(PixelFrame frame, Rectangle area, bool active, bool cloud, bool boss)
+        [ThreadStatic]
+        private static byte[] healthMask;
+
+        private sealed class ColorComponent
         {
-            int minWidth = active ? Math.Max(1, frame.Width * 12 / 3840) : frame.Width * 100 / 3840;
-            int minHeight = boss ? 5 : 4;
-            double fill = cloud ? (boss ? .85 : .60) : .95;
-            var strips = new List<ColorStrip>();
-            int valid = 0;
-            for (int y = area.Top; y <= area.Bottom; y++)
+            internal int Left, Right, Top, Bottom, Pixels;
+            internal ColorComponent Parent;
+
+            internal ColorComponent Root()
             {
-                if (y < area.Bottom)
-                {
-                    for (int x = area.Left; x < area.Right;)
-                    {
-                        if (!ReferenceHealthColor(frame, x, y, boss)) { x++; continue; }
-                        int left = x++;
-                        while (x < area.Right && ReferenceHealthColor(frame, x, y, boss)) x++;
-                        if (x - left < 3) continue;
-                        ColorStrip strip = null;
-                        foreach (ColorStrip candidate in strips)
-                        {
-                            if (candidate.LastRow < y - 1 || candidate.Right < left || x < candidate.Left) continue;
-                            strip = candidate;
-                            break;
-                        }
-                        if (strip == null)
-                        {
-                            strip = new ColorStrip { Left = left, Right = x, Top = y };
-                            strips.Add(strip);
-                        }
-                        strip.Left = Math.Min(strip.Left, left);
-                        strip.Right = Math.Max(strip.Right, x);
-                        strip.LastRow = y;
-                        strip.Pixels += x - left;
-                    }
-                }
-                for (int index = strips.Count - 1; index >= 0; index--)
-                {
-                    ColorStrip strip = strips[index];
-                    if (strip.LastRow == y) continue;
-                    strips.RemoveAt(index);
-                    int width = strip.Right - strip.Left, height = strip.LastRow - strip.Top + 1;
-                    if (width < minWidth || height < minHeight || (!boss && height > 12) ||
-                        (!boss && cloud && width < height * 3) || strip.Pixels < width * height * fill) continue;
-                    if (!boss) return true;
-                    valid++;
-                }
+                if (Parent != null) Parent = Parent.Root();
+                return Parent ?? this;
             }
-            return boss && valid == 1;
+
+            internal void Union(ColorComponent other)
+            {
+                other = other.Root();
+                if (other == this) return;
+                other.Parent = this;
+                Left = Math.Min(Left, other.Left);
+                Right = Math.Max(Right, other.Right);
+                Top = Math.Min(Top, other.Top);
+                Bottom = Math.Max(Bottom, other.Bottom);
+                Pixels += other.Pixels;
+            }
         }
 
-        private static bool ReferenceHealthColor(PixelFrame frame, int x, int y, bool boss)
+        private struct ColorRun
         {
-            int r, g, b;
-            frame.Rgb(x, y, out r, out g, out b);
-            return boss ? r >= 245 && g >= 30 && g <= 185 && b >= 4 && b <= 75 :
-                r >= 174 && r <= 225 && g >= 55 && g <= 85 && b >= 55 && b <= 76;
+            internal int Left, Right;
+            internal ColorComponent Component;
+        }
+
+        private static int FindColorRectangles(PixelFrame frame, Rectangle area, bool active, bool cloud, bool boss)
+        {
+            int minWidth = Math.Max(1, (int)(frame.Width * (active ? 12.0 : 100.0) / 3840));
+            int ordinaryMinHeight = Math.Max(1, (int)(frame.Height * 9.0 / 2160));
+            double minHeight = boss ? ordinaryMinHeight * 1.3 : ordinaryMinHeight;
+            double fill = cloud ? (boss ? .85 : .60) : .95;
+            int length = area.Width * area.Height;
+            if (healthMask == null || healthMask.Length < length) healthMask = new byte[length];
+            frame.FillHealthMask(area, boss, healthMask);
+            // RETR_LIST considers both exterior contours and enclosed holes.
+            // A hole uses 4-connected background; its contour runs along the
+            // neighboring foreground boundary, extending its box one pixel.
+            int valid = CountMaskContours(healthMask, area.Width, area.Height, false,
+                minWidth, minHeight, ordinaryMinHeight * 3, fill, cloud, boss);
+            if ((!boss && valid > 0) || (boss && valid > 1)) return valid;
+            return valid + CountMaskContours(healthMask, area.Width, area.Height, true,
+                minWidth, minHeight, ordinaryMinHeight * 3, fill, cloud, boss);
+        }
+
+        private static int CountMaskContours(byte[] mask, int width, int height, bool holes,
+            int minWidth, double minHeight, int maxHeight, double fill, bool cloud, bool boss)
+        {
+            var previous = new List<ColorRun>();
+            var current = new List<ColorRun>();
+            var live = new HashSet<ColorComponent>();
+            var completed = new HashSet<ColorComponent>();
+            int valid = 0;
+            byte selected = holes ? (byte)0 : (byte)1;
+            for (int y = 0; y < height; y++)
+            {
+                current.Clear();
+                int previousIndex = 0;
+                int offset = y * width;
+                for (int x = 0; x < width;)
+                {
+                    if (mask[offset + x] != selected) { x++; continue; }
+                    int left = x++;
+                    while (x < width && mask[offset + x] == selected) x++;
+                    while (previousIndex < previous.Count && (holes ? previous[previousIndex].Right <= left : previous[previousIndex].Right < left)) previousIndex++;
+                    ColorComponent component = null;
+                    for (int i = previousIndex; i < previous.Count && (holes ? previous[i].Left < x : previous[i].Left <= x); i++)
+                    {
+                        ColorComponent linked = previous[i].Component.Root();
+                        if (component == null) component = linked;
+                        else component.Union(linked);
+                    }
+                    if (component == null)
+                    {
+                        component = new ColorComponent { Left = left, Right = x, Top = y, Bottom = y + 1 };
+                    }
+                    component.Left = Math.Min(component.Left, left);
+                    component.Right = Math.Max(component.Right, x);
+                    component.Bottom = y + 1;
+                    component.Pixels += x - left;
+                    current.Add(new ColorRun { Left = left, Right = x, Component = component });
+                }
+                // Finalize components as soon as none of their runs reach the
+                // new row. The active set stays proportional to a few scanlines,
+                // not to all colored noise components in a 4K frame.
+                live.Clear();
+                completed.Clear();
+                foreach (ColorRun run in current) live.Add(run.Component.Root());
+                foreach (ColorRun run in previous)
+                {
+                    ColorComponent component = run.Component.Root();
+                    if (live.Contains(component) || !completed.Add(component)) continue;
+                    if (!Qualifies(component, mask, width, height, holes, minWidth, minHeight, maxHeight, fill, cloud, boss)) continue;
+                    valid++;
+                    if (!boss || valid > 1) return valid;
+                }
+                List<ColorRun> reuse = previous;
+                previous = current;
+                current = reuse;
+            }
+            completed.Clear();
+            foreach (ColorRun run in previous)
+            {
+                ColorComponent component = run.Component.Root();
+                if (!completed.Add(component) || !Qualifies(component, mask, width, height, holes, minWidth, minHeight, maxHeight, fill, cloud, boss)) continue;
+                valid++;
+                if (!boss || valid > 1) return valid;
+            }
+            return valid;
+        }
+
+        private static bool Qualifies(ColorComponent component, byte[] mask, int maskWidth, int maskHeight, bool holes,
+            int minWidth, double minHeight, int maxHeight,
+            double fill, bool cloud, bool boss)
+        {
+            if (holes && (component.Left == 0 || component.Top == 0 || component.Right == maskWidth || component.Bottom == maskHeight))
+                return false;
+            int left = component.Left - (holes ? 1 : 0), right = component.Right + (holes ? 1 : 0);
+            int top = component.Top - (holes ? 1 : 0), bottom = component.Bottom + (holes ? 1 : 0);
+            int width = right - left, height = bottom - top;
+            if (width < minWidth || height < minHeight || !boss && height > maxHeight || !boss && cloud && width < height * 3)
+                return false;
+            double needed = width * height * fill;
+            // Reference counts every matching pixel in the contour's bounding
+            // mask, even a disconnected patch inside it. Only rescan when
+            // the exterior component's count alone could be insufficient.
+            if (!holes && component.Pixels >= needed) return true;
+            int count = 0;
+            for (int y = top; y < bottom; y++)
+                for (int i = y * maskWidth + left, end = i + width; i < end; i++) count += mask[i];
+            return count >= needed;
         }
 
         private static bool ScanBars(PixelFrame frame, int left, int right, int top, int bottom, int minWidth,

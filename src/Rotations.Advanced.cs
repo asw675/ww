@@ -174,7 +174,7 @@ namespace TideCombat
                     }
                     else
                     {
-                        yield return Move.Resonance(0);
+                        yield return Move.Resonance();
                         if (!c.Succeeded) yield return Move.Tap(Attack, 100);
                     }
                     if (c.Now - cycleStart < 100) yield return Move.Wait((int)(100 - (c.Now - cycleStart)));
@@ -187,6 +187,7 @@ namespace TideCombat
                 foreach (Move action in WaitDown(c)) yield return action;
             yield return Move.Echo();
             long start = c.Now;
+            bool resetAfterTimedOutResonance = false;
             while (c.Now - start < timeOut)
             {
                 if (c.Now - start < 500)
@@ -202,8 +203,11 @@ namespace TideCombat
                 if (c.Now - start < 500 && !c.Hud.ForteFullColor)
                 {
                     yield return Move.Resonance();
-                    if (c.Succeeded && !c.CastTimedOut)
+                    // The reference helper reports that a key was clicked even
+                    // when a later animation/cooldown acknowledgement times out.
+                    if (c.Succeeded && (!c.CastTimedOut || !resetAfterTimedOutResonance))
                     {
+                        resetAfterTimedOutResonance = c.CastTimedOut;
                         start = c.Now;
                         if (timeOut != 10000) timeOut = 1700;
                     }
@@ -231,7 +235,7 @@ namespace TideCombat
             long start = c.Now;
             while (c.Since(start) < duration)
             {
-                if (c.Memory.Phase == 0 && c.Since(c.Memory.LastLiberation) < 10000 && c.Full) yield break;
+                if (c.Since(c.Memory.DeniaSecondLiberation) < 10000 && c.Full) yield break;
                 yield return Move.Resonance();
                 if (c.Succeeded) { yield return Move.Wait(10); continue; }
                 if (c.RReady)
@@ -243,6 +247,7 @@ namespace TideCombat
                         c.Memory.Phase = finishing ? 0 : 1;
                         if (finishing)
                         {
+                            c.Memory.DeniaSecondLiberation = c.Now;
                             yield return Move.Echo(0);
                         }
                         else yield return Move.Attacks(1900);
@@ -386,17 +391,26 @@ namespace TideCombat
         internal static IEnumerable<Move> Lucilla(TurnContext c)
         {
             const int liberationIndex = (int)TideCombat.Skill.Liberation;
-            long chargeEnd = c.Now + 7200;
+            long chargeEnd = c.Started + 7200;
+            // Mirror the reference's separate team-visible wait and settle.
+            // CharacterTurn never advances this check on an invalid frame.
+            yield return Move.Wait(800, h => h.Valid);
             yield return Move.Wait(500);
-            while (!c.RReady && c.Now < chargeEnd)
+            if (!c.RReady)
             {
-                double cooldown = c.Hud.Cooldowns[liberationIndex];
-                if (c.Hud.SkillLit[liberationIndex] ||
-                    c.Hud.Skills[liberationIndex] == SkillState.Cooling && (double.IsNaN(cooldown) || cooldown > 1.5))
-                    yield break;
-                yield return Move.Hold(ResonanceWithoutCooldown(c.Hud) ? Skill : Attack, 1400, after: 10);
+                while (c.Now < chargeEnd)
+                {
+                    if (c.RReady) break;
+                    double cooldown = c.Hud.Cooldowns[liberationIndex];
+                    if (c.Hud.SkillLit[liberationIndex] ||
+                        c.Hud.Skills[liberationIndex] == SkillState.Cooling && (double.IsNaN(cooldown) || cooldown > 1.5))
+                        yield break;
+                    yield return Move.Hold(ResonanceWithoutCooldown(c.Hud) ? Skill : Attack, 1400, after: 0);
+                }
+                // Reference checks the deadline before trying liberation on the
+                // next frame after a charge, even when that charge just filled it.
+                if (c.Now >= chargeEnd || !c.RReady) yield break;
             }
-            if (!c.RReady) yield break;
             if (EchoWithoutCooldown(c.Hud)) yield return Move.Echo(0);
             c.LucillaTransformPending = true;
             c.ContinueAfterLockLossUntil = c.Now + 19500;
@@ -507,7 +521,7 @@ namespace TideCombat
                 bool acted = false;
                 if (c.EReady)
                 {
-                    yield return Move.Resonance(0);
+                    yield return Move.Resonance();
                     acted = c.Succeeded;
                 }
                 if (!acted && (c.Has("hsin_lib1") || c.Has("hsin_lib2")) && c.RReady)

@@ -6,7 +6,7 @@ namespace TideCombat
     {
         internal static IEnumerable<Move> Carlotta(TurnContext c)
         {
-            FighterMemory zhezhi = c.Ally("Zhezhi");
+            FighterMemory zhezhi = c.FarmEchoTask ? null : c.Ally("Zhezhi");
             if (c.Intro) yield return Move.Attacks(1300);
             if (zhezhi != null && c.Intro && c.Outro == "Zhezhi")
             {
@@ -83,8 +83,11 @@ namespace TideCombat
             {
                 if (lastSuccessful >= 0 && c.Now - lastSuccessful > 500 && c.Air)
                     foreach (Move move in ShoreKeeperDodge(c)) yield return move;
+                if (c.FarmEchoTask) yield return Move.Press(BattleButton.Forward);
                 yield return Move.Liberation(0, readyTimeout: 400, attackWhileDimmed: true, raw: true);
-                if (c.Succeeded)
+                bool succeeded = c.Succeeded;
+                if (c.FarmEchoTask) yield return Move.Release(BattleButton.Forward);
+                if (succeeded)
                 {
                     lastSuccessful = c.Now;
                     if (consumePriming)
@@ -147,7 +150,7 @@ namespace TideCombat
 
         internal static IEnumerable<Move> Zhezhi(TurnContext c)
         {
-            FighterMemory carlotta = c.Ally("Carlotta");
+            FighterMemory carlotta = c.FarmEchoTask ? null : c.Ally("Carlotta");
             if (carlotta == null)
             {
                 if (c.Intro) yield return Move.Attacks(1500);

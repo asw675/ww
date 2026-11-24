@@ -47,16 +47,17 @@ namespace TideCombat
 
             internal Simulation(string id, bool intro = false, string outro = null, CombatSettings settings = null,
                 FighterMemory actor = null, bool fastPerform = false, long start = 1000,
-                Func<TurnContext, IEnumerable<Move>> moves = null)
+                Func<TurnContext, IEnumerable<Move>> moves = null, bool? openWorldAutoCombat = null, bool farmEchoTask = false, int entryDelay = 0)
             {
-                clock = start;
+                clock = start + entryDelay;
                 Actor = actor ?? new FighterMemory { Id = id };
                 Hud = Snapshot();
                 var members = new[] { Actor, new FighterMemory { Id = "Verina" }, new FighterMemory { Id = "Sanhua" } };
                 CombatSettings options = settings ?? CombatSettings.Defaults();
                 CharacterKit previous = CharacterRoster.Find(outro);
-                var context = new TurnContext(Actor, members, options, intro, outro, clock,
-                    previous != null && previous.RoleFor(options) == BattleRole.Secondary, (hud, now) => fastPerform);
+                var context = new TurnContext(Actor, members, options, intro, outro, start,
+                    previous != null && previous.RoleFor(options) == BattleRole.Secondary, (hud, now) => fastPerform,
+                    openWorldAutoCombat: openWorldAutoCombat, farmEchoTask: farmEchoTask);
                 turn = moves == null ? new CharacterTurn(CharacterRoster.Find(id), context) : new CharacterTurn(moves(context), context);
             }
 
@@ -121,6 +122,8 @@ namespace TideCombat
                 }
             });
             check("all character states handle full resources, unavailable skills, and enabled variants", RosterStateMatrix);
+            check("task scene policy controls fire echo and Encore independently of the realm HUD", OpenWorldCombatPolicy);
+            check("ordinary tasks allow liberation and preserve explicit account and farming policies", TaskLiberationPreference);
             check("Verina exits early when the opening attacks fill concerto", delegate
             {
                 using (var sim = new Simulation("Verina"))
@@ -147,6 +150,7 @@ namespace TideCombat
             check("Hsin does not enter the finisher on cooldown evidence alone", HsinRequiresAnimation);
             check("Hsin releases H2 after 250 ms of hidden HUD and waits for generic R2", HsinHiddenHeavy);
             check("Hsin preserves action priority and independent opening and finisher deadlines", HsinDeadlines);
+            check("Hsin finishes the normal resonance retry before checking the next phase", HsinOrdinaryResonanceRetry);
             check("Hsin enhanced resonance retries only on confirmed prompts and remains time bounded", HsinPulseBoundaries);
             check("Hsin locks the finisher budget and retries a returning enhanced prompt", HsinFinisherRecovery);
             check("Hsin protects only an accepted H2 hold and resumes retargeting at four seconds", HsinTargetProtection);
@@ -163,9 +167,14 @@ namespace TideCombat
             check("Electro Rover confirms both visual signals before recording the enhanced cast", ElectroRoverEnhanced);
             check("Electro Rover charges for eight or twelve seconds and keeps liberation ordering", ElectroRoverOpening);
             check("Rover dispatches the recognized form and rebuilds Aero team state", RoverForms);
+            check("Rover locks its battle form until reset", RoverFormLifetime);
             check("Aemeath respects buff setup, enhanced resonance, and immediate liberation-two handoff", AemeathRotation);
             check("Chisa uses the configured DPS or bounded support rotation", ChisaTurns);
+            check("Chisa support retries normal resonance before ending the short turn", ChisaSupportRetry);
+            check("Chisa DPS first sent-but-timed-out resonance reopens the phase", ChisaTimedOutReset);
+            check("Denia remembers only the second liberation until the next battle", DeniaSecondLiberationLifetime);
             check("Verina permits her next heavy at the eight-second boundary", VerinaHeavyInterval);
+            check("Calcharo gives a returning intro HUD its settle delay before the normal rotation", CalcharoIntroHudRecovery);
             check("Lily hands off Slumberland and releases a timed-out heavy", LilyStates);
             check("Lily finishes concerto if liberation is unavailable or the attempted cast fails", LilyConcertoTopUp);
             check("Roccia releases the movement key after aerial and ground branches", RocciaRelease);
@@ -185,16 +194,21 @@ namespace TideCombat
             check("Galbrena releases the opening heavy early when a teammate has mandatory priority", GalbrenaPriority);
             check("execution alternates interaction and normal attack and then ends", BreakSequence);
             check("Carlotta stores her heavy attack for the Zhezhi outro window", CarlottaHandoff);
+            check("4C Carlotta holds W for liberation without Zhezhi interlock", CarlottaFarmContext);
             check("Zhezhi keeps the attack held through three enhanced resonance casts for Carlotta", ZhezhiBlueChain);
             check("Ciaccona chooses wind or spectro recital by teammate slot order", CiacconaRecital);
             check("Cartethyia transforms and casts the Fleurdelys finisher before returning to resonance", CartethyiaForms);
             check("Changli starts a held attack at 1.5 seconds into liberation and releases after the gauge clears", ChangliLiberationHold);
             check("Phoebe keeps the first support turn intact and casts before leaving a full-Blaze Zani team", PhoebeSupportLink);
+            check("Phoebe waits for the visible HUD to settle before prayer selection", PhoebePrayerSettle);
             check("Jinhsi preserves separate intro-cooldown and Incarnation branches", JinhsiIncarnation);
+            check("Jinhsi accepts a delayed flight cooldown beyond the old six-second limit", JinhsiDelayedFlight);
             check("Augusta releases Majesty on animation, attacks during it and only then sends echo", AugustaMajesty);
             check("Zani distinguishes an almost full Blaze bar from the direct liberation threshold", ZaniThreshold);
             check("Zani cancels the last Nightfall smash and ends the liberated stance with raw R", ZaniNightfallAndFinisher);
+            check("Zani gray resonance extends the rolling finisher deadline past nine seconds", ZaniRollingFinisher);
             check("Lucilla charges through short cooldown and stays out when the energy icon is already lit", LucillaCharge);
+            check("Lucilla does not release liberation at or beyond the 7.2 second charge budget", LucillaChargeDeadline);
             check("Lucilla uses 600 ms transformation pulses and stops when concerto falls to zero", LucillaTransform);
             check("Rebecca runs raw R entry and periodic turret input independently of the common animation helper", RebeccaTurret);
             check("confirmed slots carry concerto and trigger the registered program", PlannerIntegration);
@@ -598,6 +612,33 @@ namespace TideCombat
             }
         }
 
+        private static void CarlottaFarmContext()
+        {
+            using (var sim = new Simulation("Carlotta", farmEchoTask: true))
+            {
+                sim.Team[1].Id = "Zhezhi";
+                sim.Run((action, time, hud) =>
+                {
+                    if (action.Button == BattleButton.Echo) hud.Skills[1] = SkillState.Cooling;
+                }, liberationMs: 400);
+                BattleAction[] actions = sim.Actions.Select(x => x.Item2).ToArray();
+                Require(actions[0].Kind == ActionKind.Hold && actions[0].Button == BattleButton.Forward &&
+                    actions[1].Button == BattleButton.Liberation && actions.Any(a => a.Kind == ActionKind.Release &&
+                    a.Button == BattleButton.Forward), "4C uses independent Carlotta, holding W across the R call");
+                Require(!sim.Actor.LiberationPrimed, "4C must not prime interlock resources");
+            }
+            using (var sim = new Simulation("Zhezhi", farmEchoTask: true))
+            {
+                sim.Team[1].Id = "Carlotta";
+                sim.Run((action, time, hud) =>
+                {
+                    if (action.Button == BattleButton.Echo) hud.Skills[1] = SkillState.Cooling;
+                }, liberationMs: 400);
+                Require(sim.Actions[0].Item2.Button == BattleButton.Liberation,
+                    "4C also skips Zhezhi's side of the Carlotta link");
+            }
+        }
+
         private static void ZhezhiBlueChain()
         {
             using (var sim = new Simulation("Zhezhi"))
@@ -698,6 +739,23 @@ namespace TideCombat
             }
         }
 
+        private static void PhoebePrayerSettle()
+        {
+            var method = typeof(Rotations).GetMethod("PhoebePrayer", BindingFlags.Static | BindingFlags.NonPublic);
+            var state = new PhoebeMemory { Mode = 2 };
+            using (var sim = new Simulation("Phoebe", moves: c =>
+                (IEnumerable<Move>)method.Invoke(null, new object[] { c, state })))
+            {
+                long held = -1;
+                sim.Run((action, time, h) =>
+                {
+                    if (action.Kind == ActionKind.Hold) held = time;
+                }, (time, h) => h.ForteFullColor = time >= 1250 && (held < 0 || time < held + 450));
+                Require(held == 1500 && state.Prayer == PhoebePrayerResult.Entered,
+                    "wait 500ms then evaluate the newly visible prayer cue");
+            }
+        }
+
         private static void PhoebeSupportLink()
         {
             using (var first = new Simulation("Phoebe"))
@@ -729,6 +787,17 @@ namespace TideCombat
                 Require(link.Actor.Phoebe.PriorityLiberation && !link.Actor.Phoebe.FirstRotationDone &&
                     link.Actions.Count(x => x.Item2.Button == BattleButton.Liberation) == 1 &&
                     link.Actions.All(x => x.Item2.Button != BattleButton.Resonance), "stop filling Blaze and cast one ready R before leaving");
+            }
+        }
+
+        private static void JinhsiDelayedFlight()
+        {
+            using (var sim = new Simulation("Jinhsi", intro: true))
+            {
+                sim.Hud.Skills[1] = sim.Hud.Skills[2] = SkillState.Cooling;
+                sim.Run(frame: (time, h) => h.Skills[0] = time >= 8000 ? SkillState.Cooling : SkillState.Ready);
+                Require(sim.Actor.Phase == 2 && sim.Actions.Any(x => x.Item1 >= 7000 && x.Item2.Button == BattleButton.Resonance),
+                    "continue checking delayed flight E then enter Incarnation rather than exit prematurely");
             }
         }
 
@@ -845,6 +914,20 @@ namespace TideCombat
             }
         }
 
+        private static void ZaniRollingFinisher()
+        {
+            var options = CombatSettings.Defaults();
+            options.UseLiberation = false;
+            using (var sim = new Simulation("Zani", settings: options))
+            {
+                sim.Hud.ZaniForm = 2;
+                sim.Hud.ResonanceWhiteRatio = 0;
+                sim.Run(frame: (time,h) => { if (time >= 11000) h.ZaniForm = 1; });
+                Require(sim.Actions.Any(x => x.Item1 >= 10000 && x.Item2.Button == BattleButton.Liberation) && !sim.Actor.ZaniLiberated,
+                    "each gray reading extends the reference rolling budget; return of normal form ends it");
+            }
+        }
+
         private static void LucillaCharge()
         {
             foreach (double seconds in new[] { 1.2, 1.5, 1.6 })
@@ -862,6 +945,32 @@ namespace TideCombat
                     int holds = sim.Actions.Count(x => x.Item2.Kind == ActionKind.Hold);
                     Require(holds == (!lit && seconds <= 1.5 ? 1 : 0), "cooldown cutoff or lit energy gate mismatch");
                 }
+            }
+        }
+
+        private static void LucillaChargeDeadline()
+        {
+            foreach (int delay in new[] { 0, 800 })
+            foreach (long readyAfter in new[] { 6000L, 7200L, 7500L })
+            using (var sim = new Simulation("Lucilla", start: 1000, entryDelay: delay))
+            {
+                sim.Hud.Skills[2] = SkillState.Cooling;
+                sim.Hud.Cooldowns[2] = 0;
+                bool used = false;
+                sim.Run((action, time, hud) =>
+                {
+                    if (action.Button == BattleButton.Liberation)
+                    {
+                        used = true;
+                        hud.Skills[2] = SkillState.Unavailable;
+                    }
+                    if (action.Kind == ActionKind.Release && action.Button == BattleButton.Attack && used)
+                        hud.Concerto = 0;
+                }, (time, hud) =>
+                {
+                    if (!used && time - 1000 >= readyAfter) hud.Skills[2] = SkillState.Ready;
+                });
+                Require(used == (readyAfter < 7200), "a ready R outside the charge window must not start liberation: " + readyAfter + " after delayed HUD=" + delay);
             }
         }
 
@@ -1089,6 +1198,28 @@ namespace TideCombat
                     "a confirmed late R1 opens a fresh finisher budget");
                 Require(sim.Actions.All(a => a.Item2.Button != BattleButton.Resonance),
                     "absent enhanced prompts cannot produce resonance during the finisher");
+            }
+        }
+
+        private static void HsinOrdinaryResonanceRetry()
+        {
+            using (var sim = new Simulation("Hsin"))
+            {
+                sim.Hud.Skills[1] = SkillState.Cooling;
+                int casts = 0;
+                sim.Run((action, time, hud) =>
+                {
+                    if (action.Button != BattleButton.Resonance) return;
+                    if (++casts == 1) hud.Indicators.Add("hsin_lib2");
+                    else hud.Skills[0] = SkillState.Cooling;
+                }, liberationMs: 400);
+                var beforeLiberation = sim.Actions.Select(item => item.Item2)
+                    .TakeWhile(action => action.Button != BattleButton.Liberation).ToArray();
+                Require(sim.Actions.Any(item => item.Item2.Button == BattleButton.Liberation) &&
+                    beforeLiberation.Where(a => a.Button == BattleButton.Resonance).Count() == 2 &&
+                    beforeLiberation.Select(a => a.Button).SequenceEqual(new[] {
+                        BattleButton.Resonance, BattleButton.Attack, BattleButton.Resonance }),
+                    "retry the still ready E after a separate normal attack and fresh observation");
             }
         }
 
@@ -1481,6 +1612,7 @@ namespace TideCombat
             using (var second = new Simulation("Douling", actor: memory))
             {
                 second.Hud.GuaCount = 1;
+                second.Hud.Skills[2] = SkillState.Cooling; // this fixture isolates the heavy branch
                 second.Run();
                 Require(memory.Phase == 0 && second.Actions.Any(a => a.Item2.Button == BattleButton.Jump) &&
                     !second.Actions.Any(a => a.Item2.Kind == ActionKind.Hold), "single hexagram does not authorize a hold");
@@ -1539,6 +1671,7 @@ namespace TideCombat
                 sim.Hud.Indicators.Add("e_forte");
                 sim.Hud.Forte = .45;
                 sim.Hud.Skills[0] = SkillState.Cooling;
+                sim.Hud.Skills[2] = SkillState.Cooling;
                 sim.Run();
                 Require(!sim.Actions.Any(a => a.Item2.Button == BattleButton.Resonance), "prompt alone authorized E");
             }
@@ -1548,6 +1681,7 @@ namespace TideCombat
                 sim.Hud.Forte = 1;
                 sim.Hud.ForteFullColor = true;
                 sim.Hud.Skills[0] = SkillState.Cooling;
+                sim.Hud.Skills[2] = SkillState.Cooling; // do not model a permanently failed R before enhanced E
                 sim.Run((a, t, h) =>
                 {
                     if (a.Button == BattleButton.Resonance)
@@ -1685,7 +1819,7 @@ namespace TideCombat
 
         private static void RoverForms()
         {
-            string[] forms = { "RoverElectro", "RoverSpectro", "RoverAero", "RoverHavoc", null };
+            string[] forms = { "RoverElectro", "RoverSpectro", "RoverAero", "RoverHavoc", null, "Rover" };
             var planner = new BattlePlanner(CombatSettings.Defaults());
             var roster = (FighterMemory[])typeof(BattlePlanner).GetField("roster", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(planner);
             MethodInfo role = typeof(BattlePlanner).GetMethod("RoleAt", BindingFlags.Instance | BindingFlags.NonPublic);
@@ -1729,7 +1863,9 @@ namespace TideCombat
                         }
                     });
                     BattleAction first = sim.Actions[0].Item2;
-                    if (form == "RoverSpectro") Require(first.Kind == ActionKind.Hold, "Spectro opens with the aftertune heavy");
+                    if (form == "RoverSpectro" || form == null)
+                        Require(first.Kind == ActionKind.Hold && sim.Actor.RoverForm == "RoverSpectro",
+                            "Spectro and a missing ring color both use the Spectro aftertune heavy");
                     else if (form == "RoverHavoc") Require(first.Button == BattleButton.Resonance &&
                         !sim.Actions.Any(a => a.Item2.Button == BattleButton.Echo), "Havoc stops after a successful E");
                     else Require(first.Button == BattleButton.Echo, "other forms open using the echo helper");
@@ -1752,6 +1888,29 @@ namespace TideCombat
                         else frame.Skills[0] = SkillState.Cooling;
                     }, (time, frame) => frame.Airborne = launched >= 0 && time < launched + 1900);
                     Require(resonance == (hasBoth ? 2 : 1), "Skyfall Severance needs both team members");
+                }
+            }
+        }
+
+        private static void RoverFormLifetime()
+        {
+            var memory = new FighterMemory { Id = "Rover", RoverForm = "RoverSpectro" };
+            var settings = CombatSettings.Defaults();
+            settings.UseLiberation = false;
+            foreach (bool reset in new[] { false, true })
+            {
+                if (reset) memory.ResetForNextBattle();
+                using (var sim = new Simulation("Rover", actor: memory, settings: settings))
+                {
+                    sim.Hud.RoverForm = "RoverHavoc";
+                    sim.Hud.LevitatorKnown = true;
+                    sim.Run((action, time, h) =>
+                    {
+                        int skill = TurnContext.SkillIndex(action.Button);
+                        if (skill >= 0) h.Skills[skill] = SkillState.Cooling;
+                    });
+                    Require(memory.RoverForm == (reset ? "RoverHavoc" : "RoverSpectro"),
+                        "only a new battle can change a resolved Rover form");
                 }
             }
         }
@@ -1837,6 +1996,75 @@ namespace TideCombat
             }
         }
 
+        private static void ChisaTimedOutReset()
+        {
+            var options = CombatSettings.Defaults();
+            options.ChisaDps = true;
+            using (var sim = new Simulation("Chisa", settings: options))
+            {
+                sim.Hud.Skills[2] = SkillState.Cooling;
+                long first = -1;
+                sim.Run((action, time, h) =>
+                {
+                    if (action.Button == BattleButton.Echo) h.Skills[1] = SkillState.Cooling;
+                    if (action.Button == BattleButton.Resonance && first < 0) first = time;
+                }, (time, h) => { if (first >= 0 && time > first + 15000) h.Skills[0] = SkillState.Cooling; });
+                Require(first >= 0 && sim.FinishedAt >= first + 16500,
+                    "a sent E still resets the phase on its first timeout, as in click_resonance()[0]");
+            }
+        }
+
+        private static void ChisaSupportRetry()
+        {
+            using (var sim = new Simulation("Chisa"))
+            {
+                sim.Hud.Skills[2] = SkillState.Cooling;
+                int resonance = 0;
+                sim.Run((action, time, h) =>
+                {
+                    if (action.Button == BattleButton.Echo) h.Skills[1] = SkillState.Cooling;
+                    if (action.Button == BattleButton.Resonance && ++resonance == 2) h.Skills[0] = SkillState.Cooling;
+                });
+                var trace = sim.Actions.Select(x => x.Item2.Button).ToArray();
+                int first = Array.IndexOf(trace, BattleButton.Resonance);
+                Require(resonance == 2 && first >= 0 && trace[first + 1] == BattleButton.Attack &&
+                    trace[first + 2] == BattleButton.Resonance, "finish the helper retry before the short turn resumes");
+            }
+        }
+
+        private static void DeniaSecondLiberationLifetime()
+        {
+            var memory = new FighterMemory { Id = "Denia" };
+            for (int phase = 0; phase < 2; phase++)
+            {
+                using (var sim = new Simulation("Denia", actor: memory, start: 1000 + 6000 * phase))
+                {
+                    sim.Hud.Skills[0] = SkillState.Cooling;
+                    if (phase == 1) sim.Hud.Indicators.Add("denia_end_lib");
+                    sim.Run(liberationMs: 400);
+                    Require(memory.Phase == (phase == 0 ? 1 : 0) &&
+                        (memory.DeniaSecondLiberation >= 0) == (phase == 1), "only R2 updates its timestamp");
+                }
+            }
+            using (var sim = new Simulation("Denia", actor: memory, start: 14000))
+            {
+                sim.Hud.ConcertoFull = true;
+                sim.Run();
+                Require(sim.Actions.Count == 0, "same battle with recent R2 and full concerto exits");
+            }
+            memory.ResetForNextBattle();
+            using (var sim = new Simulation("Denia", actor: memory, start: 14500))
+            {
+                sim.Hud.ConcertoFull = true;
+                sim.Run((action, time, h) =>
+                {
+                    if (action.Button == BattleButton.Resonance) h.Skills[0] = SkillState.Cooling;
+                }, liberationMs: 400);
+                Require(sim.Actions.Any(a => a.Item2.Button == BattleButton.Resonance),
+                    "new encounter cannot inherit the previous R2 switch condition");
+            }
+        }
+
         private static void ChisaTurns()
         {
             foreach (string state in new[] { "long", "no-intro", "buffed", "full", "dps" })
@@ -1917,6 +2145,16 @@ namespace TideCombat
                     Require(sim.Actions.Count(a => a.Item2.Kind == ActionKind.Hold) == (gap == 8000 ? 1 : 0),
                         "Verina only repeats heavy when eight seconds have elapsed");
                 }
+            }
+        }
+
+        private static void CalcharoIntroHudRecovery()
+        {
+            using (var sim = new Simulation("Calcharo", intro: true))
+            {
+                sim.Run(frame: (time, hud) => hud.Valid = time < 1950 || time >= 2400);
+                long echo = sim.Actions.First(action => action.Item2.Button == BattleButton.Echo).Item1;
+                Require(echo >= 2900, "wait for the returning team HUD and its 500 ms settle before casting");
             }
         }
 
@@ -2191,6 +2429,8 @@ namespace TideCombat
                 () => SuisuiPromptFrames(reference));
             check("all enabled portrait templates resolve on the C# registry and Lingyang is recognized",
                 () => PortraitTemplates(reference));
+            check("portrait cache retains uncertain portraits only within a continuous party",
+                () => PortraitCacheContinuity(reference));
         }
 
         private static void HsinPromptFrames(string reference)
@@ -2260,6 +2500,141 @@ namespace TideCombat
                     ReferenceEquals(cached, PatternBank.Portraits),
                     "independent battle vision sessions share the loaded character templates");
             }
+        }
+
+        private static void OpenWorldCombatPolicy()
+        {
+            foreach (bool? policy in new bool?[] { null, true, false })
+            foreach (bool inRealm in new[] { false, true })
+            {
+                bool restricted = policy ?? !inRealm;
+                foreach (bool instant in new[] { false, true })
+                using (var echo = new Simulation("Encore", moves: c => new[] { Move.Echo(instant ? 0 : 1000) },
+                    openWorldAutoCombat: policy))
+                {
+                    echo.Hud.InRealm = inRealm;
+                    echo.Run((action, time, hud) => hud.Skills[1] = SkillState.Cooling);
+                    Require(echo.Actions.Any(x => x.Item2.Button == BattleButton.Echo) == (instant || !restricted),
+                        "instant-ready echo bypasses the restriction while timed fire echo honors task policy");
+                }
+
+                using (var encore = new Simulation("Encore", openWorldAutoCombat: policy))
+                {
+                    encore.Hud.InRealm = inRealm;
+                    encore.Hud.Skills[0] = encore.Hud.Skills[1] = SkillState.Cooling;
+                    encore.Run(liberationMs: 400);
+                    Require(encore.Actions.Any(x => x.Item2.Button == BattleButton.Liberation) == !restricted,
+                        "Encore's liberation branch follows task policy and falls back to the physical HUD when unassigned");
+                }
+            }
+        }
+
+        private static void TaskLiberationPreference()
+        {
+            var settings = CombatSettings.Defaults();
+            settings.UseLiberation = settings.SupportOpener = false;
+            var account = AccountConfig.ForRun(settings);
+            var accountConfig = new Dictionary<string, object>
+            {
+                { "Combat", new Dictionary<string, object> { { "UseLiberation", false } } }
+            };
+            Require(AccountConfig.Apply(account, accountConfig) == 1 && account.HasAccountLiberationOverride,
+                "the explicit account setting is distinguished from the standalone preference");
+
+            foreach (bool inWorld in new[] { true, false })
+            {
+                Require(StartsWithLiberation(CombatRunner.CreateTaskPlanner(settings, cloud: false), inWorld),
+                    "ordinary one-time tasks use liberation regardless of the standalone world toggle");
+                Require(StartsWithLiberation(CombatRunner.CreateTaskPlanner(account, cloud: false), inWorld) == !inWorld,
+                    "an explicit account override preserves the prior world-only restriction");
+                Require(StartsWithLiberation(BattleLoop.CreateStandalonePlanner(settings, cloud: false), inWorld) == !inWorld,
+                    "standalone combat continues honoring its world-only preference");
+
+                var farmOptions = FarmOptions.Defaults();
+                farmOptions.UseLiberation = farmOptions.SwitchHealer = false;
+                var farm = new Farm4C(settings, farmOptions);
+                Require(!StartsWithLiberation(farm.Planner, inWorld),
+                    "the dedicated farming toggle can disable liberation both in world and in realm");
+            }
+        }
+
+        private static bool StartsWithLiberation(BattlePlanner planner, bool inWorld)
+        {
+            HudSnapshot hud = Snapshot();
+            hud.OpenWorld = inWorld;
+            hud.InRealm = !inWorld;
+            hud.Fighters[0] = "Hsin";
+            hud.Skills[0] = hud.Skills[1] = SkillState.Cooling;
+            hud.Skills[2] = SkillState.Ready;
+            hud.Indicators.Add("hsin_lib1");
+            for (int time = 0; time <= 600; time += 100)
+            {
+                BattleAction action = planner.Observe(hud, time);
+                if (action.Kind == ActionKind.Button && action.Button == BattleButton.Liberation) return true;
+                if (action.Kind != ActionKind.Wait) planner.Sent(action, time);
+            }
+            return false;
+        }
+
+        private static void PortraitCacheContinuity(string reference)
+        {
+            using (var reader = new FrameReader())
+            using (var hiyuki = new Bitmap(Path.Combine(reference, "ok_templates", "hiyuki1.png")))
+            using (var lingyang = new Bitmap(Path.Combine(reference, "ok_templates", "lingyang.png")))
+            {
+                var settings = CombatSettings.Defaults();
+                var vision = new CombatVision(settings);
+                PixelFrame first = reader.Read(hiyuki);
+                var blank = new PixelFrame(new byte[first.Width * first.Height * 4], first.Width, first.Height);
+                PixelFrame third = CopyPortraitToSlot(first, 0, 2);
+                Require(ReadPortraitParty(vision, first, 3).Fighters[0] == "Hiyuki",
+                    "establish the initial portrait");
+                Require(vision.Identify(blank, 0) == null &&
+                    ReadPortraitParty(vision, blank, 3).Fighters[0] == "Hiyuki",
+                    "an inconclusive observation retains the last confirmed identity");
+
+                PixelFrame other = reader.Read(lingyang);
+                int otherSlot = Enumerable.Range(0, 3).Single(slot => vision.Identify(other, slot) == "Lingyang");
+                Require(ReadPortraitParty(vision, CopyPortraitToSlot(other, otherSlot, 0), 3).Fighters[0] == "Lingyang",
+                    "a confidently changed portrait replaces the cached identity");
+
+                Require(ReadPortraitParty(vision, third, 3).Fighters[2] == "Hiyuki",
+                    "establish the third portrait");
+                Require(ReadPortraitParty(vision, blank, 2).Fighters[2] == null &&
+                    ReadPortraitParty(vision, blank, 3).Fighters[2] == null,
+                    "an absent slot clears its identity even when its portrait is obscured on return");
+
+                vision.ResetParty();
+                Require(ReadPortraitParty(vision, blank, 3).Fighters[0] == null,
+                    "an explicitly reset party cannot regain a previous identity from a blank portrait");
+                settings.PartyCharacters[0] = "Verina";
+                Require(ReadPortraitParty(vision, blank, 3).Fighters[0] == "Verina",
+                    "manual assignment works while the portrait is obscured");
+                settings.PartyCharacters[0] = null;
+                Require(ReadPortraitParty(vision, blank, 3).Fighters[0] == null,
+                    "clearing a manual assignment does not create a cached identity");
+            }
+        }
+
+        private static HudSnapshot ReadPortraitParty(CombatVision vision, PixelFrame frame, int partySize)
+        {
+            HudSnapshot hud = Snapshot();
+            hud.PartySize = partySize;
+            vision.ReadParty(frame, hud);
+            return hud;
+        }
+
+        private static PixelFrame CopyPortraitToSlot(PixelFrame frame, int sourceSlot, int destinationSlot)
+        {
+            const int width = 120, height = 80;
+            int left = frame.Width - 160;
+            var portrait = new byte[width * height * 4];
+            frame.CopyBgra(new Rectangle(left, 165 + sourceSlot * 110, width, height), portrait);
+            var pixels = new byte[frame.Width * frame.Height * 4];
+            int top = 165 + destinationSlot * 110;
+            for (int row = 0; row < height; row++)
+                Buffer.BlockCopy(portrait, row * width * 4, pixels, ((top + row) * frame.Width + left) * 4, width * 4);
+            return new PixelFrame(pixels, frame.Width, frame.Height);
         }
 
         private static void ReplayRocciaAnimation(string reference)

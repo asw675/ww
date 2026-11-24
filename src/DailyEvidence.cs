@@ -41,11 +41,16 @@ namespace TideCombat
 
         internal string Begin(DailyTask task, int oneBasedIndex, PixelFrame frame)
         {
+            StartStep(task, oneBasedIndex);
+            return Save("before", frame);
+        }
+
+        internal void StartStep(DailyTask task, int oneBasedIndex)
+        {
             step = oneBasedIndex.ToString("D2", CultureInfo.InvariantCulture) + "-" + task;
             extras = 0;
             beforeSample = null;
             beforeSize = Size.Empty;
-            return Save("before", frame);
         }
 
         internal string Save(string stage, PixelFrame frame)

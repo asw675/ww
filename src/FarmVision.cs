@@ -37,6 +37,7 @@ namespace TideCombat
         internal bool Teleport;
         internal Rectangle TeleportBox;
         internal Rectangle WaypointTravelBox;
+        internal Rectangle WaypointPopupBox;
         internal bool MonthlyCard;
         internal Rectangle MonthlyCardBox;
         internal bool ClaimReward;
@@ -275,7 +276,7 @@ namespace TideCombat
             return FindNear(frame, label, 20, threshold, .70, out found);
         }
 
-        internal List<Rectangle> FindWaypoints(PixelFrame frame)
+        internal List<Rectangle> FindWaypoints(PixelFrame frame, bool confidenceOrder = false)
         {
             Rectangle area = Ratio(frame, .1, .1, .9, .9);
             index.Load(frame);
@@ -295,15 +296,26 @@ namespace TideCombat
                             double rank = pattern.Signature.Similarity(index.Sample(tile));
                             if (rank < .65) continue;
                             double light = pattern.LightSimilarity(frame, tile);
-                            if (light >= .70) hits.Add(new Candidate(light, tile));
+                            if (light >= .70)
+                                hits.Add(new Candidate(confidenceOrder ? rank * .45 + light * .55 : light, tile));
                         }
                 }
             hits.Sort((a, b) => b.Score.CompareTo(a.Score));
             int margin = Math.Max(1, (int)Math.Round(30.0 * frame.Height / frame.SourceHeight));
-            return SortWaypoints(hits.Select(hit => hit.Rect), new Size(frame.Width, frame.Height), margin);
+            return SortWaypoints(hits.Select(hit => hit.Rect), new Size(frame.Width, frame.Height), margin, confidenceOrder);
         }
 
-        internal static List<Rectangle> SortWaypoints(IEnumerable<Rectangle> candidates, Size size, int margin = 30)
+        internal bool FindWaypointPopup(PixelFrame frame, out Rectangle box)
+        {
+            // Reference annotation map_way_point_pop_up_box (3840×2160):
+            // (2439,837)-(2639,1379). Only select a waypoint within that
+            // overlapping-marker list, never another waypoint on the map.
+            Rectangle area = Ratio(frame, 2439.0 / 3840, 837.0 / 2160, 2639.0 / 3840, 1379.0 / 2160);
+            return BestMatchInRegion(frame, new[] { "map_way_point" }, area, 1, .65, .70, out box) != null;
+        }
+
+        internal static List<Rectangle> SortWaypoints(IEnumerable<Rectangle> candidates, Size size, int margin = 30,
+            bool confidenceOrder = false)
         {
             var waypoints = new List<Rectangle>();
             foreach (Rectangle candidate in candidates)
@@ -313,7 +325,8 @@ namespace TideCombat
                     continue;
                 waypoints.Add(candidate);
             }
-            waypoints.Sort((left, right) => DistanceSquared(left, size).CompareTo(DistanceSquared(right, size)));
+            if (!confidenceOrder)
+                waypoints.Sort((left, right) => DistanceSquared(left, size).CompareTo(DistanceSquared(right, size)));
             return waypoints;
         }
 

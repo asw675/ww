@@ -21,7 +21,11 @@ namespace TideCombat
         public void Validate()
         {
             if (!TacetNest && !Purification)
-                throw new System.IO.InvalidDataException("请至少选择一种梦魇巢穴。");
+            {
+                // OK-WW 的空 Which to Farm 回退默认两种分类。
+                TacetNest = true;
+                Purification = true;
+            }
         }
     }
 
@@ -53,6 +57,7 @@ namespace TideCombat
     {
         internal Point Point;
         internal string Key;
+        internal string ScanKey;
         internal NestTab Tab;
         internal bool Named;
         internal int RevealScrolls;
@@ -155,7 +160,10 @@ namespace TideCombat
                 if (distance >= best)
                     continue;
                 best = distance;
-                point = center;
+                // 参考将 OCR 计数框改成 x=.9，y=原 y-.9*h。确认该点确在
+                // 同行可见按钮内时使用；否则采用已定位按钮中心而不是盲点。
+                var reference = new Point((int)(frameWidth * .9), (int)(count.Y - count.Height * .9));
+                point = line.Box.Contains(reference) ? reference : center;
             }
             return !point.IsEmpty;
         }
@@ -171,11 +179,12 @@ namespace TideCombat
                     continue;
                 bool named;
                 string key = TargetKey(lines, tab, denominator, line.Box, height, out named, revealScrolls);
-                if (excludedNests.Contains(key))
+                string scanKey = CacheKey(tab, denominator, line.Box, height);
+                if (excludedNests.Contains(scanKey))
                     continue;
                 Point point;
                 if (key != null && TryVisitPoint(lines, line.Box, width, out point))
-                    return new NestTarget { Tab = tab, Key = key, Point = point, Named = named,
+                    return new NestTarget { Tab = tab, Key = key, ScanKey = scanKey, Point = point, Named = named,
                         RevealScrolls = revealScrolls, Defeated = 0, Total = denominator };
                 missingButton = true;
             }
@@ -200,7 +209,7 @@ namespace TideCombat
                     continue;
                 if (current != null)
                     return null;
-                current = new NestTarget { Key = target.Key, Tab = target.Tab, Named = named, Point = point,
+                current = new NestTarget { Key = target.Key, ScanKey = target.ScanKey, Tab = target.Tab, Named = named, Point = point,
                     Defeated = defeated, Total = total, RevealScrolls = revealScrolls };
             }
             return current;
@@ -224,6 +233,18 @@ namespace TideCombat
         {
             return !string.IsNullOrEmpty(text) && (text.IndexOf("吸收", StringComparison.Ordinal) >= 0 ||
                 text.IndexOf("Absorb", StringComparison.OrdinalIgnoreCase) >= 0);
+        }
+
+        internal static bool ShouldContinueCombatAfterPickup(bool captureOnce, Func<bool> nextWave)
+        {
+            // 短路：单次捕获模式下甚至不发送下一波探测。
+            return !captureOnce && nextWave();
+        }
+
+        internal static bool AcceptPickupFlow(bool inputSent, bool sameRoute, bool playable, bool claimPopup)
+        {
+            // 参考 pick_f / pick_echo 接受已发送且没有领奖弹窗的交互；这并非获取凭证。
+            return inputSent && sameRoute && playable && !claimPopup;
         }
 
         internal static EchoPrompt ReadEchoPrompt(PixelFrame frame, FarmUi ui, FarmVision vision, OcrReader ocr)
@@ -279,7 +300,6 @@ namespace TideCombat
     internal sealed class NightmareNestRunner : IDisposable
     {
         private const string LogArea = "Nightmare";
-        private const int MaxRevealScrolls = 3;
         private const int NextWaveWaitMs = 1000;
         private const string TeamStart = "team_start_challenge";
         private static readonly string[] TravelFeatures = { "fast_travel_custom", "gray_teleport", "remove_custom" };
@@ -299,12 +319,10 @@ namespace TideCombat
         private readonly List<NestTab> queue = new List<NestTab>();
         private readonly HashSet<string> excludedNests = new HashSet<string>();
         private readonly HashSet<string> travelSkips = new HashSet<string>();
-        private readonly HashSet<string> retriedStalledNests = new HashSet<string>();
+        private readonly HashSet<string> unconfirmedProgress = new HashSet<string>();
         private readonly Dictionary<string, int> deaths = new Dictionary<string, int>();
         private EchoDetector detector;
-        private NestTarget pendingNest;
         private NestTab? visibleBookPage;
-        private int revealScrolls;
         private readonly Stopwatch pickupClock = Stopwatch.StartNew();
         private long nextPickupOcr;
         private EchoPrompt lastEchoPrompt;
@@ -312,9 +330,13 @@ namespace TideCombat
         internal bool CaptureConfirmed { get { return captureDone; } }
         internal string Failure { get; private set; }
         internal string CompletionIssue { get; private set; }
-        private int nests, completedFights, noEntryNests, pagesWithoutButtons, unconfirmedPickupNests;
+        internal bool TryGetContinuationWindow(out IntPtr handle, out uint processId)
+        {
+            return TaskContinuation.TryGetCurrentWindow(world, out handle, out processId);
+        }
+        private int nests, completedFights, noEntryNests, pagesWithoutButtons, unconfirmedPickupNests, uncertainFightNests;
         private int exhaustedDeaths, confirmedReceipts;
-        private bool captureDone;
+        private bool captureDone, captureStopRequested;
 
         internal NightmareNestRunner(CombatSettings settings, NightmareOptions options, CancellationToken token,
             IProgress<NightmareReport> progress, Action<string, PixelFrame> recordEvidence = null, WorldSession session = null)
@@ -342,6 +364,7 @@ namespace TideCombat
 
         private void BuildQueue()
         {
+            options.Validate();
             if (options.TacetNest)
             {
                 queue.Add(NestTab.TacetNest);
@@ -354,21 +377,20 @@ namespace TideCombat
             }
         }
 
-        internal void Run()
+        internal void Run(bool fromDailyReference = false)
         {
             RunLog.Info(LogArea, string.Format("启动巢穴扫描。声骸巢穴={0}, 梦魇净化={1}, 单次捕获={2}, 声骸检测模型就绪={3}",
                 options.TacetNest, options.Purification, options.CaptureOnce, detector != null));
-            if (world.Tick() && world.VerifiedWorld && (world.InRealm || HasEnemies))
+            // 参考 run/run_capture_mode 先 ensure_main，而非补打启动时碰到的战斗。
+            var recovery = new WorldRecovery(world, state => Report(state));
+            if (!(fromDailyReference && AtKnownDailyBoundary()) && !recovery.EnsureMain(30000))
             {
-                bool team = world.InRealm;
-                RunLog.Info(LogArea, "启动时已在副本或遇敌，先处理当前战斗。副本=" + team);
-                if (!FightCurrentNestAndExit(null, team))
-                    return;
+                if (!token.IsCancellationRequested) Fail("启动时未确认返回大世界，无法开始巢穴扫描。");
+                return;
             }
-            while (!captureDone && !token.IsCancellationRequested)
+            while (!captureDone && !captureStopRequested && !token.IsCancellationRequested)
             {
-                NestTarget target = pendingNest ?? NextNest();
-                pendingNest = null;
+                NestTarget target = NextNest();
                 if (target == null)
                     break;
                 Report("处理巢穴 " + (nests + 1) + " · 已击败 " + target.Defeated + "/" + target.Total);
@@ -386,12 +408,7 @@ namespace TideCombat
             }
             CompletionIssue = BuildCompletionIssue();
             RecordFrame("nightmare-scan-end");
-            if (nests == 0 && (noEntryNests > 0 || pagesWithoutButtons > 0))
-            {
-                Fail("未完成巢穴处理：" + CompletionIssue + "。");
-                return;
-            }
-            if (!EnsureWorld())
+            if (!(fromDailyReference && AtKnownDailyBoundary()) && !EnsureWorld())
             {
                 if (!token.IsCancellationRequested)
                     Fail("巢穴扫描结束后未确认返回大世界。");
@@ -427,6 +444,10 @@ namespace TideCombat
                 issues.Add(exhaustedDeaths + " 处因连续倒下未完成");
             if (unconfirmedPickupNests > 0)
                 issues.Add(unconfirmedPickupNests + " 处有轮次未确认吸收");
+            if (unconfirmedProgress.Count > 0)
+                issues.Add(unconfirmedProgress.Count + " 处未核实满击败进度");
+            if (uncertainFightNests > 0)
+                issues.Add(uncertainFightNests + " 处战斗结束状态未核实");
             return issues.Count == 0 ? null : string.Join("、", issues);
         }
 
@@ -445,121 +466,37 @@ namespace TideCombat
                 NestTab tab = queue[0];
                 if (!SelectTab(tab))
                     return null;
-                bool sawBlockedRows = false;
-                bool missingButton = false;
-                while (!token.IsCancellationRequested)
+                var lines = world.Read(0.35, 0.25, 1, 0.96);
+                if (lines.Count == 0 && !token.IsCancellationRequested)
                 {
-                    var lines = world.Read(0.35, 0.25, 1, 0.96);
-                    if (lines.Count == 0 && !token.IsCancellationRequested)
-                    {
-                        RunLog.Warn(LogArea, "图鉴 " + tab + " 首次 OCR 无结果，等待画面稳定后重读");
-                        world.Sleep(700);
-                        lines = world.Read(0.35, 0.25, 1, 0.96);
-                    }
-                    if (token.IsCancellationRequested)
-                        return null;
-                    if (lines.Count == 0 && !sawBlockedRows)
-                    {
-                        Fail("未读取到图鉴列表文字。请确认游戏窗口可用，并已解锁对应页签。");
-                        return null;
-                    }
-                    NestTarget target = NestMath.FindTarget(lines, tab, world.Frame.Width, world.Frame.Height,
-                        excludedNests, out missingButton, revealScrolls);
-                    if (target != null)
-                    {
-                        RunLog.Info(LogArea, string.Format(
-                            "图鉴 {0} 选中候选巢穴。入口按钮={1}, 使用名称去重={2}, OCR 行数={3}, 补扫滚动={4}",
-                            tab, target.Point, target.Named, lines.Count, revealScrolls));
-                        Report("发现未完成巢穴");
-                        return target;
-                    }
-                    if (!missingButton)
-                        break;
-                    if (!sawBlockedRows)
-                        RecordFrame("nightmare-" + tab + "-blocked-before-scroll");
-                    sawBlockedRows = true;
-                    if (!RevealMoreRows(lines))
-                        break;
+                    RunLog.Warn(LogArea, "图鉴 " + tab + " 首次 OCR 无结果，等待画面稳定后重读");
+                    world.Sleep(700);
+                    lines = world.Read(0.35, 0.25, 1, 0.96);
                 }
-                if (Failed || token.IsCancellationRequested)
-                    return null;
-                if (missingButton)
+                if (token.IsCancellationRequested) return null;
+                bool missingButton;
+                NestTarget target = NestMath.FindTarget(lines, tab, world.Frame.Width, world.Frame.Height,
+                    excludedNests, out missingButton);
+                if (target != null)
+                {
+                    RunLog.Info(LogArea, string.Format(
+                        "图鉴 {0} 选中候选巢穴。入口按钮={1}, 缓存键={2}, OCR 行数={3}",
+                        tab, target.Point, target.ScanKey, lines.Count));
+                    Report("发现未完成巢穴");
+                    return target;
+                }
+                // 参考在当前预设页没有可选项即推进 queue，不额外滑动补扫。
+                if (missingButton || lines.Count == 0)
                 {
                     pagesWithoutButtons++;
-                    RecordFrame("nightmare-" + tab + "-blocked-after-scroll");
-                    RunLog.Warn(LogArea, "图鉴 " + tab + " 补扫结束，仍有未确认挑战入口的目标");
+                    RecordFrame("nightmare-" + tab + "-unconfirmed");
+                    RunLog.Warn(LogArea, "图鉴 " + tab + " 未核实全部挑战入口，按参考推进下一预设页");
                 }
                 else
                     RunLog.Info(LogArea, "图鉴 " + tab + " 没有其他可尝试的巢穴");
                 queue.RemoveAt(0);
             }
             return null;
-        }
-
-        private bool RevealMoreRows(List<OcrLine> before = null)
-        {
-            Rectangle tab;
-            bool selected;
-            if (revealScrolls >= MaxRevealScrolls || token.IsCancellationRequested ||
-                !guide.FindBookTab(out tab, out selected) || !selected || EntryAlreadyVisible())
-                return false;
-            int route = world.InputRouteVersion;
-            if (before == null)
-                before = world.Read(.35, .25, 1, .96);
-            if (before.Count == 0 || !guide.FindBookTab(out tab, out selected) || !selected ||
-                world.InputRouteVersion != route || EntryAlreadyVisible())
-                return false;
-            var size = new Size(world.Frame.Width, world.Frame.Height);
-            var point = new Point((int)(size.Width * .67), (int)(size.Height * .64));
-            if (!world.Input.Scroll(-1, point, size, world.Bounds, token))
-                return false;
-            world.Sleep(800);
-            if (token.IsCancellationRequested)
-                return false;
-            if (!guide.FindBookTab(out tab, out selected) || !selected || EntryAlreadyVisible())
-            {
-                Fail("补扫滚动后未能确认 Boss 图鉴列表。");
-                return false;
-            }
-            var after = world.Read(.35, .25, 1, .96);
-            if (after.Count == 0 || !guide.FindBookTab(out tab, out selected) || !selected ||
-                world.InputRouteVersion != route ||
-                size.Width != world.Frame.Width || size.Height != world.Frame.Height ||
-                !ProgressRowsMoved(before, after))
-            {
-                RunLog.Warn(LogArea, "补扫滚动已投递，未从前后画面确认进度行移动");
-                return false;
-            }
-            revealScrolls++;
-            RunLog.Info(LogArea, "确认图鉴行已移动，补扫位置=" + revealScrolls);
-            return true;
-        }
-
-        private static bool ProgressRowsMoved(List<OcrLine> before, List<OcrLine> after)
-        {
-            var previous = ProgressRows(before);
-            var current = ProgressRows(after);
-            if (previous.Count != current.Count)
-                return true;
-            for (int index = 0; index < previous.Count; index++)
-            {
-                Point left = previous[index], right = current[index];
-                if (left.X != right.X || Math.Abs(left.Y - right.Y) > 8)
-                    return true;
-            }
-            return false;
-        }
-
-        private static List<Point> ProgressRows(List<OcrLine> lines)
-        {
-            var rows = new List<Point>();
-            foreach (OcrLine line in lines)
-            {
-                int defeated, denominator;
-                if (NestMath.TryProgress(line.Text, out defeated, out denominator))
-                    rows.Add(new Point(denominator, line.Box.Top + line.Box.Height / 2));
-            }
-            return rows;
         }
 
         private bool OpenBook()
@@ -577,13 +514,13 @@ namespace TideCombat
             bool purification = tab == NestTab.Purification || tab == NestTab.PurificationScroll;
             bool scrolled = tab == NestTab.PurificationScroll || tab == NestTab.TacetScroll;
             Report("扫描图鉴 · " + (purification ? "梦魇净化" : "声骸巢穴") + (scrolled ? " · 滚动页" : ""));
+            int route = world.InputRouteVersion;
             world.Sleep(400);
-            if ((!purification || ClickBookControl(.356, .882, 2000)) &&
-                ClickBookControl(.24, purification ? .86 : .83, 2000) &&
-                (!scrolled || ClickBookControl(purification ? 3737.0 / 3840 : .973, purification ? .54 : .8806, 1000)))
+            if ((!purification || ClickBookControl(.356, .882, 2000, route)) &&
+                ClickBookControl(.24, purification ? .86 : .83, 2000, route) &&
+                (!scrolled || ClickBookControl(purification ? 3737.0 / 3840 : .973, purification ? .54 : .8806, 1000, route)))
             {
                 visibleBookPage = tab;
-                revealScrolls = 0;
                 return true;
             }
             visibleBookPage = null;
@@ -591,12 +528,15 @@ namespace TideCombat
             return false;
         }
 
-        private bool ClickBookControl(double x, double y, int settleMs)
+        private bool ClickBookControl(double x, double y, int settleMs, int route)
         {
-            if (!world.ClickMenuButton(x, y))
+            Rectangle tab;
+            bool selected;
+            if (!guide.FindBookTab(out tab, out selected) || !selected || world.InputRouteVersion != route ||
+                !world.ClickOnRoute(new Point((int)(x * world.Frame.Width), (int)(y * world.Frame.Height)), route))
                 return false;
             world.Sleep(settleMs);
-            return !token.IsCancellationRequested;
+            return !token.IsCancellationRequested && world.InputRouteVersion == route;
         }
 
         private bool WaitScreen(string[] labels, int timeoutMs, out string feature, out Rectangle box)
@@ -690,7 +630,7 @@ namespace TideCombat
         {
             lines = lines ?? world.Read(.35, .25, 1, .96);
             return world.Captured ? NestMath.ReadTargetProgress(lines, target, world.Frame.Width,
-                world.Frame.Height, revealScrolls) : null;
+                world.Frame.Height, 0) : null;
         }
 
         private bool WaitForStableBossList()
@@ -747,7 +687,7 @@ namespace TideCombat
                 bool selected;
                 if (guide.FindBookTab(out tab, out selected) && selected)
                 {
-                    excludedNests.Add(target.Key);
+                    excludedNests.Add(target.ScanKey);
                     noEntryNests++;
                     RecordFrame("nightmare-entry-unconfirmed");
                     Report((clickSent ? "已发送挑战入口点击，未确认入场" : "未发出挑战入口点击") +
@@ -757,8 +697,8 @@ namespace TideCombat
                     Fail(clickSent ? "点击后未识别到开始挑战或传送按钮。" : "未确认目标行的挑战入口。");
                 return false;
             }
-            return FightFromEntry(target, feature, button, reopenBook: true) &&
-                (captureDone || VerifyNestProgress(target));
+            if (!FightFromEntry(target, feature, button, reopenBook: true)) return false;
+            return captureDone || !captureStopRequested && VerifyNestProgress(target);
         }
 
         internal bool RunSelectedNest(string name, Rectangle entry)
@@ -771,7 +711,7 @@ namespace TideCombat
                     Fail("点击培养目标的巢穴入口后未识别到入场按钮。");
                 return false;
             }
-            var target = new NestTarget { Key = "培养目标/" + name, Named = true, Tab = NestTab.Purification };
+            var target = new NestTarget { Key = "培养目标/" + name, ScanKey = "培养目标/" + name, Named = true, Tab = NestTab.Purification };
             return FightFromEntry(target, feature, button);
         }
 
@@ -796,15 +736,23 @@ namespace TideCombat
             {
                 if (!Travel(target, feature, button))
                     return false;
-                for (int i = 0; i < 3 && !token.IsCancellationRequested; i++)
+                int interactions = 0;
+                int route = world.InputRouteVersion;
+                while (!token.IsCancellationRequested)
                 {
-                    world.Tick();
-                    if (HasEnemies || world.Ui == null || !world.Ui.FPrompt)
+                    if (!world.Tick() || world.InputRouteVersion != route || !world.VerifiedWorld ||
+                        world.Ui == null || !world.Ui.FPrompt)
                         break;
-                    RunLog.Info(LogArea, "传送后识别到交互提示，尝试进入巢穴，第 " + (i + 1) + " 次");
-                    world.Key('F');
-                    world.Sleep(1200);
-                    WaitTeam(40000);
+                    RunLog.Info(LogArea, "传送后识别到交互提示，尝试进入巢穴，第 " + (++interactions) + " 次");
+                    if (!world.Key('F', route: route)) break;
+                    world.Sleep(1000);
+                    if (!WaitTeam(40000)) break;
+                }
+                if (token.IsCancellationRequested) return false;
+                if (!world.Tick() || world.InputRouteVersion != route || !world.VerifiedWorld)
+                {
+                    Fail("巢穴入场交互后未确认原输入模式和游戏世界。");
+                    return false;
                 }
                 world.WaitUntil(() => HasEnemies, 1500);
             }
@@ -815,65 +763,77 @@ namespace TideCombat
         private bool FightCurrentNestAndExit(NestTarget target, bool team, bool reopenBook = false)
         {
             world.AllowShortEnemyBars = false;
-            while (FightAndCollect(target, team, reopenBook))
+            if (!FightAndCollect(target, team, reopenBook)) return false;
+            if (!world.WaitUntil(() => world.VerifiedWorld, 10000))
             {
-                if (!captureDone)
-                {
-                    if (!world.Tick() || !world.VerifiedWorld)
-                    {
-                        if (!token.IsCancellationRequested)
-                            Fail("离开巢穴前未能确认当前游戏画面。");
-                        return false;
-                    }
-                    if (HasEnemies)
-                    {
-                        RunLog.Info(LogArea, "离开巢穴前出现敌人，继续战斗");
-                        continue;
-                    }
-                }
-                return !team || LeaveTeamNest();
+                if (!token.IsCancellationRequested) Fail("离开巢穴前未能确认当前游戏画面。");
+                return false;
             }
-            return false;
+            return !team || LeaveTeamNest();
         }
 
         private bool FightAndCollect(NestTarget target, bool team, bool reopenBook)
         {
             int approach = team || target == null || world.AllowShortEnemyBars ? 0 : 10000;
             int standAloneDeaths = 0;
-            bool fought = false, retriedPickup = false, unconfirmedPickup = false;
+            bool fought = false, unconfirmedPickup = false;
             while (!token.IsCancellationRequested)
             {
                 Report(approach > 0 ? "接近巢穴并尝试锁敌" : "等待锁定巢穴敌人");
                 int enemyWait = fought ? NextWaveWaitMs : 10000;
                 RunLog.Info(LogArea, string.Format("探测巢穴敌人。队伍挑战={0}, 已完成一波={1}, 接近时限={2}ms, 搜敌时限={3}ms",
                     team, fought, approach, enemyWait));
-                CombatOutcome outcome = CombatRunner.Engage(world, settings, token, 300000, enemyWait,
+                CombatOutcome outcome = CombatRunner.Engage(world, settings, token, 0, enemyWait,
                     seekTargets: true, approachMs: approach, onCombatStarted: () => Report("战斗中"),
-                    captureDuringCombat: options.CaptureOnce ? WatchCombatCapture() : null);
+                    captureDuringCombat: options.CaptureOnce ? WatchCombatCapture() : null, openWorldAutoCombat: false);
                 approach = 0;
                 RunLog.Info(LogArea, "巢穴战斗结果 " + outcome);
                 if (token.IsCancellationRequested)
                     return false;
                 if (outcome == CombatOutcome.Captured)
                 {
-                    captureDone = true;
-                    Report("战斗中已捕获声骸，结束梦魇巢穴任务");
+                    Report(captureDone ? "战斗中已确认捕获声骸，结束梦魇巢穴任务" :
+                        "已发现参考捕获结束信号，停止扫描；本次新声骸尚未核实", warning: !captureDone);
                     break;
                 }
                 if (outcome == CombatOutcome.NoCombat)
                 {
-                    if (world.Tick() && HasEnemies)
+                    // combat_once(..., raise_if_not_found=False) 返回 need_find=False：
+                    // 不搜掉落，但仍等待通知/3 秒结算，再按模式判断下一波。
+                    if (options.CaptureOnce)
                     {
-                        RunLog.Info(LogArea, "离开前重新发现敌人，继续当前巢穴");
-                        continue;
+                        bool notice = world.WaitUntil(() => world.TeamHud && FarmVision.HasEchoReceipt(world.Frame), 3000);
+                        if (!notice) world.Sleep(3000);
+                        if (!world.Tick() || !world.VerifiedWorld)
+                        {
+                            Fail("未找到战斗且未确认返回游戏画面。");
+                            return false;
+                        }
+                        captureStopRequested = true;
+                        Report("未找到战斗，按参考结束本次单捕；未确认获取", warning: true);
+                    }
+                    else
+                    {
+                        world.Sleep(3000);
+                        if (WaitForNextWave())
+                        {
+                            fought = true;
+                            RunLog.Info(LogArea, "未开战轮次之后侦测下一波，继续当前巢穴");
+                            continue;
+                        }
                     }
                     break;
                 }
                 if (outcome == CombatOutcome.Timeout || outcome == CombatOutcome.Unverified)
                 {
                     RecordFrame("nightmare-combat-unverified");
-                    Fail("当前巢穴未确认清场，已停止在当前进度。");
-                    return false;
+                    if (!world.Tick() || !world.VerifiedWorld || HasEnemies)
+                    {
+                        Fail("当前巢穴未确认清场且无法核实无敌人的游戏画面，停止在当前进度。");
+                        return false;
+                    }
+                    uncertainFightNests++;
+                    Report("未核实战斗完成，但当前已确认无敌人的游戏画面，按参考检查掉落", warning: true);
                 }
                 if (outcome == CombatOutcome.Dead)
                 {
@@ -882,8 +842,8 @@ namespace TideCombat
                         count = ++standAloneDeaths;
                     else
                     {
-                        deaths.TryGetValue(target.Key, out count);
-                        deaths[target.Key] = ++count;
+                        deaths.TryGetValue(target.ScanKey, out count);
+                        deaths[target.ScanKey] = ++count;
                     }
                     RunLog.Warn(LogArea, "本轮在同一巢穴死亡 " + count + " 次");
                     if (reopenBook)
@@ -903,33 +863,56 @@ namespace TideCombat
                     continue;
                 }
                 fought = true;
-                completedFights++;
+                if (outcome == CombatOutcome.Finished) completedFights++;
                 world.AllowShortEnemyBars = true;
                 int receiptsBefore = confirmedReceipts;
-                if (world.WaitUntil(() => HasEnemies, 3000))
+                if (options.CaptureOnce && world.WaitUntil(() => world.TeamHud && FarmVision.HasEchoReceipt(world.Frame), 3000))
                 {
+                    captureStopRequested = true;
+                    Report("战斗后检测到获取通知，按参考结束单捕；未核实该通知是否为本次新获取", warning: true);
+                    break;
+                }
+                // 原版在找掉落之前固定 sleep(3)，避免用首次敌人帧提前结束等待。
+                world.Sleep(3000);
+                if (world.Tick() && HasEnemies)
+                {
+                    if (options.CaptureOnce)
+                    {
+                        unconfirmedPickup = true;
+                        break;
+                    }
                     RunLog.Info(LogArea, "等待掉落时发现敌人，立即恢复战斗");
                     continue;
                 }
                 Report("查找战斗掉落的声骸");
-                CollectEcho();
-                bool dropped = confirmedReceipts > receiptsBefore;
-                if (!dropped && target != null && !team && !retriedPickup &&
-                    CanSearchForEcho() && CurrentEchoPrompt() == EchoPrompt.None)
+                bool dropped = CollectEcho();
+                if (!dropped && target != null && !team && CanSearchForEcho())
                 {
-                    retriedPickup = true;
                     RunLog.Warn(LogArea, "首次搜索未确认吸收，现场也没有交互提示，重新传送至同一巢穴后再搜一次");
-                    RetryAfterTeleport(target);
-                    dropped = confirmedReceipts > receiptsBefore;
+                    dropped = RetryAfterTeleport(target);
                     if (Failed)
                         return false;
                 }
                 if (token.IsCancellationRequested)
                     return false;
-                if (!dropped)
+                bool verifiedPickup = confirmedReceipts > receiptsBefore;
+                if (options.CaptureOnce && dropped)
+                {
+                    captureStopRequested = true;
+                    captureDone = verifiedPickup;
+                    unconfirmedPickup |= !verifiedPickup;
+                    Report(verifiedPickup ? "已确认捕获声骸，结束梦魇巢穴任务" : "已投递有效拾取，按参考结束单捕；声骸获取未核实", warning: !verifiedPickup);
+                    break;
+                }
+                if (!verifiedPickup)
                 {
                     if (world.Tick() && HasEnemies)
                     {
+                        if (options.CaptureOnce)
+                        {
+                            unconfirmedPickup = true;
+                            break;
+                        }
                         RunLog.Info(LogArea, "拾取暂停，当前仍有敌人，继续战斗");
                         continue;
                     }
@@ -939,14 +922,10 @@ namespace TideCombat
                 else
                 {
                     RunLog.Info(LogArea, "本轮已确认吸收声骸");
-                    if (options.CaptureOnce)
-                    {
-                        captureDone = true;
-                        Report("已捕获声骸，结束梦魇巢穴任务");
-                        break;
-                    }
                 }
-                if (!WaitForNextWave()) break;
+                // 参考 _should_continue_combat_after_pickup：单次捕获无论拾取
+                // 是否成功，都不进入当前聚落的下一波战斗；未成功由外层扫描继续。
+                if (!NestMath.ShouldContinueCombatAfterPickup(options.CaptureOnce, WaitForNextWave)) break;
                 RunLog.Info(LogArea, "拾取结束后发现敌人，继续当前巢穴");
             }
             if (token.IsCancellationRequested)
@@ -986,7 +965,7 @@ namespace TideCombat
             }
             if (count >= 3)
             {
-                excludedNests.Add(target.Key);
+                excludedNests.Add(target.ScanKey);
                 exhaustedDeaths++;
                 RecordFrame("nightmare-death-limit");
                 Report("当前巢穴连续三次倒下，跳过并继续扫描下一个巢穴。", warning: true);
@@ -1019,21 +998,14 @@ namespace TideCombat
         {
             if (!OpenBook() || !SelectTab(target.Tab))
                 return false;
-            NestTarget current = null;
-            while (!token.IsCancellationRequested)
-            {
-                var lines = world.Read(.35, .25, 1, .96);
-                current = ReadVisibleNest(target, lines);
-                if (current != null && (current.Defeated == current.Total || !current.Point.IsEmpty))
-                    break;
-                if (!RevealMoreRows(lines))
-                    break;
-            }
+            // 读取一次当前预设页作为证据，不用满进度复验支配参考的下一步。
+            NestTarget current = ReadVisibleNest(target);
             if (token.IsCancellationRequested)
                 return false;
             if (current == null)
             {
-                Fail("未在图鉴中重新确认同一聚落的击败进度。");
+                unconfirmedProgress.Add(target.Key);
+                Report("本轮未在当前预设页核实同一聚落进度，按参考继续扫描", warning: true);
                 return false;
             }
 
@@ -1042,28 +1014,14 @@ namespace TideCombat
                 target.Key, target.Defeated, target.Total, current.Defeated, current.Total));
             if (current.Defeated == current.Total)
             {
-                NestTarget confirmed = ReadVisibleNest(target);
-                if (confirmed != null && confirmed.Defeated == confirmed.Total)
-                {
-                    RecordFrame("nightmare-cleared");
-                    excludedNests.Add(target.Key);
-                    retriedStalledNests.Remove(target.Key);
-                    Report("已从图鉴确认清场 " + confirmed.Total + "/" + confirmed.Total);
-                    return true;
-                }
-                Fail("同一聚落的满进度未得到再次确认。");
-                return false;
+                unconfirmedProgress.Remove(target.Key);
+                RecordFrame("nightmare-cleared");
+                Report("已从图鉴读到清场 " + current.Total + "/" + current.Total);
+                return true;
             }
-            if (current.Defeated < target.Defeated || current.Point.IsEmpty ||
-                current.Defeated == target.Defeated && !retriedStalledNests.Add(target.Key))
-            {
-                Fail("同一聚落仍是 " + current.Defeated + "/" + current.Total + "，未能继续推进。");
-                return false;
-            }
-            if (current.Defeated > target.Defeated)
-                retriedStalledNests.Remove(target.Key);
-            pendingNest = current;
-            Report("聚落进度 " + current.Defeated + "/" + current.Total + "，继续同一聚落");
+            // 不手工重排或排除该行：由参考 find_nest 的 0/M 初筛控制下一轮。
+            unconfirmedProgress.Add(target.Key);
+            Report("聚落进度 " + current.Defeated + "/" + current.Total + "，按参考零进度条件继续扫描", warning: true);
             return false;
         }
 
@@ -1073,7 +1031,7 @@ namespace TideCombat
             {
                 if (world.Ui.OpenWorld && !world.InRealm)
                     return true;
-                if (captureDone || !HasEnemies)
+                if (!world.Ui.OpenWorld || world.InRealm)
                 {
                     Report("确认队伍挑战退场");
                     Rectangle confirm = Rectangle.Empty;
@@ -1122,18 +1080,10 @@ namespace TideCombat
 
         private bool RetryAfterTeleport(NestTarget target)
         {
-            if (!target.Named && target.RevealScrolls > 0)
-            {
-                RunLog.Warn(LogArea, "补扫目标没有可验证的名称，离开列表后无法安全确认是原巢穴");
-                return false;
-            }
             if (!OpenBook())
                 return false;
             if (!SelectTab(target.Tab))
                 return false;
-            while (revealScrolls < target.RevealScrolls)
-                if (!RevealMoreRows())
-                    return false;
             if (!ClickCurrentVisit(target, retry: false, allowCompleted: true))
                 return false;
             world.Sleep(2000);
@@ -1176,77 +1126,46 @@ namespace TideCombat
                 prompt = CurrentEchoPrompt(fresh: true);
                 RunLog.Info(LogArea, "滚动后重读交互提示。吸收提示=" + prompt);
             }
-            for (int attempt = 0; attempt < 2 && prompt == EchoPrompt.Selected; attempt++)
+            if (prompt != EchoPrompt.Selected) return false;
+            int route = world.InputRouteVersion;
+            var receipt = new PickupReceiptCheck(FarmVision.HasEchoReceipt(world.Frame));
+            // 参考每次 walk_find_echo / pick_echo 只按一次 F；旧通知不阻止合法吸收，
+            // Result 与实际回执证据分离，防止误把旧通知计为这次获得。
+            if (!world.Key('F', route: route)) return false;
+            Report("正在吸收声骸");
+            long sentAt = world.Now;
+            bool confirmed = false, wrongClaim = false;
+            world.WaitUntil(delegate
             {
-                if (FarmVision.HasEchoReceipt(world.Frame))
+                if (world.InputRouteVersion != route) return true;
+                if (world.Ui == null) return false;
+                if (world.Ui.Claim)
                 {
-                    RunLog.Info(LogArea, "按 F 前已有获取通知，等待其消失后重新确认交互提示");
-                    if (!WaitForOldPickupReceipt() ||
-                        !CanPickupEcho() || CurrentEchoPrompt(fresh: true) != EchoPrompt.Selected)
-                    {
-                        if (!token.IsCancellationRequested)
-                            RunLog.Warn(LogArea, "旧获取通知未消失或吸收选项已经变化，取消本次按 F");
-                        return false;
-                    }
-                }
-                var receipt = new PickupReceiptCheck(FarmVision.HasEchoReceipt(world.Frame));
-                RunLog.Info(LogArea, "尝试吸收，第 " + (attempt + 1) + " 次，输入=" +
-                    (attempt == 0 ? "按 F" : "补按 F"));
-                if (!world.Interact(retry: attempt > 0))
-                {
-                    if (!token.IsCancellationRequested)
-                        RunLog.Warn(LogArea, "未能发送吸收按键");
-                    return false;
-                }
-                Report("正在吸收声骸");
-                int checkedFrames = 0, receiptFrames = 0;
-                bool combatReturned = false;
-                bool observed = world.WaitUntil(delegate
-                {
-                    if (world.Ui == null)
-                        return false;
-                    if (world.Ui.Claim)
-                        return true;
-                    if (!world.TeamHud || world.Ui.Book || world.Ui.Death)
-                        return false;
-                    checkedFrames++;
-                    bool visible = FarmVision.HasEchoReceipt(world.Frame);
-                    if (visible)
-                        receiptFrames++;
-                    if (receipt.Observe(visible))
-                        return true;
-                    combatReturned = HasEnemies;
-                    return combatReturned;
-                }, 2500);
-                if (combatReturned)
-                {
-                    RunLog.Info(LogArea, "等待吸收回执时发现敌人，转回战斗");
-                    return false;
-                }
-                if (observed && world.Ui.Claim)
-                {
-                    RunLog.Warn(LogArea, "按 F 后打开的是领取界面，按 Esc 返回");
-                    world.Key((char)0x1B);
-                    return false;
-                }
-                if (observed)
-                {
-                    confirmedReceipts++;
-                    RecordFrame("nightmare-absorb-confirmed");
-                    RunLog.Info(LogArea, string.Format("检测到本次获取通知。检查={0}, 命中={1}",
-                        checkedFrames, receiptFrames));
-                    Report("已确认吸收声骸");
+                    wrongClaim = true;
                     return true;
                 }
-                if (!token.IsCancellationRequested)
-                    RunLog.Warn(LogArea, string.Format("等待新获取通知超时 2500ms。检查={0}, 命中={1}",
-                        checkedFrames, receiptFrames));
-                if (!CanPickupEcho())
-                    return false;
-                prompt = CurrentEchoPrompt(fresh: true);
-                RunLog.Info(LogArea, "吸收未确认后重读交互提示。吸收提示=" + prompt);
+                if (!world.TeamHud || world.Ui.Book || world.Ui.Death) return false;
+                confirmed = receipt.Observe(FarmVision.HasEchoReceipt(world.Frame));
+                return confirmed || world.Now - sentAt >= 1000;
+            }, 1000);
+            world.Sleep((int)Math.Max(0, 1000 - (world.Now - sentAt)));
+            if (token.IsCancellationRequested || !world.Tick() || world.InputRouteVersion != route) return false;
+            if (wrongClaim || world.Ui != null && world.Ui.Claim)
+            {
+                RunLog.Warn(LogArea, "按 F 后打开的是领取界面，按 Esc 返回");
+                if (world.Ui != null && world.Ui.Claim) world.Key((char)0x1B, route: route);
+                return false;
             }
-            return false;
+            if (confirmed)
+            {
+                confirmedReceipts++;
+                RecordFrame("nightmare-absorb-confirmed");
+                Report("已确认吸收声骸");
+            }
+            bool accepted = NestMath.AcceptPickupFlow(true, true, world.TeamHud && world.Ui != null && !world.Ui.Book && !world.Ui.Death, false);
+            if (accepted && !confirmed)
+                Report("已投递拾取并确认未打开领取弹窗，实际新声骸回执尚未核实", warning: true);
+            return confirmed || accepted;
         }
 
         private Func<long, bool> WatchCombatCapture()
@@ -1267,44 +1186,28 @@ namespace TideCombat
                     if (!receipt.Observe(visible))
                         return false;
                     confirmedReceipts++;
+                    captureDone = true;
+                    captureStopRequested = true;
                     RecordFrame("nightmare-combat-absorb-confirmed");
                     return true;
                 }
-                if (!visible && CurrentEchoPrompt() == EchoPrompt.Selected && world.Interact(retry: false))
+                if (CurrentEchoPrompt() == EchoPrompt.Selected && world.Key('F', route: route))
                 {
-                    receipt = new PickupReceiptCheck(false);
+                    receipt = new PickupReceiptCheck(visible);
                     expires = now + 2500;
+                }
+                if (visible)
+                {
+                    captureStopRequested = true;
+                    return true;
                 }
                 return false;
             };
         }
 
-        private bool WaitForOldPickupReceipt()
-        {
-            int clearFrames = 0;
-            return world.WaitUntil(delegate
-            {
-                if (HasEnemies)
-                    return true;
-                clearFrames = world.TeamHud && !FarmVision.HasEchoReceipt(world.Frame) ? clearFrames + 1 : 0;
-                return clearFrames >= 2;
-            }, 3200) && clearFrames >= 2;
-        }
-
         private bool CollectVisibleEchoes()
         {
-            bool confirmed = false;
-            while (CanPickupEcho())
-            {
-                if (CurrentEchoPrompt(fresh: true) == EchoPrompt.None)
-                    return confirmed;
-                if (!Pickup())
-                    return false;
-                confirmed = true;
-                if (options.CaptureOnce)
-                    return true;
-            }
-            return confirmed;
+            return CanPickupEcho() && CurrentEchoPrompt(fresh: true) != EchoPrompt.None && Pickup();
         }
 
         private EchoPrompt CurrentEchoPrompt(bool fresh = false)
@@ -1462,6 +1365,8 @@ namespace TideCombat
                 RunLog.Info(LogArea, "已确认离开传送界面，世界和队伍画面已恢复");
                 return true;
             }
+            excludedNests.Add(target.ScanKey);
+            travelSkips.Add(target.ScanKey);
             if (view != TravelView.Terminal && view != TravelView.Guidebook &&
                 view != TravelView.World && world.Tick())
             {
@@ -1474,8 +1379,6 @@ namespace TideCombat
                 return false;
             if (view == TravelView.World || view == TravelView.Guidebook || view == TravelView.Terminal)
             {
-                excludedNests.Add(target.Key);
-                travelSkips.Add(target.Key);
                 visibleBookPage = null;
                 RecordFrame("nightmare-travel-skipped");
                 Report("传送未到达目标，已返回可识别界面，继续扫描", warning: true);
@@ -1660,6 +1563,20 @@ namespace TideCombat
                 }
                 return false;
             }, 10000);
+        }
+
+        private bool AtKnownDailyBoundary()
+        {
+            if (!world.Tick()) return false;
+            int route = world.InputRouteVersion;
+            Rectangle tab;
+            bool selected;
+            GuideView view;
+            guide.InspectBookView(out tab, out selected, out view);
+            if (view != GuideView.Guidebook && view != GuideView.World) return false;
+            if (!world.Tick() || world.InputRouteVersion != route) return false;
+            guide.InspectBookView(out tab, out selected, out view);
+            return view == GuideView.Guidebook || view == GuideView.World;
         }
 
         private void Report(string state, bool warning = false)

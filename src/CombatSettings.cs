@@ -67,11 +67,14 @@ namespace TideCombat
         private void ReadDefaults(StreamingContext context)
         {
             Source = GameSource.AutoLocal;
-            CheckLevitator = true;
             AutoRevive = true;
+            CheckLevitator = true;
             ToolKey = "T";
             BagKey = "B";
             GuidebookKey = "F2";
+            JumpKey = "SPACE";
+            DodgeKey = "LSHIFT";
+            WheelKey = "TAB";
             Farm = FarmOptions.Defaults();
             Enhance = EnhanceOptions.Defaults();
             Domain = DomainOptions.Defaults();
@@ -85,6 +88,9 @@ namespace TideCombat
         public bool AutoTarget { get; set; }
         public bool AutoRevive { get; set; }
         public bool UseLiberation { get; set; }
+        public bool CheckLevitator { get; set; }
+        [IgnoreDataMember]
+        internal bool HasAccountLiberationOverride { get; set; }
         public bool RotateParty { get; set; }
         public bool PreferConcerto { get; set; }
         public bool SwitchAtLowHealth { get; set; }
@@ -95,10 +101,35 @@ namespace TideCombat
         public string ToolKey { get; set; }
         public string BagKey { get; set; }
         public string GuidebookKey { get; set; }
+        public string JumpKey { get; set; }
+        public string DodgeKey { get; set; }
+        public string WheelKey { get; set; }
+
+        internal ushort JumpVirtualKey() { return ControlVirtualKey(JumpKey, "SPACE", "跳跃"); }
+        internal ushort DodgeVirtualKey() { return ControlVirtualKey(DodgeKey, "LSHIFT", "闪避"); }
+        internal ushort WheelVirtualKey() { return ControlVirtualKey(WheelKey, "TAB", "轮盘"); }
 
         internal ushort GuidebookVirtualKey()
         {
-            string key = string.IsNullOrWhiteSpace(GuidebookKey) ? "F2" : GuidebookKey.Trim().ToUpperInvariant();
+            return ControlVirtualKey(GuidebookKey, "F2", "图鉴");
+        }
+
+        private static ushort ControlVirtualKey(string binding, string defaultKey, string name)
+        {
+            string key = string.IsNullOrWhiteSpace(binding) ? defaultKey : binding.Trim().ToUpperInvariant();
+            switch (key)
+            {
+                case "LSHIFT": key = "LSHIFTKEY"; break;
+                case "RSHIFT": key = "RSHIFTKEY"; break;
+                case "SHIFT": key = "SHIFTKEY"; break;
+                case "LCTRL": key = "LCONTROLKEY"; break;
+                case "RCTRL": key = "RCONTROLKEY"; break;
+                case "CTRL": key = "CONTROLKEY"; break;
+                case "LALT": key = "LMENU"; break;
+                case "RALT": key = "RMENU"; break;
+                case "ALT": key = "MENU"; break;
+                case "ESC": key = "ESCAPE"; break;
+            }
             int number;
             if (key.Length == 1 && FarmInput.VirtualKey(key[0]) != 0)
                 return FarmInput.VirtualKey(key[0]);
@@ -109,7 +140,7 @@ namespace TideCombat
             if (char.IsLetter(key[0]) && !key.Contains(",") && Enum.TryParse(key, true, out named) &&
                 Enum.IsDefined(typeof(System.Windows.Forms.Keys), named) && (int)named >= 8 && (int)named <= 254)
                 return (ushort)named;
-            throw new InvalidDataException("图鉴快捷键须为单个键，例如 F2、G 或 Tab。");
+            throw new InvalidDataException(name + "快捷键须为单个键，例如 Space、G 或 Tab。");
         }
         public bool SupportOpener { get; set; }
         public bool IunoC6 { get; set; }
@@ -117,13 +148,17 @@ namespace TideCombat
         public bool ChisaDps { get; set; }
         public bool SuomingDps { get; set; }
         public GameSource Source { get; set; }
-        public bool CheckLevitator { get; set; }
         public FarmOptions Farm { get; set; }
         public EnhanceOptions Enhance { get; set; }
         public DomainOptions Domain { get; set; }
         public NightmareOptions Nightmare { get; set; }
         public ChangeOptions Change { get; set; }
         public DailyOptions Daily { get; set; }
+        // Older WW releases reused Daily.ExitAfterTask in both account modes.
+        // A missing nullable field is migrated once on load; a saved explicit
+        // false must remain distinct from the ordinary daily setting.
+        public bool? MultiAccountExitAfterTask { get; set; }
+        internal bool ExitAfterMultiAccount { get { return MultiAccountExitAfterTask ?? (Daily != null && Daily.ExitAfterTask); } }
         public CultivationOptions Cultivation { get; set; }
         public WorldAssistOptions WorldAssist { get; set; }
         public string[] PartyCharacters { get; set; }
@@ -138,6 +173,7 @@ namespace TideCombat
                 AutoTarget = true,
                 AutoRevive = true,
                 UseLiberation = true,
+                CheckLevitator = true,
                 RotateParty = true,
                 PreferConcerto = true,
                 SwitchAtLowHealth = false,
@@ -148,14 +184,17 @@ namespace TideCombat
                 ToolKey = "T",
                 BagKey = "B",
                 GuidebookKey = "F2",
+                JumpKey = "SPACE",
+                DodgeKey = "LSHIFT",
+                WheelKey = "TAB",
                 SupportOpener = true,
-                CheckLevitator = true,
                 Farm = FarmOptions.Defaults(),
                 Enhance = EnhanceOptions.Defaults(),
                 Domain = DomainOptions.Defaults(),
                 Nightmare = NightmareOptions.Defaults(),
                 Change = ChangeOptions.Defaults(),
                 Daily = DailyOptions.Defaults(),
+                MultiAccountExitAfterTask = false,
                 Cultivation = CultivationOptions.Defaults(),
                 WorldAssist = new WorldAssistOptions(),
                 PartyCharacters = new string[3],
@@ -175,6 +214,12 @@ namespace TideCombat
                 throw new InvalidDataException("探索工具键须为英文字母。");
             if (string.IsNullOrWhiteSpace(GuidebookKey)) GuidebookKey = "F2";
             GuidebookVirtualKey();
+            if (string.IsNullOrWhiteSpace(JumpKey)) JumpKey = "SPACE";
+            if (string.IsNullOrWhiteSpace(DodgeKey)) DodgeKey = "LSHIFT";
+            if (string.IsNullOrWhiteSpace(WheelKey)) WheelKey = "TAB";
+            JumpVirtualKey();
+            DodgeVirtualKey();
+            WheelVirtualKey();
             if (BagKey == null || BagKey.Length != 1 || BagKey[0] < 'A' || BagKey[0] > 'Z')
                 BagKey = "B";
             if (PartyCharacters == null)
@@ -195,6 +240,8 @@ namespace TideCombat
                 Change = ChangeOptions.Defaults();
             if (Daily == null)
                 Daily = DailyOptions.Defaults();
+            if (!MultiAccountExitAfterTask.HasValue)
+                MultiAccountExitAfterTask = Daily.ExitAfterTask;
             if (Cultivation == null)
                 Cultivation = CultivationOptions.Defaults();
             if (WorldAssist == null)

@@ -12,6 +12,7 @@ namespace TideCombat
     {
         private const int BackgroundWarmupMs = 1000;
         private const int BackgroundFrameWaitMs = 250;
+        internal const int MenuClickHoldMilliseconds = 200;
         internal readonly CombatSettings Settings;
         internal readonly CancellationToken Token;
         internal readonly GameWindow Window;
@@ -30,9 +31,13 @@ namespace TideCombat
         internal int InputRouteVersion { get; private set; }
 
         private readonly BattleLoop.WindowFrames capture;
+        private readonly CloudBrowser managedBrowser;
+        private ManagedCloudTaskRoute managedRoute;
+        private bool managedRoutePinned, managedRouteBroken;
         private readonly bool ownsCapture, ownsOcr;
-        private readonly HudVision hudVision;
+        private HudVision hudVision;
         private readonly MonthlyCardSchedule monthly;
+        private readonly WorldAssist cursorAssist;
         private readonly Stopwatch clock = Stopwatch.StartNew();
         private IntPtr routeWindow;
         private uint routeProcess;
@@ -43,26 +48,38 @@ namespace TideCombat
         private bool captureError, hudError, uiError, ocrError, labelError;
 
         internal WorldSession(CombatSettings settings, CancellationToken token, OcrReader ocr = null,
-            GameWindow window = null, BattleLoop.WindowFrames frames = null, MonthlyCardSchedule cardSchedule = null)
+            GameWindow window = null, BattleLoop.WindowFrames frames = null, MonthlyCardSchedule cardSchedule = null,
+            bool allowManagedMenuTask = false)
         {
             Settings = settings;
             monthly = cardSchedule ?? new MonthlyCardSchedule(settings.WorldAssist);
             Token = token;
             Window = window ?? GameWindow.ForTask(settings.Source);
-            Input = new FarmInput(Window);
-            BattleInput = new WindowInput(Window);
+            if (settings.Source == GameSource.ManagedCloud)
+            {
+                // No native HWND input or cross-page fallback in the dedicated
+                // browser task route. Only its explicitly implemented actions
+                // below can be delivered, after pinning an approved page.
+                if (!allowManagedMenuTask || window != null || frames != null)
+                    throw new InvalidOperationException("当前任务没有专用云游戏菜单路线授权。");
+                managedBrowser = new CloudBrowser();
+            }
+            Input = managedBrowser == null ? new FarmInput(Window) : null;
+            BattleInput = managedBrowser == null ? new WindowInput(Window) : null;
             Vision = new FarmVision();
-            ownsCapture = frames == null;
+            cursorAssist = WorldAssist.CreateCursorOnly(settings.WorldAssist, Vision);
+            ownsCapture = managedBrowser == null && frames == null;
             ownsOcr = ocr == null;
-            capture = frames ?? new BattleLoop.WindowFrames(Window);
-            hudVision = new HudVision(settings);
+            capture = managedBrowser == null ? frames ?? new BattleLoop.WindowFrames(Window) : null;
             Ocr = ocr ?? new OcrReader(OcrReader.Directory);
+            hudVision = new HudVision(settings, cooldownOcr: Ocr);
         }
 
         internal bool Tick(bool detailed = true, BattlePlanner planner = null, long combatTime = 0, bool nativePixels = false)
         {
             if (Token.IsCancellationRequested)
                 return false;
+            if (managedBrowser != null) return TickManaged(detailed, planner, combatTime, nativePixels);
             Rectangle bounds;
             string reason;
             if (!Window.TryLocate(out bounds, out reason))
@@ -74,7 +91,10 @@ namespace TideCombat
             if (Window.InputBlockedByIntegrity)
                 throw new InputElevationRequiredException();
             bool routeChanged = UpdateInputRoute();
-            bool retainSource = RetainEchoFrames || nativePixels;
+            if (cursorAssist != null) cursorAssist.UpdateCursor(Window, bounds, clock.ElapsedMilliseconds);
+            // Preserve original pixels for combat HUD checks even when callers
+            // request the lightweight task tick rather than detailed menu UI.
+            bool retainSource = RetainEchoFrames || nativePixels || detailed || planner != null;
             if (!routeChanged && Captured && (!retainSource || Frame.HasSourcePixels) && bounds == Bounds && clock.ElapsedMilliseconds - lastTick < 40 &&
                 Window.Available())
             {
@@ -95,14 +115,66 @@ namespace TideCombat
                 LogReadFailure(ref captureError, "读取任务画面", error);
                 return false;
             }
+            return CommitFrame(frame, bounds, detailed, planner, combatTime);
+        }
+
+        private bool TickManaged(bool detailed, BattlePlanner planner, long combatTime, bool nativePixels)
+        {
+            if (managedRouteBroken || planner != null) return false;
+            bool retainSource = RetainEchoFrames || nativePixels || detailed;
+            if (Captured && (!retainSource || Frame.HasSourcePixels) && clock.ElapsedMilliseconds - lastTick < 40)
+            {
+                if (detailed && !detailedFrame) ReadUi(true);
+                return true;
+            }
+            ResetFrame();
+            PixelFrame frame;
+            Size size;
+            ManagedCloudTaskRoute observed;
+            if (!managedBrowser.TryReadTask(Token, out frame, out size, out observed, retainSource))
+            {
+                if (managedRoutePinned) BreakManagedRoute();
+                return false;
+            }
+            if (managedRoutePinned && !managedRoute.Matches(observed))
+            {
+                BreakManagedRoute();
+                return false;
+            }
+            if (!managedRoutePinned)
+            {
+                managedRoute = observed;
+                managedRoutePinned = true;
+                ChallengeObservation.Clear();
+                InputRouteVersion++;
+            }
+            return CommitFrame(frame, new Rectangle(Point.Empty, size), detailed, null, combatTime);
+        }
+
+        private void BreakManagedRoute()
+        {
+            if (managedRouteBroken) return;
+            managedRouteBroken = true;
+            ResetFrame();
+            ChallengeObservation.Clear();
+            InputRouteVersion++;
+            managedBrowser.ReleaseAll();
+            const string reason = "专用云游戏会话或画面路线已变化，停止本次任务输入；请重新进入原界面后手动启动。";
+            RunLog.Warn("任务输入", reason);
+            if (!Token.IsCancellationRequested) throw new InvalidOperationException(reason);
+        }
+
+        private bool CommitFrame(PixelFrame frame, Rectangle bounds, bool detailed, BattlePlanner planner, long combatTime)
+        {
             Frame = frame;
             Bounds = bounds;
             bool cloud = Settings.Source == GameSource.Cloud || Settings.Source == GameSource.ManagedCloud;
             try
             {
-                Hud = hudVision.Read(frame, AllowShortEnemyBars || planner != null && planner.Fighting, cloud,
+                bool activeFight = planner != null && planner.Fighting;
+                Hud = hudVision.Read(frame, AllowShortEnemyBars || activeFight, cloud,
                     planner == null ? -1 : planner.LucillaTransformSlot,
-                    planner != null && planner.ShouldScanExecution(combatTime));
+                    planner != null && planner.ShouldScanExecution(combatTime), activeFight: activeFight);
                 hudError = false;
             }
             catch (Exception error)
@@ -144,14 +216,18 @@ namespace TideCombat
 
         private bool UpdateInputRoute()
         {
-            if (routeWindow == Window.Handle && routeProcess == Window.ProcessId && routeMode == Window.Mode)
+            bool newWindow = routeWindow != Window.Handle || routeProcess != Window.ProcessId;
+            if (!newWindow && routeMode == Window.Mode)
                 return false;
             if (routeWindow != IntPtr.Zero)
                 ReleaseHeldInput();
+            if (newWindow)
+                hudVision = new HudVision(Settings, cooldownOcr: Ocr);
             routeWindow = Window.Handle;
             routeProcess = Window.ProcessId;
             routeMode = Window.Mode;
             ChallengeObservation.Clear();
+            if (cursorAssist != null) cursorAssist.ResetWindow();
             InputRouteVersion++;
             return true;
         }
@@ -164,6 +240,7 @@ namespace TideCombat
             routeWindow = IntPtr.Zero;
             routeProcess = 0;
             ChallengeObservation.Clear();
+            if (cursorAssist != null) cursorAssist.ResetWindow();
             InputRouteVersion++;
         }
 
@@ -220,6 +297,7 @@ namespace TideCombat
 
         internal bool DismissMonthlyCard(bool requireTeam = false)
         {
+            if (managedBrowser != null) return false;
             if (!Tick()) return false;
             if (Ui == null || !Ui.MonthlyCard) return Vision.HasTeamNumbers(Frame);
             int route = InputRouteVersion;
@@ -246,7 +324,7 @@ namespace TideCombat
 
         internal void CheckScheduledCard()
         {
-            if (dismissingMonthlyCard || !monthly.Due(DateTime.Now) || !Tick() || Hud == null ||
+            if (managedBrowser != null || dismissingMonthlyCard || !monthly.Due(DateTime.Now) || !Tick() || Hud == null ||
                 Hud.Locked || Hud.EnemyHealth || Hud.Dead || !Vision.HasTeamNumbers(Frame)) return;
             int route = InputRouteVersion;
             long end = clock.ElapsedMilliseconds + 120000;
@@ -270,23 +348,36 @@ namespace TideCombat
 
         internal bool TypeText(string text)
         {
-            return Tick() && Input.TypeText(text, Token);
+            return managedBrowser == null && Tick() && Input.TypeText(text, Token);
         }
 
-        internal bool Click(double x, double y, int hold = 60)
+        private bool SendClick(Point point, int hold, int settleMs = 0, bool useWindowMessage = false)
         {
-            if (!Tick())
-                return false;
             var size = new Size(Frame.Width, Frame.Height);
-            return Input.Click(new Point((int)(x * Frame.Width), (int)(y * Frame.Height)), size, Bounds,
-                FarmMouse.Left, hold, Token);
+            if (managedBrowser == null)
+                return Input.Click(point, size, Bounds, FarmMouse.Left, hold, Token,
+                    settleMs: settleMs, useWindowMessage: useWindowMessage);
+            if (!managedRoutePinned || managedRouteBroken || !Captured) return false;
+            if (!managedBrowser.TaskClick(managedRoute, point, size, hold, Token))
+            {
+                BreakManagedRoute();
+                return false;
+            }
+            return settleMs <= 0 || !Token.WaitHandle.WaitOne(settleMs);
         }
 
-        internal bool Click(Point point, int hold = 60)
+        internal bool Click(double x, double y, int hold = MenuClickHoldMilliseconds)
         {
             if (!Tick())
                 return false;
-            return Input.Click(point, new Size(Frame.Width, Frame.Height), Bounds, FarmMouse.Left, hold, Token);
+            return SendClick(new Point((int)(x * Frame.Width), (int)(y * Frame.Height)), hold);
+        }
+
+        internal bool Click(Point point, int hold = MenuClickHoldMilliseconds)
+        {
+            if (!Tick())
+                return false;
+            return SendClick(point, hold);
         }
 
         internal void WaitForOptionalDialog(int? expectedRoute = null)
@@ -306,23 +397,21 @@ namespace TideCombat
                 original.IntersectsWith(button) && ClickOnRoute(button, route)) Sleep(200);
         }
 
-        internal bool ClickOnRoute(Rectangle control, int route, int hold = 60)
+        internal bool ClickOnRoute(Rectangle control, int route, int hold = MenuClickHoldMilliseconds)
         {
             return !control.IsEmpty && ClickOnRoute(new Point(control.Left + control.Width / 2,
                 control.Top + control.Height / 2), route, hold);
         }
 
-        internal bool ClickOnRoute(Point point, int route, int hold = 60)
+        internal bool ClickOnRoute(Point point, int route, int hold = MenuClickHoldMilliseconds)
         {
-            return Tick() && InputRouteVersion == route && Input.Click(point, new Size(Frame.Width, Frame.Height),
-                Bounds, FarmMouse.Left, hold, Token);
+            return Tick() && InputRouteVersion == route && SendClick(point, hold);
         }
 
         internal bool ClickMenuButton(Point point, bool retry = false, bool requireForeground = false)
         {
             return Tick() && (!requireForeground || Window.Mode == GameSource.Foreground) &&
-                Input.Click(point, new Size(Frame.Width, Frame.Height), Bounds,
-                    FarmMouse.Left, 100, Token, settleMs: 150, useWindowMessage: !retry);
+                SendClick(point, MenuClickHoldMilliseconds, settleMs: 150, useWindowMessage: !retry);
         }
 
         internal bool ClickMenuButton(Rectangle box)
@@ -335,16 +424,16 @@ namespace TideCombat
             return Tick() && ClickMenuButton(new Point((int)(x * Frame.Width), (int)(y * Frame.Height)));
         }
 
-        internal bool Click(Rectangle box, int hold = 60)
+        internal bool Click(Rectangle box, int hold = MenuClickHoldMilliseconds)
         {
             if (box.IsEmpty || !Tick())
                 return false;
-            return Input.Click(new Point(box.X + box.Width / 2, box.Y + box.Height / 2),
-                new Size(Frame.Width, Frame.Height), Bounds, FarmMouse.Left, hold, Token);
+            return SendClick(new Point(box.X + box.Width / 2, box.Y + box.Height / 2), hold);
         }
 
         internal bool ClickWithAlt(double x, double y, int settleMs)
         {
+            if (managedBrowser != null) return false;
             const char alt = '\u0012';
             for (int attempt = 0; attempt < 2; attempt++)
             {
@@ -370,23 +459,27 @@ namespace TideCombat
             if (!Tick() || requireForeground && Window.Mode != GameSource.Foreground ||
                 route.HasValue && route.Value != InputRouteVersion)
                 return false;
-            return Input.Key(key, hold, Token);
+            if (managedBrowser == null) return Input.Key(key, hold, Token);
+            if (key != (char)0x1b || !managedRoutePinned || managedRouteBroken) return false;
+            if (managedBrowser.TaskEscape(managedRoute, hold, Token)) return true;
+            BreakManagedRoute();
+            return false;
         }
 
         internal bool Interact(bool retry)
         {
-            return Tick() && Input.KeyCode('F', 90, Token, useWindowMessage: retry);
+            return managedBrowser == null && Tick() && Input.KeyCode('F', 90, Token, useWindowMessage: retry);
         }
 
         internal bool ScrollInteraction()
         {
-            return Tick() && Input.Scroll(1, new Point(Frame.Width / 2, Frame.Height / 2),
+            return managedBrowser == null && Tick() && Input.Scroll(1, new Point(Frame.Width / 2, Frame.Height / 2),
                 new Size(Frame.Width, Frame.Height), Bounds, Token);
         }
 
         internal bool CenterEchoCamera(int route, int hold = 200, int settle = 1000)
         {
-            if (!Tick() || route != InputRouteVersion) return false;
+            if (managedBrowser != null || !Tick() || route != InputRouteVersion) return false;
             if (!Input.ClickRelative(.5, .5, new Size(Frame.Width, Frame.Height), Bounds, FarmMouse.Middle, hold, Token))
                 return false;
             Sleep(settle);
@@ -395,24 +488,24 @@ namespace TideCombat
 
         internal bool KeyDown(char key, int? route = null)
         {
-            return !Token.IsCancellationRequested && Tick() && (!route.HasValue || route.Value == InputRouteVersion) &&
+            return managedBrowser == null && !Token.IsCancellationRequested && Tick() && (!route.HasValue || route.Value == InputRouteVersion) &&
                 Input.KeyDown(key);
         }
 
         internal bool KeyUp(char key)
         {
-            return Input.KeyUp(key);
+            return managedBrowser == null && Input.KeyUp(key);
         }
 
         internal bool GuideKey(bool requireForeground = false)
         {
-            return Tick() && (!requireForeground || Window.Mode == GameSource.Foreground) &&
+            return managedBrowser == null && Tick() && (!requireForeground || Window.Mode == GameSource.Foreground) &&
                 Input.KeyCode(Settings.GuidebookVirtualKey(), 60, Token);
         }
 
         internal bool TryRecoverForegroundCapture()
         {
-            if (Token.IsCancellationRequested)
+            if (managedBrowser != null || Token.IsCancellationRequested)
                 return false;
             IntPtr handle = Window.Handle;
             uint process = Window.ProcessId;
@@ -426,7 +519,7 @@ namespace TideCombat
 
         internal bool Send(BattleAction action)
         {
-            if (!Tick())
+            if (managedBrowser != null || !Tick())
                 return false;
             return BattleInput.Send(action, Token);
         }
@@ -576,6 +669,11 @@ namespace TideCombat
 
         private void ReleaseHeldInput()
         {
+            if (managedBrowser != null)
+            {
+                managedBrowser.ReleaseAll();
+                return;
+            }
             try { BattleInput.ReleaseAll(); }
             catch (Exception error) { RunLog.Error("任务输入", "释放战斗按键失败", error); }
             try { Input.ReleaseAll(); }
@@ -585,7 +683,9 @@ namespace TideCombat
         public void Dispose()
         {
             ReleaseHeldInput();
+            if (cursorAssist != null) cursorAssist.Dispose();
             if (ownsCapture) capture.Dispose();
+            if (managedBrowser != null) managedBrowser.Dispose();
             if (ownsOcr) Ocr.Dispose();
         }
     }

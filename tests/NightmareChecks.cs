@@ -154,11 +154,11 @@ namespace TideCombat
             var blocked = new HashSet<string>();
             bool missing;
             NestTarget first = NestMath.FindTarget(lines, NestTab.TacetScroll, 1600, 900, blocked, out missing);
-            Require(missing && first != null && first.Point == new Point(1433, 297), "应跳过被裁切的第一行");
-            blocked.Add(first.Key);
+            Require(missing && first != null && first.Point == new Point(1440, 292), "应跳过被裁切的第一行，完整行采用原版点击点");
+            blocked.Add(first.ScanKey);
             NestTarget second = NestMath.FindTarget(lines, NestTab.TacetScroll, 1600, 900, blocked, out missing);
-            Require(second != null && second.Point == new Point(1432, 480), "未能入场的目标应让位给下一行");
-            blocked.Add(second.Key);
+            Require(second != null && second.Point == new Point(1440, 476), "未能入场的目标应让位给下一行");
+            blocked.Add(second.ScanKey);
             Require(NestMath.FindTarget(lines, NestTab.TacetScroll, 1600, 900, blocked, out missing) == null && missing,
                 "没有完整按钮时不应返回推算坐标");
         }
@@ -185,10 +185,14 @@ namespace TideCombat
             NestTarget first = NestMath.FindTarget(firstPage, NestTab.TacetNest, 1600, 900, excluded, out missing);
             NestTarget shifted = NestMath.FindTarget(secondPage, NestTab.TacetScroll, 1600, 900, excluded, out missing);
             Require(first != null && first.Named && shifted != null && first.Key == shifted.Key,
-                "同一聚落滚动后应保留身份");
-            excluded.Add(first.Key);
+                "同一聚落滚动后应保留点击前验证身份");
+            Require(first.ScanKey != shifted.ScanKey, "参考不可达去重按页签和计数行槽，不按名称跨页排除");
+            excluded.Add(first.ScanKey);
+            Require(NestMath.FindTarget(secondPage, NestTab.TacetScroll, 1600, 900, excluded, out missing).Key == shifted.Key,
+                "第一预设页的缓存不应排除第二预设页的同名聚落");
+            excluded.Add(shifted.ScanKey);
             NestTarget next = NestMath.FindTarget(secondPage, NestTab.TacetScroll, 1600, 900, excluded, out missing);
-            Require(next != null && next.Point == new Point(1433, 580),
+            Require(next != null && next.Point == new Point(1440, 575),
                 "同分母的其他聚落仍可选择");
         }
 
@@ -209,12 +213,13 @@ namespace TideCombat
             var excluded = new HashSet<string>();
             bool missing;
             NestTarget first = NestMath.FindTarget(top, NestTab.Purification, 1600, 900, excluded, out missing);
-            Require(first != null && first.Point == new Point(1456, 294) && first.Named && !missing,
+            Require(first != null && first.Point == new Point(1440, 288) && first.Named && !missing,
                 "梦魇拔除应定位同一行的直接挑战按钮");
             NestTarget second = NestMath.FindTarget(scrolled, NestTab.PurificationScroll, 1600, 900,
                 excluded, out missing, 1);
             Require(second != null && first.Key == second.Key, "滚动位置和魇字识别差异不应改变聚落身份");
-            excluded.Add(first.Key);
+            Require(first.ScanKey != second.ScanKey, "不可达缓存按参考页签行槽分离");
+            excluded.Add(second.ScanKey);
             Require(NestMath.FindTarget(scrolled, NestTab.PurificationScroll, 1600, 900, excluded, out missing, 1) == null && !missing,
                 "已处理的聚落不应重复挑战");
             Require(NestMath.FindTarget(top, NestTab.TacetNest, 1600, 900, excluded, out missing) == null,
@@ -358,15 +363,26 @@ namespace TideCombat
         {
             NightmareOptions options = NightmareOptions.Defaults();
             options.Validate();
-            bool threw = false;
-            try
-            {
-                options.TacetNest = false;
-                options.Purification = false;
-                options.Validate();
-            }
-            catch (System.IO.InvalidDataException) { threw = true; }
-            Require(threw, "两种巢穴都不选时应拒绝");
+            options.TacetNest = false;
+            options.Purification = false;
+            options.Validate();
+            Require(options.TacetNest && options.Purification, "空选择按参考回退默认两类");
+            options.TacetNest = false;
+            options.Validate();
+            Require(!options.TacetNest && options.Purification, "已有明确选择不能被默认值覆盖");
+
+            int probes = 0;
+            Func<bool> nextWave = () => { probes++; return true; };
+            Require(!NestMath.ShouldContinueCombatAfterPickup(true, nextWave) && probes == 0,
+                "单次捕获后不探测或继续下一波战斗");
+            Require(NestMath.ShouldContinueCombatAfterPickup(false, nextWave) && probes == 1 &&
+                !NestMath.ShouldContinueCombatAfterPickup(false, () => false),
+                "全刷模式仅在探测到下一波敌人时继续战斗");
+            Require(NestMath.AcceptPickupFlow(true, true, true, false) &&
+                !NestMath.AcceptPickupFlow(true, false, true, false) &&
+                !NestMath.AcceptPickupFlow(true, true, false, false) &&
+                !NestMath.AcceptPickupFlow(true, true, true, true),
+                "参考拾取动作结果与新获取回执分离，只接受同路由、已确认游戏场景且无错误领奖的有效交互");
         }
     }
 }

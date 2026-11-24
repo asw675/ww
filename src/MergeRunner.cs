@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Drawing;
 using System.Linq;
 using System.Text.RegularExpressions;
@@ -18,9 +19,29 @@ namespace TideCombat
 
         internal static bool TryReadBatch(string text, out int count)
         {
-            count = 0;
-            Match match = BatchCount.Match(text ?? string.Empty);
-            return match.Success && int.TryParse(match.Groups[1].Value, out count) && count <= 100;
+            return TryReadBatchLines(new[] { new OcrLine { Text = text, Score = 1 } }, out count);
+        }
+
+        internal static bool TryReadBatchLines(IEnumerable<OcrLine> lines, out int count)
+        {
+            count = -1;
+            foreach (OcrLine line in lines)
+            {
+                if (line.Score < .72f)
+                    continue;
+                foreach (Match match in BatchCount.Matches(line.Text ?? string.Empty))
+                {
+                    int candidate;
+                    if (!int.TryParse(match.Groups[1].Value, out candidate) || candidate > 100 ||
+                        count >= 0 && count != candidate)
+                    {
+                        count = -1;
+                        return false;
+                    }
+                    count = candidate;
+                }
+            }
+            return count >= 0;
         }
 
         internal static bool ExplicitlyInsufficient(string text)
@@ -62,6 +83,7 @@ namespace TideCombat
     {
         private readonly CancellationToken token;
         private readonly WorldSession world;
+        private readonly bool ownsWorld;
         private readonly CombatSettings settings;
         private readonly IProgress<MergeReport> progress;
         private readonly Action<string, PixelFrame> recordEvidence;
@@ -73,14 +95,15 @@ namespace TideCombat
         private int batches, menuRoute;
 
         internal MergeRunner(CombatSettings settings, CancellationToken token, IProgress<MergeReport> progress,
-            Action<string, PixelFrame> recordEvidence = null, bool notifyIfInsufficient = true)
+            Action<string, PixelFrame> recordEvidence = null, bool notifyIfInsufficient = true, WorldSession session = null)
         {
             this.token = token;
             this.progress = progress;
             this.settings = settings;
             this.recordEvidence = recordEvidence;
             this.notifyIfInsufficient = notifyIfInsufficient;
-            world = new WorldSession(settings, token);
+            ownsWorld = session == null;
+            world = session ?? new WorldSession(settings, token);
         }
 
         internal void Run()
@@ -89,7 +112,7 @@ namespace TideCombat
             Failure = null;
             batches = 0;
             RunLog.Info("合并声骸", "开始");
-            if (!EnsureWorld())
+            if (!EnsureWorld(loginPending: ownsWorld))
             {
                 Fail("无法回到游戏世界。");
                 return;
@@ -126,7 +149,8 @@ namespace TideCombat
                 Fail("未能关闭已识别的弃置声骸提示。");
                 return;
             }
-            world.Sleep(2000);
+            // click_dialog_left_button waits 2s and run() adds 2s more.
+            world.Sleep(4000);
             if (!MenuClick(.034, .293, 1000) || !MenuClick(.580, .911, 4000) || !OpenMergePage())
             {
                 Fail("未确认已进入合成页面。");
@@ -226,10 +250,21 @@ namespace TideCombat
             }
             world.Sleep(1000);
             int count = -1;
-            if (!world.WaitUntil(() => ReadBatchCount(out count), 3500))
+            int previous = -1;
+            if (!world.WaitUntil(() =>
+            {
+                if (!ReadBatchCount(out count))
+                {
+                    previous = -1;
+                    return false;
+                }
+                bool stable = previous == count;
+                previous = count;
+                return stable;
+            }, 3500))
             {
                 token.ThrowIfCancellationRequested();
-                Complete("未识别到 100/100，满批合成结束");
+                Fail("未能稳定识别剩余合成批量，无法确认满批已全部合成。");
                 return;
             }
             if (count < 100)
@@ -238,7 +273,7 @@ namespace TideCombat
                 return;
             }
             Record("merge-batch-before");
-            if (!MenuClick(.782, .910, 450))
+            if (!MenuClick(.782, .910, 0))
             {
                 Fail("未能提交已确认的 100/100 合成批次。");
                 return;
@@ -251,25 +286,23 @@ namespace TideCombat
                 Fail("已提交合成批次，但未识别到获得奖励或合成成功画面。");
                 return;
             }
-            batches++;
             Record("merge-batch-confirmed");
-            if (!MenuClick(.496, .972, 1000, centered: true) || !world.WaitUntil(() => !HasMergeRewardReceipt(), 4500))
+            bool returned = MenuClick(.496, .972, 1000, centered: true) &&
+                world.WaitUntil(() => world.InputRouteVersion != menuRoute || !HasMergeRewardReceipt(), 4500) &&
+                world.InputRouteVersion == menuRoute && world.Captured;
+            // Count after the confirmed return, as in the reference's normal
+            // path. On a close failure the verified reward still counts.
+            batches++;
+            if (!returned)
                 Fail("已确认合成奖励，但未能返回合成页面核对剩余批量。");
         }
 
         private bool ReadBatchCount(out int count)
         {
             count = -1;
-            foreach (OcrLine line in world.Read(.670, .660, .895, .958))
-            {
-                int candidate;
-                if (line.Score < .72f || !MergeMath.TryReadBatch(line.Text, out candidate))
-                    continue;
-                if (count >= 0 && count != candidate)
-                    return false;
-                count = candidate;
-            }
-            return count >= 0;
+            return world.InputRouteVersion == menuRoute &&
+                MergeMath.TryReadBatchLines(world.Read(.670, .660, .895, .958), out count) &&
+                world.Captured && world.InputRouteVersion == menuRoute;
         }
 
         private bool HasMergeRewardReceipt()
@@ -282,30 +315,10 @@ namespace TideCombat
         }
 
 
-        private bool EnsureWorld()
+        private bool EnsureWorld(bool loginPending = false)
         {
-            for (int attempt = 0; attempt < 6; attempt++)
-            {
-                if (!world.Tick())
-                    break;
-                if (world.VerifiedWorld && !world.InRealm)
-                    return true;
-                if (world.InRealm)
-                {
-                    world.Key((char)0x1B);
-                    world.Sleep(800);
-                    Rectangle confirm;
-                    if (world.FindNear("gray_confirm_exit_button", .74, out confirm))
-                    {
-                        world.Click(confirm);
-                        world.Sleep(1200);
-                    }
-                    continue;
-                }
-                world.Key((char)0x1B);
-                world.Sleep(800);
-            }
-            return world.VerifiedWorld && !world.InRealm;
+            return new WorldRecovery(world, Report).EnsureMain(30000, loginPending) &&
+                world.VerifiedWorld && !world.InRealm;
         }
 
         private void Report(string state)
@@ -341,7 +354,7 @@ namespace TideCombat
 
         public void Dispose()
         {
-            world.Dispose();
+            if (ownsWorld) world.Dispose();
         }
     }
 }

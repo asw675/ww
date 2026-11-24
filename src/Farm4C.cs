@@ -66,10 +66,13 @@ namespace TideCombat
             if (!Enum.IsDefined(typeof(FarmBoss), Boss) ||
                 !Enum.IsDefined(typeof(FarmTeleportMode), TeleportMode) ||
                 !Enum.IsDefined(typeof(FarmPickupMode), Pickup) ||
-                BossChallengeIndex < 0 || BossChallengeIndex > 20 || WeeklyChallengeIndex < 0 || WeeklyChallengeIndex > 9 ||
-                SpecialNightmareIndex < 0 || SpecialNightmareIndex > 10 || BossIndex < 1 || BossIndex > 20 || RepeatCount < 1 || RepeatCount > 100000 ||
-                WaitSeconds < 0 || WaitSeconds > 60)
+                BossChallengeIndex < 0 || WeeklyChallengeIndex < 0 || SpecialNightmareIndex < 0 || BossIndex < 1 ||
+                RepeatCount < 0 || WaitSeconds < 0)
                 throw new System.IO.InvalidDataException("刷取配置无效。");
+            // Only the selected reference category is consumed by a run.
+            // Never turn an out-of-range selected index into a click on the last row.
+            if (Teleport && IndexFor(TeleportMode) > LimitFor(TeleportMode))
+                throw new System.IO.InvalidDataException("当前图鉴分类的 Boss 序号超出范围。");
             BossLevel = Math.Max(50, Math.Min(90, BossLevel));
         }
     }
@@ -85,6 +88,8 @@ namespace TideCombat
         internal BattleAction Battle;
         internal string Text;
         internal bool PickupKey, StartsRechallenge, RetryInput, AdvancesBossSearch, AdvancesLevelSelection, StartsWalkInChallenge;
+        internal bool RechallengeScroll;
+        internal int NavigationStage;
         internal int ScrollTicks, HoldMs;
 
         internal static FarmDecision None() { return new FarmDecision { Request = FarmRequest.None }; }
@@ -126,7 +131,8 @@ namespace TideCombat
     internal sealed class Farm4C
     {
         private const int ApproachTimeout = 15000, TargetProbeTimeout = 5000;
-        private const int InitialProbeMs = 1500, UnmarkedTravelWalkMs = 3000, ManualRealmWalkMs = 1000;
+        private const int InitialProbeMs = 1500, UnmarkedTravelWalkMs = 20000, ManualRealmWalkMs = 1000;
+        private const int NamelessRechallengeSettleMs = 1000, NamelessForwardMs = 8000, NamelessNavigationMs = 10000;
         private const int CombatLostMs = 2500;
         private const int EntryMenuTimeout = 15000, LoadingTimeout = 120000;
 
@@ -136,7 +142,7 @@ namespace TideCombat
         private readonly FarmOptions options;
         private readonly CombatSettings settings;
         private readonly bool cloud;
-        private int killsBeforeAttempt;
+        private int attemptsBeforeRetry, attempts;
         private readonly ushort guidebookKey;
         private readonly BattlePlanner planner;
         private Step step = Step.WaitGame;
@@ -144,33 +150,45 @@ namespace TideCombat
         private long stepAt, nextAction, lastCombatAt, lastCameraAt;
         private long lastGuideAt;
         private long reselectAt;
-        private bool combatSeen, entered, inRealm;
-        private bool approachAfterTravel, manualRealmApproach, usedApproachFallback;
+        private bool combatSeen, entered, inRealm, realmProfile;
+        private long farmStarted = -1;
+        private bool configuredTravelArrival, configuredWalkCombat;
+        private int walkRecoveryRetries;
+        private bool approachAfterTravel, approachAfterRechallenge, manualRealmApproach, usedApproachFallback;
+        private bool approachHadGuide, approachVerifiedWorld, bossScriptTravel, specialAfterTravel, hasTreasure, namelessFallbackTravel;
+        private bool navigationFallbackTravel;
+        private int navigationPhase;
+        private long navigationReadyAt;
         private char movementKey;
         private int teleportAttempts, enterClicks, kills, echoes, retries, circleStep, scrollClicks, nightStep,
             mapStep, aimStep, bossStep, healStep;
         private bool enteredFromWaypoint, returningToEncounter;
         internal bool EnteredFromWaypoint { get { return enteredFromWaypoint; } }
         private List<Rectangle> healWaypoints;
-        private int nextHealWaypoint;
+        private bool healPopupSelected;
         private long healChoiceDeadline;
         private string aimBoss;
-        private long lastNightChange, nightStepAt, lastScrollAt, nextPickupAt;
+        private long lastNightChange, nightStepAt, nextPickupAt;
         private static readonly int[] CircleDurations = { 800, 800, 800, 1600, 1600, 2400, 2400, 2400 };
         private enum WalkSearch { Center, Backward, Forward, Finished }
         private WalkSearch walkSearch;
         private bool dropSeen, roundAbsorbed, lootSearchFinished, lootCameraCentered, centerNextYoloView;
+        private bool roundKillCounted, roundAttemptActive, endedByEcho;
+        private long cloudEchoHealthLostAt = -1;
         private long waitBeforeCombat, nextTargetAt, pickupDeadline, pickupWindowUntil, firstYoloDetection = -1;
+        private long endWaitUntil;
         private EchoApproach echoApproach;
         private int pickupAttempts, pickupScrolls, yoloTurns, deathRecoveries;
         private int startClicks, rowClicks, rechallengePresses, rechallengeMenuOpens;
         private Rectangle selectedBossRow;
         private Rectangle entryConfirmation;
-        private bool confirmationChecked, entryOpenedByInteraction, entryAfterRechallenge, requireBossLevel;
+        private bool confirmationChecked, entryOpenedByInteraction, entryAfterRechallenge, requireBossLevel, configuredRealmEntry;
+        private bool specialInteractionWait;
         private double scrollTarget = double.NaN;
         private PickupReceiptCheck pickupReceipt;
-        private readonly int combatWaitMs;
-        private readonly bool bypassEndWait, treatAsNotInRealm;
+        private readonly long combatWaitMs;
+        private readonly bool bypassEndWait;
+        private bool treatAsNotInRealm;
         private string detail = "等待游戏窗口";
 
         internal Farm4C(CombatSettings settings, FarmOptions options, bool cloud = false, Func<DateTime> clock = null)
@@ -182,9 +200,9 @@ namespace TideCombat
             this.cloud = cloud;
             guidebookKey = settings.GuidebookVirtualKey();
             planner = new BattlePlanner(settings, cloud, targetForTask: true, supportOpener: options.SwitchHealer,
-                useLiberation: options.UseLiberation);
+                useLiberation: options.UseLiberation, openWorldAutoCombat: false, farmEchoTask: true);
             planner.PreferMainAfterHealer = true;
-            combatWaitMs = options.WaitSeconds > 0 ? options.WaitSeconds * 1000 : DefaultWait(options.Boss);
+            combatWaitMs = options.WaitSeconds > 0 ? options.WaitSeconds * 1000L : DefaultWait(options.Boss);
             bypassEndWait = options.Boss == FarmBoss.Fenrico || options.Boss == FarmBoss.FallacyOfNoReturn ||
                 options.Boss == FarmBoss.NamelessExplorer;
             treatAsNotInRealm = options.Boss == FarmBoss.NightmareHecate;
@@ -210,6 +228,7 @@ namespace TideCombat
         internal string Failure { get; private set; }
         internal string CompletionMessage { get; private set; }
         internal bool Finished { get { return step == Step.Done || step == Step.Failed; } }
+        internal int Attempts { get { return attempts; } }
         internal int Kills { get { return kills; } }
         internal int Echoes { get { return echoes; } }
         internal double EchoesPerHour { get; private set; }
@@ -221,7 +240,7 @@ namespace TideCombat
         internal bool WantsSprint { get { return movementKey != '\0' &&
             (step == Step.Approach || step == Step.BossScript || step == Step.BackFromWaypoint || step == Step.ReturnToEncounter ||
              step == Step.Loot && options.Pickup == FarmPickupMode.Circle); } }
-        internal bool Realm { get { return inRealm && !treatAsNotInRealm; } }
+        internal bool Realm { get { return realmProfile; } }
         internal bool SearchingForEcho { get { return step == Step.Loot && options.Pickup == FarmPickupMode.Yolo; } }
         internal bool WantsEchoDetection(long now)
         {
@@ -231,8 +250,11 @@ namespace TideCombat
 
         internal float EchoThreshold(FarmUi ui)
         {
+            // The reference's combat-end callback has its own fixed default
+            // confidence, independent of the post-combat pickup search.
+            if (step == Step.Fight) return .30f;
             if (SearchingForEcho && firstYoloDetection >= 0) return .50f;
-            return Realm || ui != null && ui.InRealm && options.Boss != FarmBoss.NightmareHecate ? .25f : .65f;
+            return Realm ? .25f : .65f;
         }
 
         private bool guideKeySent;
@@ -256,8 +278,12 @@ namespace TideCombat
         {
             return step == Step.HealTeleport && healStep == 1 && healWaypoints == null && now >= nextAction;
         }
+        internal bool WantsWaypointPopup(long now)
+        {
+            return step == Step.HealTeleport && healStep == 2 && !healPopupSelected && now >= healChoiceDeadline;
+        }
         internal bool SearchingForEntry { get { return step == Step.Approach; } }
-        internal bool WantsNavigation { get { return SearchingForEntry && !inRealm; } }
+        internal bool WantsNavigation { get { return SearchingForEntry && (!inRealm || approachAfterRechallenge); } }
         internal bool CanScanInteraction { get { return SearchingForEntry || step == Step.Rechallenge ||
             (step == Step.WaitGame && !options.Teleport) || (step == Step.Claim && inRealm); } }
         internal bool WantsRechallengeChoice(FarmUi ui)
@@ -287,7 +313,20 @@ namespace TideCombat
                 inRealm = true;
             else if (!ui.Death && (ui.OpenWorld || hud != null && hud.OpenWorld))
                 inRealm = false;
+            // Reference initializes the combat/pickup profile at launch and
+            // can only latch realm mode within the startup window. Keep the
+            // live scene separately for safe menu and death recovery routing.
+            if (farmStarted < 0)
+            {
+                farmStarted = now;
+                // OKWW takes the initial realm snapshot before applying the
+                // selected boss's treat-as-world override.
+                realmProfile = inRealm;
+            }
+            else if (!treatAsNotInRealm && inRealm && now - farmStarted < (step == Step.Fight ? 20000 : 60000))
+                realmProfile = true;
             bool realm = Realm;
+            bool actualRealm = inRealm;
             planner.SwitchTimeoutMs = realm ? 5000 : 3000;
             planner.LostCombatTimeoutMs = realm ? 3000 : 1200;
             if (!ui.CloudDisconnectBox.IsEmpty && cloud && !frame.HudValid)
@@ -315,13 +354,23 @@ namespace TideCombat
             if (ui.Death && step != Step.Revive && step != Step.Teleport && step != Step.Night &&
                 step != Step.RecoverRealm && step != Step.HealTeleport && step != Step.AimTeleport && step != Step.MapTeleport)
             {
-                if (step == Step.Loot && !roundAbsorbed)
+                if (step == Step.Loot && !roundAbsorbed && roundKillCounted)
+                {
                     kills--;
+                    roundKillCounted = false;
+                }
+                if (actualRealm && roundAttemptActive)
+                {
+                    // A realm death returns the reference's loop to the start
+                    // of the interrupted round without counting it.
+                    attempts--;
+                    roundAttemptActive = false;
+                }
                 planner.Invalidate(now);
-                if (realm && !options.Teleport)
+                if (actualRealm && !options.Teleport)
                     return Stop("副本内角色倒下，手动进入的挑战无法自动重新传送。");
                 returningToEncounter = false;
-                step = realm ? Step.RecoverRealm : Step.Revive;
+                step = actualRealm ? Step.RecoverRealm : Step.Revive;
                 stepAt = now;
                 nextAction = now;
                 ReleaseForward(now);
@@ -354,6 +403,12 @@ namespace TideCombat
 
         internal void Sent(FarmDecision decision, long now)
         {
+            if (decision.RechallengeScroll && step == Step.Rechallenge) nextAction = now + 200;
+            if (decision.NavigationStage > 0)
+            {
+                navigationPhase = decision.NavigationStage;
+                navigationReadyAt = now + (navigationPhase == 1 ? 500 : 1000);
+            }
             if (decision.Request == FarmRequest.Battle && decision.Battle.Kind != ActionKind.Wait)
                 planner.Sent(decision.Battle, now);
             if (step == Step.Loot) LootInputSent(decision, now);
@@ -394,6 +449,11 @@ namespace TideCombat
 
         private FarmDecision WaitGame(FarmFrame frame, HudSnapshot hud, FarmUi ui, long now)
         {
+            if (options.RepeatCount == 0)
+            {
+                step = Step.Done;
+                return Idle();
+            }
             if (options.Teleport && options.IndexFor(options.TeleportMode) > BossLimit())
                 return Stop("当前图鉴分类的 Boss 序号最大为 " + BossLimit() + "。");
             if (options.Teleport && (PlayableScene(frame.Hud, ui) || ui.Book || ui.Terminal))
@@ -419,12 +479,7 @@ namespace TideCombat
                 if (PlayableScene(frame.Hud, ui))
                 {
                     if (hud != null && HasBossScript)
-                    {
-                        step = Step.BossScript;
-                        bossStep = 0;
-                        stepAt = nextAction = now;
-                        return Idle();
-                    }
+                        return StartBossScript(now);
                     StartApproach(now, manualStart: true);
                     return Approach(frame, hud, ui, now);
                 }
@@ -453,6 +508,15 @@ namespace TideCombat
                 return options.Boss == FarmBoss.Fenrico || options.Boss == FarmBoss.FallacyOfNoReturn ||
                     options.Boss == FarmBoss.NamelessExplorer;
             }
+        }
+
+        private FarmDecision StartBossScript(long now, bool afterTravel = false)
+        {
+            ReleaseForward(now);
+            step = Step.BossScript;
+            bossStep = afterTravel ? 2 : 0;
+            stepAt = nextAction = now;
+            return Idle();
         }
 
         private FarmDecision BossScript(FarmFrame frame, HudSnapshot hud, FarmUi ui, long now)
@@ -484,9 +548,10 @@ namespace TideCombat
                 {
                     bossStep = 2;
                     nextAction = now + 2500;
+                    bossScriptTravel = true;
                     return TeleportOrMap(frame, ui, now);
                 }
-                return StartApproach(now);
+                return StartApproach(now, afterTravel: true, special: true);
             }
             if (options.Boss == FarmBoss.FallacyOfNoReturn)
             {
@@ -499,13 +564,18 @@ namespace TideCombat
                     }
                     bossStep = 1;
                     nextAction = now + 2500;
+                    bossScriptTravel = true;
                     return TeleportOrMap(frame, ui, now);
                 }
-                if (bossStep == 1) { bossStep = 2; nextAction = now + 400; return Key('D', now); }
-                return StartApproach(now);
+                if (bossStep == 2) { bossStep = 3; nextAction = now + 750; return Key('D', now, 250); }
+                if (bossStep == 3) { bossStep = 4; nextAction = now + 500; return Key('W', now); }
+                return StartApproach(now, afterTravel: true, special: true);
             }
+            if (bossStep >= 2)
+                return StartApproach(now, afterTravel: true);
             if (inRealm || ui.Treasure || ui.FPrompt)
                 return StartApproach(now);
+            bossScriptTravel = true;
             return TeleportOrMap(frame, ui, now);
         }
 
@@ -530,6 +600,8 @@ namespace TideCombat
 
         private FarmDecision Approach(FarmFrame frame, HudSnapshot hud, FarmUi ui, long now)
         {
+            if (approachAfterRechallenge)
+                return ApproachNamelessAfterRechallenge(frame, hud, ui, now);
             if (!ui.RechallengeButton.IsEmpty || ui.ClaimReward)
             {
                 StartRechallengeMenu(now);
@@ -583,27 +655,47 @@ namespace TideCombat
             }
 
             bool marked = hud != null && !inRealm && !double.IsNaN(frame.NavTurn);
+            if (hud != null && !inRealm && (hud.OpenWorld || ui.OpenWorld || marked))
+                approachVerifiedWorld = true;
+            // Within an already verified overworld approach, the reference's
+            // minimap navigation treats a temporarily missing marker as angle 0.
+            bool worldNavigation = hud != null && !inRealm && approachVerifiedWorld && !approachAfterTravel;
             long elapsed = now - stepAt;
             if (marked)
+            {
                 lastGuideAt = now;
-            if (elapsed >= ApproachTimeout || !marked && elapsed >= TargetProbeTimeout && now - lastGuideAt >= 1000)
+                approachHadGuide = true;
+            }
+            int travelProbeMs = navigationFallbackTravel || namelessFallbackTravel ? 500 : InitialProbeMs;
+            int travelWalkMs = namelessFallbackTravel || navigationFallbackTravel ? 12000 :
+                specialAfterTravel && options.Boss == FarmBoss.Fenrico ? 5000 : UnmarkedTravelWalkMs;
+            bool travelWalk = approachAfterTravel && !inRealm && elapsed < travelProbeMs + travelWalkMs;
+            int timeout = namelessFallbackTravel ? travelProbeMs + 12000 + 10000 :
+                navigationFallbackTravel ? travelProbeMs + 12000 : specialAfterTravel ? travelProbeMs + travelWalkMs + 300000 :
+                approachAfterTravel ? travelProbeMs + UnmarkedTravelWalkMs : ApproachTimeout;
+            bool targetProbeExpired = !approachAfterTravel && !marked && !approachHadGuide && !approachVerifiedWorld &&
+                elapsed >= TargetProbeTimeout && now - lastGuideAt >= 1000;
+            if (elapsed >= timeout || targetProbeExpired)
             {
                 ReleaseForward(now);
-                if (marked && !approachAfterTravel && !usedApproachFallback)
+                if (specialAfterTravel && hud != null)
+                    return StartApproach(now);
+                if ((approachHadGuide || approachVerifiedWorld || aimBoss != null) && !approachAfterTravel && !usedApproachFallback)
                 {
                     usedApproachFallback = true;
+                    navigationFallbackTravel = true;
                     return TeleportOrMap(frame, ui, now);
                 }
                 return Stop(hud == null ? "已识别队伍，但技能栏未确认。请检查游戏 HUD 后重试。" :
                     "未锁定 Boss，也未找到挑战入口。手动模式请靠近目标或先锁敌再启动。");
             }
-            bool travelWalk = approachAfterTravel && !inRealm && elapsed < InitialProbeMs + UnmarkedTravelWalkMs;
             bool realmWalk = manualRealmApproach && inRealm && elapsed < InitialProbeMs + ManualRealmWalkMs &&
                 hud != null && !hud.ChallengeMarker;
-            bool canWalk = hud != null && elapsed >= InitialProbeMs && (marked || travelWalk || realmWalk);
+            bool canWalk = hud != null && elapsed >= travelProbeMs && (marked || travelWalk || realmWalk || worldNavigation);
             if (!canWalk)
             {
                 ReleaseForward(now);
+                navigationPhase = 0;
                 detail = hud == null ? "已识别队伍，正在尝试锁敌或寻找挑战入口" : "原地锁敌 / 等待挑战入口";
             }
             if (now < nextAction)
@@ -612,8 +704,8 @@ namespace TideCombat
             if (canWalk)
             {
                 detail = marked ? "沿小地图接近 Boss" : "短距接近 Boss";
-                if (marked)
-                    return Navigate(frame.NavTurn, now);
+                if (marked || worldNavigation)
+                    return Navigate(marked ? frame.NavTurn : 0, now);
                 if (movementKey != 'W')
                     return KeyDown('W', now);
             }
@@ -623,19 +715,75 @@ namespace TideCombat
             return canWalk ? Middle(now) : Battle(BattleAction.Target(), now);
         }
 
-        private FarmDecision StartApproach(long now, bool afterTravel = false, bool manualStart = false)
+        private static bool ReadyForRechallengeApproach(FarmFrame frame, FarmUi ui)
+        {
+            return frame.HudValid && PlayableScene(frame.Hud, ui) && !ui.Treasure && !ui.Absorb &&
+                !ui.ClaimReward && ui.RechallengeButton.IsEmpty && ui.ConfirmBox.IsEmpty &&
+                ui.Rechallenge == RechallengeChoice.None && frame.PickupPrompt == EchoPrompt.None &&
+                (!ui.FPrompt || frame.Hud.ChallengePrompt);
+        }
+
+        private FarmDecision ApproachNamelessAfterRechallenge(FarmFrame frame, HudSnapshot hud, FarmUi ui, long now)
+        {
+            long elapsed = now - stepAt;
+            if (!ReadyForRechallengeApproach(frame, ui))
+            {
+                ReleaseForward(now);
+                navigationPhase = 0;
+                detail = "等待无铭探索者重开后的游戏画面";
+                if (elapsed >= NamelessForwardMs + NamelessNavigationMs)
+                    return Stop("无铭探索者重开后未确认场景，无法传送回退。");
+                return Idle();
+            }
+            if (hud.Locked || hud.EnemyHealth)
+                return BeginFight(now, visible: true);
+            if (hud.ChallengePrompt)
+                return StartChallenge(hud, now);
+            if (elapsed >= NamelessForwardMs + NamelessNavigationMs)
+            {
+                namelessFallbackTravel = true;
+                return TeleportOrMap(frame, ui, now);
+            }
+
+            if (elapsed < NamelessForwardMs)
+            {
+                detail = "向前接近无铭探索者";
+                if (movementKey != 'W') return KeyDown('W', now);
+            }
+            else
+            {
+                detail = "沿小地图接近无铭探索者";
+                // The restart and playable scene are already confirmed; the
+                // reference uses forward (angle 0) if the marker is missing.
+                return Navigate(double.IsNaN(frame.NavTurn) ? 0 : frame.NavTurn, now);
+            }
+            if (now - lastCameraAt < 500) return Idle();
+            lastCameraAt = now;
+            return Middle(now);
+        }
+
+        private FarmDecision StartApproach(long now, bool afterTravel = false, bool manualStart = false,
+            bool afterRechallenge = false, bool special = false)
         {
             ReleaseForward(now);
             step = Step.Approach;
             stepAt = nextAction = lastGuideAt = now;
             lastCameraAt = now - 500;
             approachAfterTravel = afterTravel;
+            if (!afterTravel) navigationFallbackTravel = false;
+            approachAfterRechallenge = afterRechallenge;
+            specialAfterTravel = special;
+            approachHadGuide = false;
+            approachVerifiedWorld = false;
+            navigationPhase = 0;
+            navigationReadyAt = now;
             manualRealmApproach = manualStart && inRealm;
             return Idle();
         }
 
         private FarmDecision StartRechallenge(FarmFrame frame, HudSnapshot hud, FarmUi ui, long now)
         {
+            if (ui.Treasure || ui.Rechallenge != RechallengeChoice.None) hasTreasure = true;
             step = Step.Rechallenge;
             stepAt = lastGuideAt = nextAction = now;
             reselectAt = -1;
@@ -656,7 +804,10 @@ namespace TideCombat
                 return BeginFight(now, visible: true);
             bool absorbVisible = ui.Absorb || frame.PickupPrompt != EchoPrompt.None;
             if ((ui.FPrompt || absorbVisible) && reselectAt < 0)
+            {
                 reselectAt = now;
+                nextAction = Math.Max(nextAction, now + 200);
+            }
             if (!lootSearchFinished)
             {
                 FarmDecision pickup;
@@ -698,6 +849,13 @@ namespace TideCombat
             {
                 ReleaseForward(now);
                 detail = "已靠近结算宝箱，查找「重新挑战」";
+                if (now - reselectAt >= TargetProbeTimeout)
+                {
+                    if (!inRealm)
+                        return Stop("已找到结算交互，但副本状态未确认，交互列表也未识别到「重新挑战」。");
+                    StartRechallengeMenu(now);
+                    return OpenRechallengeMenu(now);
+                }
                 if (ui.FPrompt && !absorbVisible && ui.Rechallenge == RechallengeChoice.Selected)
                 {
                     if (now < nextAction)
@@ -708,15 +866,10 @@ namespace TideCombat
                     confirm.RetryInput = rechallengePresses > 0;
                     return confirm;
                 }
-                bool rewardSelected = !absorbVisible && ui.Rechallenge == RechallengeChoice.RewardSelected;
-                int selectionTimeout = absorbVisible ? TargetProbeTimeout : 3500;
-                if (inRealm && (rewardSelected && now >= nextAction || now - reselectAt >= selectionTimeout))
-                {
-                    StartRechallengeMenu(now);
-                    return OpenRechallengeMenu(now);
-                }
-                if (reselectAt >= 0 && now - reselectAt >= TargetProbeTimeout)
-                    return Stop("已找到结算交互，但副本状态未确认，交互列表也未识别到「重新挑战」。");
+                // Reference polls the interaction for five seconds, scrolling
+                // once and waiting 0.2s before F. Only dispatch F when the new
+                // frame confirms the target row; a known opposite row can
+                // never be clicked/claimed blindly.
                 if (!ui.FPrompt || now < nextAction)
                     return Idle();
                 switch (ui.Rechallenge)
@@ -724,8 +877,10 @@ namespace TideCombat
                     case RechallengeChoice.Above:
                     case RechallengeChoice.Below:
                     case RechallengeChoice.RewardSelected:
-                        nextAction = now + 450;
-                        return Scroll(now, ui.Rechallenge == RechallengeChoice.Above ? -1 : 1);
+                        nextAction = now + 200;
+                        FarmDecision scroll = Scroll(now, ui.Rechallenge == RechallengeChoice.Above ? -1 : 1);
+                        scroll.RechallengeScroll = true;
+                        return scroll;
                     default: return Idle();
                 }
             }
@@ -795,8 +950,17 @@ namespace TideCombat
         private FarmDecision Enter(FarmFrame frame, FarmUi ui, long now)
         {
             detail = entryAfterRechallenge ? "等待重新挑战加载" : "进入挑战";
-            if (now - stepAt > (entered || entryAfterRechallenge ? LoadingTimeout : EntryMenuTimeout))
+            int timeout = entered || entryAfterRechallenge ? LoadingTimeout : EntryMenuTimeout;
+            // Fallacy's reference interaction path waits up to 300s for
+            // combat after F/scroll. Keep this window for a confirmed game
+            // scene even if the prompt was already visible before teleport,
+            // but do not spend it on an unverified/stuck entry menu.
+            bool fallacyWait = specialInteractionWait && options.Boss == FarmBoss.FallacyOfNoReturn && entryOpenedByInteraction &&
+                !entryAfterRechallenge && !entered && PlayableScene(frame.Hud, ui);
+            if (fallacyWait) timeout = 300000;
+            if (now - stepAt > timeout)
             {
+                if (fallacyWait) return BeginFight(now, visible: false);
                 if (entryAfterRechallenge)
                     return Stop("选了「重新挑战」后，未确认下一轮加载。");
                 return Stop(entered ? "没有确认挑战已加载。" : "未找到指定等级或挑战按钮。");
@@ -817,7 +981,16 @@ namespace TideCombat
             if (enemy || entered && frame.HudValid && !ui.Challenge && !ui.Book)
             {
                 if (entered)
+                {
                     inRealm = true;
+                    // Only a configured teleport/entry unconditionally refreshes
+                    // the reference profile outside the initial sampling window.
+                    if (configuredRealmEntry)
+                    {
+                        realmProfile = true;
+                        treatAsNotInRealm = false;
+                    }
+                }
                 return BeginFight(now, visible: enemy);
             }
             if (entryAfterRechallenge && !ui.Challenge && !ui.Book && !ui.Teleport)
@@ -835,6 +1008,9 @@ namespace TideCombat
                     reselectAt = -1;
                     return Rechallenge(frame, frame.HudValid ? frame.Hud : null, ui, now);
                 }
+                if (options.Boss == FarmBoss.NamelessExplorer)
+                    return now - stepAt >= NamelessRechallengeSettleMs && ReadyForRechallengeApproach(frame, ui)
+                        ? StartApproach(now, afterRechallenge: true) : Idle();
             }
             if (requireBossLevel && enterClicks < 2)
             {
@@ -899,6 +1075,11 @@ namespace TideCombat
 
         private void PrepareEnter(long now, bool fromInteraction = false, bool fromRechallenge = false, bool weekly = false)
         {
+            specialInteractionWait = fromInteraction && !fromRechallenge &&
+                (step == Step.BossScript || step == Step.Approach && specialAfterTravel);
+            configuredRealmEntry = step == Step.Teleport || configuredTravelArrival ||
+                options.Teleport && fromInteraction && !fromRechallenge;
+            configuredTravelArrival = configuredWalkCombat = false;
             step = Step.Enter;
             stepAt = now;
             nextAction = !fromInteraction ? now : now + (options.Teleport && !fromRechallenge ? 3000 : 700);
@@ -913,6 +1094,7 @@ namespace TideCombat
         private FarmDecision StartChallenge(HudSnapshot hud, long now)
         {
             BeginFight(now, visible: false);
+            if (Finished) return Idle();
             planner.Observe(hud, now);
             return Key('F', now);
         }
@@ -944,7 +1126,12 @@ namespace TideCombat
         {
             bool visible = hud != null && (hud.EnemyHealth || hud.Locked);
             if (visible)
+            {
                 lastCombatAt = now;
+                cloudEchoHealthLostAt = -1;
+            }
+            else if (hud != null && cloud && cloudEchoHealthLostAt < 0)
+                cloudEchoHealthLostAt = now;
             if (now < waitBeforeCombat)
             {
                 detail = "按配置等待开战";
@@ -956,25 +1143,34 @@ namespace TideCombat
                 if (TryPickup(frame, now, out pickup))
                     return pickup;
             }
-            if (combatSeen && hud != null && !visible && now - lastCombatAt >= 500 &&
+            if (combatSeen && hud != null && !hud.Locked && !planner.BlocksFarmEchoEnd(hud, now) &&
+                (!cloud || !hud.EnemyHealth && cloudEchoHealthLostAt >= 0 && now - cloudEchoHealthLostAt >= 3000) &&
                 frame.Echoes != null && frame.Echoes.Count > 0)
             {
                 dropSeen = true;
+                endedByEcho = true;
                 return FinishBattle(now);
             }
             if (combatSeen && ui.Claim)
                 return FinishBattle(now);
 
             BattleAction action = planner.Observe(frame.Hud ?? new HudSnapshot(), now);
+            if (planner.CombatAborted && !planner.RecoveringAfterBattle)
+                return FinishBattle(now, confirmed: false);
             if (planner.Fighting)
             {
                 combatSeen = true;
                 detail = planner.Status;
             }
-            if (combatSeen && !planner.Fighting && hud != null && !visible && now - lastCombatAt > CombatLostMs)
+            if (combatSeen && !planner.Fighting && !planner.RecoveringAfterBattle && hud != null && !visible && now - lastCombatAt > CombatLostMs)
                 return FinishBattle(now);
             if (!combatSeen && now - waitBeforeCombat > 5000)
-                return Stop("没有检测到战斗。请确认已在 Boss 面前并开始挑战。");
+            {
+                // combat_once(wait_combat_time=5, raise_if_not_found=False)
+                // in OKWW still advances to the pickup/next round phase.
+                RunLog.Warn("刷4C", "本轮未确认战斗，继续检查掉落；不计入击杀");
+                return FinishBattle(now, confirmed: false);
+            }
             if (!combatSeen && hud != null && !hud.Locked && !hud.ChallengePrompt &&
                 action.Kind == ActionKind.Wait && now >= nextTargetAt)
             {
@@ -986,8 +1182,26 @@ namespace TideCombat
 
         private FarmDecision BeginFight(long now, bool visible)
         {
-            if (returningToEncounter) return ReenterAfterRecovery(now);
-            RunLog.Info("刷4C", string.Format("准备战斗 · 轮次={0} · 已见敌人={1} · 等待={2}ms", kills + 1,
+            returningToEncounter = false;
+            namelessFallbackTravel = false;
+            navigationFallbackTravel = false;
+            if (attempts - attemptsBeforeRetry >= options.RepeatCount)
+            {
+                ReleaseForward(now);
+                step = Step.Done;
+                return Idle();
+            }
+            if (configuredTravelArrival && !inRealm)
+            {
+                configuredTravelArrival = false;
+                configuredWalkCombat = true;
+                realmProfile = false;
+                treatAsNotInRealm = true;
+            }
+            attempts++;
+            roundAttemptActive = true;
+            roundKillCounted = false;
+            RunLog.Info("刷4C", string.Format("准备战斗 · 轮次={0} · 已见敌人={1} · 等待={2}ms", attempts,
                 visible, combatWaitMs));
             ReleaseForward(now);
             step = Step.Fight;
@@ -996,6 +1210,8 @@ namespace TideCombat
             lastCombatAt = visible ? now : waitBeforeCombat;
             nextTargetAt = now;
             combatSeen = false;
+            endedByEcho = false;
+            cloudEchoHealthLostAt = -1;
             dropSeen = roundAbsorbed = lootSearchFinished = false;
             pickupReceipt = null;
             pickupAttempts = pickupScrolls = 0;
@@ -1004,10 +1220,16 @@ namespace TideCombat
             return Idle();
         }
 
-        private FarmDecision FinishBattle(long now)
+        private FarmDecision FinishBattle(long now, bool confirmed = true)
         {
             ReleaseForward(now);
-            Kill(now);
+            if (confirmed)
+            {
+                kills++;
+                roundKillCounted = true;
+            }
+            planner.Invalidate(now);
+            entered = false;
             step = Step.Loot;
             stepAt = now;
             nextAction = now;
@@ -1028,11 +1250,13 @@ namespace TideCombat
             FarmDecision pickup;
             if (TryPickup(frame, now, out pickup))
                 return pickup;
-            if (!roundAbsorbed && hud != null && (hud.EnemyHealth || hud.Locked) &&
+            if (!roundAbsorbed && hud != null && (hud.Locked || hud.EnemyHealth && !endedByEcho) &&
                 !ui.Claim && !ui.Challenge && !ui.SkipDialog)
             {
                 ReleaseForward(now);
-                kills--;
+                if (roundKillCounted) kills--;
+                roundKillCounted = false;
+                endedByEcho = false;
                 step = Step.Fight;
                 waitBeforeCombat = nextTargetAt = lastCombatAt = now;
                 combatSeen = false;
@@ -1191,9 +1415,14 @@ namespace TideCombat
         private FarmDecision FinishLoot(long now)
         {
             RunLog.Info("刷4C", string.Format("本轮声骸搜寻结束 · 轮次={0} · 发现掉落={1} · 确认吸收={2} · 吸收尝试={3}",
-                kills, dropSeen, roundAbsorbed, pickupAttempts));
+                attempts, dropSeen, roundAbsorbed, pickupAttempts));
             ReleaseForward(now);
             lootSearchFinished = true;
+            roundAttemptActive = false;
+            // A completed round clears the consecutive recovery budget;
+            // independent later failures may still re-enter the same boss.
+            walkRecoveryRetries = 0;
+            endWaitUntil = now + (bypassEndWait ? 0 : roundAbsorbed && !hasTreasure ? 5000 : 1000);
             step = Step.Claim;
             rechallengePresses = 0;
             usedApproachFallback = false;
@@ -1205,6 +1434,7 @@ namespace TideCombat
         private FarmDecision Claim(FarmFrame frame, HudSnapshot hud, FarmUi ui, long now)
         {
             detail = "关闭领奖 / 重开";
+            bool reachedLimit = attempts - attemptsBeforeRetry >= options.RepeatCount;
             if (now - stepAt > EntryMenuTimeout && (ui.SkipDialog || ui.Claim || ui.FPrompt))
                 return Stop("结算或重开界面未推进，刷取已停止。");
             if (ui.ClaimReward)
@@ -1215,6 +1445,30 @@ namespace TideCombat
                 nextAction = now + 750;
                 return Key(0x1B, now);
             }
+            bool combatReady = hud != null && !ui.Challenge && (hud.Locked || hud.EnemyHealth);
+            if (combatReady) endWaitUntil = Math.Min(endWaitUntil, now);
+            // This is the reference's end-of-round wait, not the timeout
+            // for opening the next menu. Wait even when the interaction is
+            // already visible and even on the final round; an observed combat
+            // ends the wait immediately, but never starts a surplus round.
+            if (now < endWaitUntil)
+            {
+                ReleaseForward(now);
+                detail = "等待下一轮战斗";
+                return Idle();
+            }
+            if (reachedLimit)
+            {
+                ReleaseForward(now);
+                if (ui.Claim)
+                {
+                    if (now < nextAction) return Idle();
+                    nextAction = now + 700;
+                    return Key(0x1B, now);
+                }
+                step = Step.Done;
+                return Idle();
+            }
             if (EntryConfirmationVisible(ui))
             {
                 ReleaseForward(now);
@@ -1224,7 +1478,7 @@ namespace TideCombat
             if (ui.Claim)
             {
                 ReleaseForward(now);
-                if (kills - killsBeforeAttempt < options.RepeatCount && !ui.RechallengeButton.IsEmpty && !ui.ClaimReward)
+                if (!ui.RechallengeButton.IsEmpty && !ui.ClaimReward)
                     return ClickRechallenge(ui.RechallengeButton, now);
                 if (now >= nextAction)
                 {
@@ -1233,14 +1487,7 @@ namespace TideCombat
                 }
                 return Idle();
             }
-            if (kills - killsBeforeAttempt >= options.RepeatCount)
-            {
-                ReleaseForward(now);
-                if (now >= nextAction)
-                    step = Step.Done;
-                return Idle();
-            }
-            if (hud != null && !ui.Challenge && (hud.Locked || hud.EnemyHealth))
+            if (combatReady)
                 return BeginFight(now, visible: true);
             bool absorbVisible = ui.Absorb || frame.PickupPrompt != EchoPrompt.None;
             if ((hud != null && ui.Treasure && !ui.TreasureBox.IsEmpty) ||
@@ -1249,25 +1496,18 @@ namespace TideCombat
             if (ui.FPrompt && !absorbVisible)
             {
                 ReleaseForward(now);
-                if (now >= nextAction)
-                {
-                    nextAction = now + 1200;
-                    if (now - lastScrollAt > 5000)
-                    {
-                        lastScrollAt = now;
-                        return Scroll(now);
-                    }
-                    return Key('F', now);
-                }
-                return Idle();
+                if (hud != null && hud.ChallengePrompt) return StartChallenge(hud, now);
+                return StartRechallenge(frame, hud, ui, now);
             }
             if (ui.Challenge || ui.TeamStart)
             {
                 PrepareEnter(now);
                 return Idle();
             }
-            if (now - stepAt > (bypassEndWait ? 1200 : 2600))
+            if (now >= endWaitUntil)
             {
+                if (HasBossScript && PlayableScene(frame.Hud, ui))
+                    return StartBossScript(now);
                 if (inRealm && PlayableScene(frame.Hud, ui))
                 {
                     StartRechallengeMenu(now);
@@ -1298,10 +1538,10 @@ namespace TideCombat
                 nextAction = now + 1000;
                 return Key(0x1B, now);
             }
-            if (Realm) return Stop("角色仍在副本，无法从当前位置打开回血地图。");
+            if (inRealm) return Stop("角色仍在副本，无法从当前位置打开回血地图。");
             healStep = 0;
             healWaypoints = null;
-            nextHealWaypoint = 0;
+            healPopupSelected = false;
             step = Step.HealTeleport;
             stepAt = nextAction = now;
             return Idle();
@@ -1357,9 +1597,33 @@ namespace TideCombat
         {
             detail = "返回首领位置，寻找战斗或宝箱";
             if (now < nextAction) return Idle();
-            if (hud != null && (hud.Locked || hud.EnemyHealth)) return ReenterAfterRecovery(now);
-            if (ui.Treasure) return StartRechallenge(frame, hud, ui, now);
-            if (now - stepAt >= 12500) return ReenterAfterRecovery(now);
+            if (hud != null && (hud.Locked || hud.EnemyHealth)) return BeginFight(now, visible: true);
+            if (ui.Treasure)
+            {
+                returningToEncounter = false;
+                if (attempts - attemptsBeforeRetry >= options.RepeatCount)
+                {
+                    ReleaseForward(now);
+                    step = Step.Done;
+                    return Idle();
+                }
+                return StartRechallenge(frame, hud, ui, now);
+            }
+            if (now - stepAt >= 12500)
+            {
+                // Returning to the boss location is already confirmed. The
+                // reference continues its next navigation/round even if the
+                // first twelve-second return run did not reveal a combat.
+                if (!WorldReady(frame, ui)) return Stop("回血返回首领后未确认游戏场景。");
+                returningToEncounter = false;
+                if (attempts - attemptsBeforeRetry >= options.RepeatCount)
+                {
+                    ReleaseForward(now);
+                    step = Step.Done;
+                    return Idle();
+                }
+                return StartApproach(now);
+            }
             if (!WorldReady(frame, ui)) return Idle();
             if (movementKey != 'W') return KeyDown('W', now);
             nextAction = now + 500;
@@ -1370,17 +1634,7 @@ namespace TideCombat
         {
             detail = TeleportDetail();
             if (now - stepAt > (teleportStep == TeleportStep.WaitWorld ? LoadingTimeout : 30000))
-            {
-                if (teleportAttempts >= 3)
-                    return Stop("自动传送失败。请手动传送到 Boss 附近，然后重新开始。");
-                teleportAttempts++;
-                guideKeySent = false;
-                teleportStep = TeleportStep.OpenBook;
-                stepAt = now;
-                nextAction = now;
-                scrollClicks = 0;
-                return Idle();
-            }
+                return Stop("自动传送失败。请手动传送到 Boss 附近，然后重新开始。");
             switch (teleportStep)
             {
                 case TeleportStep.OpenBook:
@@ -1505,7 +1759,7 @@ namespace TideCombat
                     if (WorldReady(frame, ui) && now >= nextAction)
                     {
                         teleportAttempts = 0;
-                        ArrivedInWorld(now);
+                        ArrivedInWorld(now, configured: true);
                     }
                     return Idle();
                 default:
@@ -1541,10 +1795,31 @@ namespace TideCombat
 
         private FarmDecision Navigate(double turn, long now)
         {
+            if (navigationPhase != 0)
+            {
+                if (now < navigationReadyAt) return Idle();
+                if (navigationPhase == 1)
+                {
+                    var center = Middle(now, 200);
+                    center.NavigationStage = 2;
+                    return center;
+                }
+                navigationPhase = 0;
+                return KeyDown('W', now);
+            }
             double angle = Math.Abs(turn);
             if (movementKey == 'W' && angle >= 10 && angle <= 80)
                 return new FarmDecision { Request = FarmRequest.AdjustDirection, Key = turn > 0 ? 'D' : 'A' };
             char direction = angle <= 45 ? 'W' : angle > 135 ? 'S' : turn > 0 ? 'D' : 'A';
+            if (direction != 'W')
+            {
+                // The reference first turns the character then centers the
+                // camera; the sustained navigation input is always forward.
+                ReleaseForward(now);
+                var turnKey = Key(direction, now, 50);
+                turnKey.NavigationStage = 1;
+                return turnKey;
+            }
             if (movementKey != direction)
                 return KeyDown(direction, now);
             if (now - lastCameraAt > 1200)
@@ -1648,18 +1923,17 @@ namespace TideCombat
                     if (WorldReady(frame, ui))
                     {
                         healWaypoints = null;
-                        nextHealWaypoint = 0;
                         nextAction = now + 2200;
                         return Key('M', now);
                     }
                     if (healWaypoints == null && ui.HealWaypoints != null && ui.HealWaypoints.Count > 0)
                         healWaypoints = ui.HealWaypoints;
-                    if (healWaypoints != null && nextHealWaypoint < healWaypoints.Count)
+                    if (healWaypoints != null && healWaypoints.Count > 0)
                     {
                         healStep = 2;
                         nextAction = now + 1000;
                         healChoiceDeadline = now + 4000;
-                        return Click(Center(healWaypoints[nextHealWaypoint++]), now);
+                        return Click(Center(healWaypoints[0]), now);
                     }
                     if (healWaypoints != null || now - stepAt > 7000)
                         return Stop("未确认找到可用的回血传送点。");
@@ -1669,9 +1943,12 @@ namespace TideCombat
                     {
                         if (now < healChoiceDeadline)
                             return Idle();
-                        healStep = 1;
+                        if (healPopupSelected || ui.WaypointPopupBox.IsEmpty)
+                            return Stop("最高匹配的回血信标未显示可确认的传送按钮。");
+                        healPopupSelected = true;
                         nextAction = now + 1000;
-                        return Click(new Point((int)(frame.FrameSize.Width * .06), frame.FrameSize.Height / 2), now);
+                        healChoiceDeadline = now + 4000;
+                        return Click(Center(ui.WaypointPopupBox), now);
                     }
                     healStep = 3;
                     return ClickTravel(ui.WaypointTravelBox, now, horizontalOffset: 1.5);
@@ -1826,14 +2103,23 @@ namespace TideCombat
                 ui.ConfirmBox.IsEmpty;
         }
 
-        private void ArrivedInWorld(long now)
+        private void ArrivedInWorld(long now, bool configured = false)
         {
             combatSeen = entered = inRealm = false;
+            configuredTravelArrival = configured;
+            if (configured) realmProfile = false;
+            hasTreasure = false;
             if (returningToEncounter)
             {
                 step = Step.ReturnToEncounter;
                 stepAt = now;
                 nextAction = now + 500;
+                return;
+            }
+            if (bossScriptTravel)
+            {
+                bossScriptTravel = false;
+                StartBossScript(now, afterTravel: true);
                 return;
             }
             StartApproach(now, afterTravel: true);
@@ -1857,6 +2143,7 @@ namespace TideCombat
 
         private FarmDecision OpenBossBook(long now)
         {
+            configuredTravelArrival = configuredWalkCombat = false;
             step = Step.Teleport;
             guideKeySent = false;
             teleportStep = TeleportStep.OpenBook;
@@ -1933,23 +2220,64 @@ namespace TideCombat
             return movementKey == direction ? Idle() : KeyDown(direction, now);
         }
 
-        private void Kill(long now)
-        {
-            kills++;
-            planner.Invalidate(now);
-            entered = false;
-        }
-
         internal Farm4C RestartAfterPopup(Func<bool> dismiss)
         {
             if (step != Step.Failed || retries >= 3 || !dismiss()) return null;
             var next = new Farm4C(settings, options, cloud, clock);
             next.retries = retries + 1;
-            next.killsBeforeAttempt = next.kills = kills;
+            next.kills = kills;
+            next.attemptsBeforeRetry = next.attempts = attempts;
             next.echoes = echoes;
             next.EchoesPerHour = EchoesPerHour;
             if (echoes > 0) next.startedAt = startedAt;
             RunLog.Info("刷4C", "弹窗已处理，开始第 " + next.retries + "/3 次重试 · " + Failure);
+            return next;
+        }
+
+        // A state-machine failure after walking directly into combat from a
+        // configured teleport may be retried at that destination. Do not
+        // swallow input/capture integrity errors; those never take this path.
+        internal Farm4C RestartAfterWalkInFailure()
+        {
+            if (step != Step.Failed || Failure == "云游戏显示断线弹窗。") return null;
+            return RestartConfiguredWalk(Failure);
+        }
+
+        internal bool ConfiguredWalkCombat { get { return configuredWalkCombat; } }
+
+        // The shipped managed ORT library exposes its execution code in the
+        // message prefix (no public ErrorCode property). Require the actual
+        // typed exception from an already-loaded detector, and allow only the
+        // engine/runtime execution codes. Invalid model/argument/file errors,
+        // unrelated exceptions and cancellation are not recoverable here.
+        internal static bool IsRecoverableDetectorExecutionFailure(Exception error)
+        {
+            var runtime = error as Microsoft.ML.OnnxRuntime.OnnxRuntimeException;
+            return runtime != null &&
+                (runtime.Message.StartsWith("[ErrorCode:EngineError] ", StringComparison.Ordinal) ||
+                 runtime.Message.StartsWith("[ErrorCode:RuntimeException] ", StringComparison.Ordinal));
+        }
+
+        internal Farm4C RestartAfterWalkInExecutionFailure(Exception error, bool sameRoute, bool cancelled)
+        {
+            if (Finished || !sameRoute || cancelled || !IsRecoverableDetectorExecutionFailure(error)) return null;
+            return RestartConfiguredWalk(error.Message);
+        }
+
+        private Farm4C RestartConfiguredWalk(string reason)
+        {
+            if (!options.Teleport || !configuredWalkCombat || walkRecoveryRetries >= 3 ||
+                attempts - attemptsBeforeRetry >= options.RepeatCount) return null;
+            var next = new Farm4C(settings, options, cloud, clock);
+            next.walkRecoveryRetries = walkRecoveryRetries + 1;
+            next.retries = retries;
+            next.kills = kills;
+            next.attempts = attempts;
+            next.attemptsBeforeRetry = attemptsBeforeRetry;
+            next.echoes = echoes;
+            next.EchoesPerHour = EchoesPerHour;
+            next.startedAt = startedAt;
+            RunLog.Warn("刷4C", "走入首领战斗后的可恢复失败，重新传送 · " + reason);
             return next;
         }
 

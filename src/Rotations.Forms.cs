@@ -257,8 +257,9 @@ namespace TideCombat
 
         internal static IEnumerable<Move> Rover(TurnContext c)
         {
+            c.Memory.RoverForm = c.Memory.RoverForm ?? c.Hud.RoverForm ?? "RoverSpectro";
             if (!c.Intro) yield return Move.Wait(10);
-            CharacterKit form = CharacterRoster.Find(c.Hud.RoverForm ?? c.Memory.RoverForm);
+            CharacterKit form = CharacterRoster.Find(c.Memory.RoverForm);
             IEnumerable<Move> actions = form == null || form.Id == "Rover" ? RoverBasic(c) : form.Play(c);
             foreach (Move action in actions) yield return action;
         }

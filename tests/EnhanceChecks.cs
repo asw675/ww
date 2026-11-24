@@ -76,7 +76,9 @@ namespace TideCombat
             Require(stats.Count == 2, "应解析出两条词条");
             Require(stats[0].Name == "暴击" && Math.Abs(stats[0].Value - 7.5) < 1e-6, "暴击数值解析错误");
             Require(stats[1].Name == "攻击" && Math.Abs(stats[1].Value - 30) < 1e-6, "攻击数值解析错误");
-            var traditional = Rows("暴擊傷害", "１４．８％", "共鳴效率", "８．４％");
+            bool windows = Environment.OSVersion.Platform == PlatformID.Win32NT;
+            var traditional = Rows(windows ? "暴擊傷害" : "暴击伤害", "１４．８％",
+                windows ? "共鳴效率" : "共鸣效率", "８．４％");
             stats = EchoRules.Parse(traditional.Lines);
             Require(stats.Count == 2 && stats[0].Name == "暴击伤害" && stats[0].Value == 14.8 &&
                 stats[1].Name == "共鸣效率", "繁体词条与全角数值应按简体规则判定");
@@ -132,10 +134,11 @@ namespace TideCombat
             }
             finally { File.Delete(path); }
 
+            bool windows = Environment.OSVersion.Platform == PlatformID.Win32NT;
             var config = new Dictionary<string, object>
             {
                 { "首条双爆>=", 8.7 }, { "Pause after Success", true },
-                { "有效词条", new object[] { "暴擊傷害", "共鳴效率" } }
+                { "有效词条", new object[] { windows ? "暴擊傷害" : "暴击伤害", windows ? "共鳴效率" : "共鸣效率" } }
             };
             EnhanceOptions account = AccountConfig.EnhanceForAccount(settings.Enhance, config);
             Require(account.FirstCritMinimum == 8.7 && account.PauseAfterSuccess &&
@@ -231,7 +234,15 @@ namespace TideCombat
 
         internal static void Flow()
         {
+            Require(EnhanceLoop.EvidenceCrop("success") == new Rectangle(144, 81, 448, 414) &&
+                EnhanceLoop.EvidenceCrop("failed") == new Rectangle(144, 81, 448, 414) &&
+                EnhanceLoop.EvidenceName("success", 9, 5, 3, 6, null) == "3" &&
+                EnhanceLoop.EvidenceName("failed", 9, 2, 3, 6, "不合格:数值/等级") == "6_不合格数值等级",
+                "成功/失败截图使用原版编号及裁切区域，失败原因不能成为路径");
             var task = new EchoEnhanceTask(EnhanceOptions.Defaults());
+            Require(task.Observe(new EnhanceFrame(), 1000).Action == EnhanceAction.None && task.Failure != null,
+                "启动时首个背包识别没有培养按钮应按原版立即报错");
+            task = new EchoEnhanceTask(EnhanceOptions.Defaults());
             task.Observe(Bag(true), 1000);
             EnhanceDecision click = task.Observe(Bag(true), 1100);
             Require(click.Action == EnhanceAction.Click && click.Point == new Point(208, 189),
@@ -339,18 +350,20 @@ namespace TideCombat
             EnhanceDecision first = Send(task, bag, 1800);
             Require(first.Label == "打开培养" && first.UseWindowMessage && first.SettleMs > 0,
                 "培养入口应优先使用有悬停等待的菜单消息");
-            Require(task.Observe(bag, 2400).Action == EnhanceAction.None &&
-                task.Observe(bag, 3450).Action == EnhanceAction.None,
-                "发出培养点击后应等待，并重新确认背包仍在");
-            task.Observe(new EnhanceFrame(), 3700);
-            Require(task.Observe(bag, 3950).Action == EnhanceAction.None,
-                "背包识别中断后应重新确认两次");
-            EnhanceDecision retry = Send(task, bag, 4210);
+            Require(task.Observe(bag, 2299).Action == EnhanceAction.None,
+                "发出培养点击后应按原版等 0.5 秒");
+            EnhanceDecision retry = Send(task, bag, 2300);
             Require(retry.Label == "重试打开培养" && !retry.UseWindowMessage && retry.SettleMs > 0,
-                "培养仍停在背包时只补点一次，本地前台补点使用系统鼠标");
-            Require(task.Observe(bag, 6300).Action == EnhanceAction.None &&
+                "已确认同一零级卡和培养按钮仍在时重试，本地前台补点使用系统鼠标");
+            Require(task.Observe(new EnhanceFrame(), 2850).Action == EnhanceAction.None &&
+                task.Observe(changed, 3100).Action == EnhanceAction.None,
+                "背包或零级候选证据消失时不得点击");
+            Require(Send(task, bag, 3350).Label == "重试打开培养" &&
+                Send(task, bag, 3850).Label == "重试打开培养",
+                "与原版一致，持续确认按钮/目标时在 5 秒预算内可继续重试");
+            Require(Send(task, bag, 6000).Label == "重试打开培养" &&
                 task.Observe(bag, 6701).Action == EnhanceAction.None && task.Failure != null,
-                "培养始终未打开时应记录失败，不发送第三次点击");
+                "培养始终未打开且超过固定 5 秒预算时应停止");
         }
 
         internal static void TimingAndMarks()
@@ -379,9 +392,11 @@ namespace TideCombat
                 ConfirmBox = new Rectangle(1079, 628, 57, 35)
             };
             Require(task.Observe(overflow, 3500).Action == EnhanceAction.None, "调谐后需要等待弹窗稳定");
-            Require(Send(task, overflow, 4730).Point == new Point(709, 572), "应先操作已识别的复选框");
-            Require(task.Observe(overflow, 5000).Action == EnhanceAction.None, "操作弹窗时不能连点");
-            Require(Send(task, overflow, 5300).Point == new Point(1107, 645), "勾选后应点击真正的确认按钮");
+            Require(task.Observe(overflow, 4730).Action == EnhanceAction.None &&
+                task.Observe(overflow, 5229).Action == EnhanceAction.None, "原版识别弹窗后先等待0.5秒");
+            Require(Send(task, overflow, 5230).Point == new Point(709, 572), "应先操作已识别的复选框");
+            Require(task.Observe(overflow, 5500).Action == EnhanceAction.None, "操作弹窗时不能连点");
+            Require(Send(task, overflow, 5730).Point == new Point(1107, 645), "勾选0.5秒后应点击真正的确认按钮");
             Require(task.Observe(overflow, 6600).Action == EnhanceAction.None, "未消失的确认弹窗不能重复提交");
             task.Observe(new EnhanceFrame(), 8700);
             EnhanceFrame passing = Rows("暴击", "7.5%", "暴击伤害", "15%", "攻击", "9%", "防御", "40", "生命", "100");
@@ -482,21 +497,22 @@ namespace TideCombat
             EnhanceDecision place = Send(task, empty, 2500);
             Require(place.Label == "阶段放入" && place.UseWindowMessage && place.SettleMs > 0,
                 "阶段放入首击须在前台和后台都优先使用窗口消息");
-            Require(task.Observe(empty, 3245).Action == EnhanceAction.None,
-                "点击约 0.75 秒后的第一帧零材料不能触发第二次放入");
+            Require(task.Observe(empty, 2800).Action == EnhanceAction.None,
+                "点击后按原版等待0.3秒，第一帧零材料仍需复核");
+            Require(Send(task, empty, 3050).Label == "再次阶段放入" &&
+                task.Observe(empty, 3350).Action == EnhanceAction.None &&
+                Send(task, empty, 3600).Label == "再次阶段放入",
+                "在固定5秒预算内，连续确认仍为空可按原版节奏重复放入");
             Require(task.Observe(loaded, 3907).Action == EnhanceAction.None &&
                 task.Scan == EnhanceScan.EnhanceButtons,
                 "读到正数就应该等待强化按钮，即使阶段放入还没消失");
             Require(task.Observe(empty, 4500).Action == EnhanceAction.None,
                 "等待调谐时单帧归零不能触发重试");
-            EnhanceDecision placeAgain = Send(task, empty, 5150);
-            Require(placeAgain.Label == "再次阶段放入" && !placeAgain.UseWindowMessage &&
-                task.Scan == EnhanceScan.StageInsert, "连续确认材料归零后才可用前台系统鼠标补点");
-            Require(task.Observe(empty, 7100).Action == EnhanceAction.None &&
-                task.Observe(empty, 7650).Action == EnhanceAction.None,
-                "一次补做后不能继续重复点击阶段放入");
-            Require(task.Observe(loaded, 8100).Action == EnhanceAction.None, "再次放入后须确认材料已预选");
-            EnhanceDecision submit = Send(task, Tune(), 8650);
+            Require(task.Observe(empty, 5150).Action == EnhanceAction.None &&
+                task.Scan == EnhanceScan.EnhanceButtons, "已退出阶段放入循环后不重新进入另一轮放入");
+            var ready = Tune();
+            ready.MaterialCount = 2;
+            EnhanceDecision submit = Send(task, ready, 7650);
             Require(submit.Label == "强化并调谐" && submit.UseWindowMessage && task.Round == 0,
                 "确认材料后用同一路径点击组合按钮，投递时不能计档");
 
@@ -509,6 +525,8 @@ namespace TideCombat
                 "未能连续读到零材料时继续等待");
             Require(Send(task, empty, 6000).Label == "再次阶段放入",
                 "首个点击没有生效时，连续两帧确认后仍可以补点");
+            Require(task.Observe(empty, 7350).Action == EnhanceAction.None && task.Failure != null,
+                "重试不可重置阶段放入首个5秒预算");
 
             task = new EchoEnhanceTask(EnhanceOptions.Defaults());
             GoToStage(task);
@@ -521,9 +539,11 @@ namespace TideCombat
                 "未由工具放入的多档预选不能自动提交");
             preselected.PreviewLevel = 5;
             preselected.TargetStatCount = 1;
-            Require(Send(task, preselected, 2900).Label == "强化并调谐" &&
-                task.Scan == EnhanceScan.Dialog && task.Round == 0,
-                "画面已确认只预选下一档时可直接提交，仍须等到确认调谐结果");
+            Require(task.Observe(preselected, 2900).Action == EnhanceAction.None &&
+                task.Scan == EnhanceScan.StageInsert && task.Round == 0,
+                "参考每档必须实际识别并完成阶段放入，不自动消耗预选材料");
+            Require(task.Observe(preselected, 7500).Action == EnhanceAction.None && task.Failure != null,
+                "始终没有完成本档阶段放入时应停止而非提交预选材料");
         }
 
         internal static void SubmissionConfirmation()
@@ -535,18 +555,17 @@ namespace TideCombat
             GoToDialog(task, preview);
             Require(task.Round == 0 && task.Observe(preview, 4700).Action == EnhanceAction.None,
                 "第一次点击已投递时应等待游戏响应，不能增加档位");
-            Require(task.Observe(preview, 5400).Action == EnhanceAction.ActivateGame && task.Round == 0,
-                "自动模式下连续看到同一预览才可请求前台重试");
+            Require(task.Observe(preview, 5400).Action == EnhanceAction.None && task.Round == 0,
+                "持续看到同一预览时不切到前台重发消耗材料操作");
             preview.AutoBackground = false;
             Require(task.Observe(preview, 6000).Action == EnhanceAction.None,
-                "等窗口切换后再核对预览");
-            EnhanceDecision retry = Send(task, preview, 6400);
-            Require(retry.Label == "重试强化并调谐" && !retry.UseWindowMessage && retry.SettleMs > 0 && task.Round == 0,
-                "前台确认仍是同一预览后只补发一次");
+                "切到前台后仍须等待本次提交结果");
+            Require(task.Observe(preview, 6400).Action == EnhanceAction.None && task.Round == 0,
+                "即使确认同一预览也不能重复提交；参考每档仅提交一次");
             task.Observe(new EnhanceFrame(), 10000);
             task.Observe(Rows("暴击", "7.5%"), 10400);
             Require(task.Round == 1 && task.LastStage.Round == 1,
-                "连续识别到新增词条时才确认一档强化");
+                "迟到的新增词条仍可确认一档强化");
 
             task = new EchoEnhanceTask(EnhanceOptions.Defaults());
             preview.AutoBackground = true;
@@ -569,12 +588,12 @@ namespace TideCombat
             preview.AutoBackground = false;
             GoToDialog(task, preview);
             task.Observe(preview, 4700);
-            Require(Send(task, preview, 5400).Label == "重试强化并调谐", "固定窗口模式也允许补发一次");
+            Require(task.Observe(preview, 5400).Action == EnhanceAction.None, "固定窗口模式也不得重复提交");
             Require(task.Observe(preview, 7800).Action == EnhanceAction.None &&
                 task.Observe(preview, 8500).Action == EnhanceAction.None &&
                 task.Observe(preview, 18500).Action == EnhanceAction.None &&
                 task.Failure != null && task.Failure.Contains("仍停在强化预览") && task.Round == 0,
-                "游戏持续停在同一预览时应报告提交失败，不可第三次点击");
+                "游戏持续停在同一预览时应报告提交失败，不可重复点击");
         }
 
         internal static void StageProgress()
@@ -624,6 +643,7 @@ namespace TideCombat
 
         internal static void ResultCloseConfirmation()
         {
+            ResultCloseOcrCadence();
             var task = new EchoEnhanceTask(EnhanceOptions.Defaults());
             GoToDialog(task);
             var popup = new EnhanceFrame
@@ -643,10 +663,60 @@ namespace TideCombat
             var confirmed = Rows("暴击", "7.5%");
             task.Observe(confirmed, 11800);
             Require(task.Round == 0, "结果页短暂消失时仍应等待");
-            task.Observe(confirmed, 13150);
+            task.Observe(confirmed, 13200);
             task.Observe(confirmed, 13500);
             Require(task.Round == 1 && task.Scan == EnhanceScan.StageInsert,
                 "确认弹窗退回且新增词条已出现后才能进入下一档");
+        }
+
+        private static void ResultCloseOcrCadence()
+        {
+            var popup = new EnhanceFrame { DismissBox = new Rectangle(720, 822, 158, 26) };
+            var confirmed = Rows("暴击", "7.5%");
+            var task = new EchoEnhanceTask(EnhanceOptions.Defaults());
+            GoToDialog(task);
+            EnhanceDecision dismiss = task.Observe(popup, 6000);
+            Require(dismiss.Label == "关闭调谐结果" && dismiss.Sent != null, "快速关闭结果需要实际投递回执");
+            dismiss.Sent(6100); // The input takes 100ms to send; count from its actual completion.
+            foreach (long time in new long[] { 7099, 7100, 8100, 9099, 9199 })
+                Require(task.Observe(confirmed, time).Action == EnhanceAction.None &&
+                    task.Round == 0 && task.Scan == EnhanceScan.Dialog,
+                    "即使立即关闭且词条完整，实际投递后1s+2s+0.1s之前还不能读词条");
+            Require(task.Observe(confirmed, 9200).Action == EnhanceAction.None &&
+                task.Round == 0 && task.Scan == EnhanceScan.Stats, "投递后3100ms才切换到正式词条OCR");
+            task.Observe(confirmed, 9201);
+            Require(task.Round == 1 && task.Scan == EnhanceScan.StageInsert, "完整等待后仍须确认新增词条才继续");
+
+            foreach (bool separateResult in new[] { false, true })
+            {
+                task = new EchoEnhanceTask(EnhanceOptions.Defaults());
+                GoToDialog(task);
+                var overflow = new EnhanceFrame
+                {
+                    OverflowDialog = true, CheckBox = new Rectangle(701, 564, 16, 16),
+                    ConfirmBox = new Rectangle(1079, 628, 57, 35)
+                };
+                Require(task.Observe(overflow, 4800).Action == EnhanceAction.None &&
+                    Send(task, overflow, 5300).Label == "勾选本次登录不再提示", "溢出仍须先确认复选框");
+                EnhanceDecision confirmation = task.Observe(overflow, 5800);
+                Require(confirmation.Label == "确认材料溢出提示" && confirmation.Sent != null,
+                    "溢出确认不能跳过实际按钮投递");
+                confirmation.Sent(5900);
+                long readyAt = 8200; // .2s after overflow confirmation + 2s no-dialog OCR + .1s.
+                if (separateResult)
+                {
+                    dismiss = task.Observe(popup, 6100);
+                    Require(dismiss.Label == "关闭调谐结果" && dismiss.Sent != null, "溢出后调谐提示仍单独关闭");
+                    dismiss.Sent(6200);
+                    readyAt = 9300; // Restart the full wait from the later result-closing input.
+                }
+                Require(task.Observe(confirmed, readyAt - 1).Action == EnhanceAction.None &&
+                    task.Round == 0 && task.Scan == EnhanceScan.Dialog, "溢出或后续结果关闭后仍须完整静默等待");
+                task.Observe(confirmed, readyAt);
+                Require(task.Scan == EnhanceScan.Stats && task.Round == 0, "等待到期才切换词条OCR");
+                task.Observe(confirmed, readyAt + 1);
+                Require(task.Round == 1 && task.Scan == EnhanceScan.StageInsert, "溢出后的真实新增词条才允许继续");
+            }
         }
 
         internal static void ResultCloseRetry()
@@ -655,6 +725,8 @@ namespace TideCombat
             {
                 DismissBox = new Rectangle(720, 822, 158, 26), Background = true, AutoBackground = true
             };
+            // Even complete-looking stat text must not advance while the result dialog is still visible.
+            popup.Lines.AddRange(Rows("暴击", "7.5%").Lines);
             var task = new EchoEnhanceTask(EnhanceOptions.Defaults());
             GoToDialog(task);
             Send(task, popup, 6000);
@@ -715,15 +787,18 @@ namespace TideCombat
             confirmed.CurrentLevel = 5;
             task.Observe(confirmed, 9100);
             Require(task.Round == 0, "关闭结果后仍应等候剩余弹窗");
-            task.Observe(confirmed, 9950);
+            Require(task.Observe(confirmed, 10999).Action == EnhanceAction.None && task.Round == 0,
+                "已进入词条阶段后的迟到结果也必须从最后一次关闭等待3100ms");
+            task.Observe(confirmed, 11000);
             Require(task.Round == 1 && task.Scan == EnhanceScan.StageInsert,
                 "弹窗退出后的正式等级和新词条应允许下一档");
-            Require(Send(task, popup, 10400).Label == "关闭调谐结果" && task.Round == 1,
+            Require(Send(task, popup, 11500).Label == "关闭调谐结果" && task.Round == 1,
                 "下一档准备期间还能处理迟到的结果页");
-            Require(task.Observe(Stage(), 11600).Action == EnhanceAction.None &&
-                task.Observe(popup, 11700).Action == EnhanceAction.None,
+            Require(task.Observe(Stage(), 12700).Action == EnhanceAction.None &&
+                task.Observe(popup, 12800).Action == EnhanceAction.None,
                 "迟到弹窗短暂漏读时，不能开始下一档或重复关闭");
-            Require(Send(task, Stage(), 13750).Label == "阶段放入", "确认结果页关闭后应重新进入阶段放入");
+            Require(task.Observe(Stage(), 14899).Action == EnhanceAction.None &&
+                Send(task, Stage(), 14900).Label == "阶段放入", "确认结果完全关闭并静默后才重新进入阶段放入");
         }
 
         internal static void ReplayReference(string root)

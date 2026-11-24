@@ -12,8 +12,8 @@ namespace TideCombat
         private int selectedCategory;
         private readonly NumericUpDown bossIndex = Number(1, 20, 1);
         private readonly ComboBox level = Theme.Select("50", "60", "70", "80", "90");
-        private readonly NumericUpDown repeat = Number(1, 100000, 10000);
-        private readonly NumericUpDown wait = Number(0, 60, 0);
+        private readonly NumericUpDown repeat = Number(0, int.MaxValue, 10000);
+        private readonly NumericUpDown wait = Number(0, int.MaxValue, 0);
         private readonly ComboBox pickup = Theme.Select("向前走", "绕圈", "YOLO 检测");
         private readonly ComboBox bossProfile = Theme.Select("通用 / 其它", "海之女", "无归的谬误", "异构武装",
             "罗蕾莱", "荣耀狮像", "梦魇·赫卡忒", "芬里科", "无铭探索者");
@@ -86,8 +86,8 @@ namespace TideCombat
                 ShowCategory();
             };
             level.SelectedIndex = Math.Max(0, Math.Min(4, (options.BossLevel - 50) / 10));
-            repeat.Value = Math.Max(1, Math.Min(100000, options.RepeatCount));
-            wait.Value = Math.Max(0, Math.Min(60, options.WaitSeconds));
+            repeat.Value = Math.Max(0, options.RepeatCount);
+            wait.Value = Math.Max(0, options.WaitSeconds);
             pickup.SelectedIndex = (int)options.Pickup;
             bossProfile.SelectedIndex = (int)options.Boss;
             healer.Checked = options.SwitchHealer;

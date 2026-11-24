@@ -13,7 +13,10 @@ namespace TideCombat
         private readonly CheckBox travel = Toggle("自动快速旅行");
         private readonly CheckBox cursor = Toggle("恢复后台游戏导致的跳鼠");
         private readonly CheckBox monthly = Toggle("定时检查月卡");
-        private readonly NumericUpDown hour = new NumericUpDown { Minimum = 0, Maximum = 23, Width = 50 };
+        private readonly CheckBox startup = Toggle("应用启动时启用普通辅助（登录需手动启动）");
+        private readonly CheckBox startupCloud = Toggle("允许已开启的专用后台云游戏参与启动辅助");
+        private readonly CheckBox startupBattle = Toggle("应用启动时同时运行自动战斗（明确授权）");
+        private readonly NumericUpDown hour = new NumericUpDown { Minimum = 1, Maximum = 24, Width = 50 };
         private readonly TextBox allow = new TextBox { Width = 390 };
         private readonly TextBox block = new TextBox { Width = 390 };
 
@@ -28,23 +31,27 @@ namespace TideCombat
             StartPosition = FormStartPosition.CenterParent;
             FormBorderStyle = FormBorderStyle.FixedDialog;
             MaximizeBox = MinimizeBox = false;
-            ClientSize = new Size(455, 410);
+            ClientSize = new Size(455, 506);
             var layout = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.TopDown,
                 WrapContents = false, Padding = new Padding(16, 12, 16, 12) };
             Controls.Add(layout);
-            layout.Controls.Add(Theme.Text("勾选后随战斗运行，也可在任务菜单单独启动后台辅助。", Theme.Muted));
+            layout.Controls.Add(Theme.Text("可随应用或战斗运行，并可在任务菜单独立启动。", Theme.Muted));
             pickup.Checked = options.PickUp;
             skip.Checked = options.SkipDialog;
             login.Checked = options.Login;
             travel.Checked = options.Travel;
             cursor.Checked = options.RestoreCursor;
+            startup.Checked = options.StartsAutomatically;
+            startupCloud.Checked = options.StartManagedCloudWithUtility == true;
+            startupBattle.Checked = options.StartBattleWithUtility == true;
             monthly.Checked = options.CheckMonthlyCard ?? true;
-            hour.Value = Math.Max(0, Math.Min(23, options.MonthlyCardHour ?? 4));
+            int normalizedHour = MonthlyCardSchedule.NormalizeHour(options.MonthlyCardHour ?? 4);
+            hour.Value = normalizedHour == 0 ? 24 : normalizedHour;
             var schedule = Theme.Row();
-            schedule.Controls.AddRange(new Control[] { monthly, Theme.Text("本地时间（小时）", Theme.Muted), hour });
+            schedule.Controls.AddRange(new Control[] { monthly, Theme.Text("本地时间（24=零点）", Theme.Muted), hour });
             allow.Text = string.Join("，", options.PickUpAllow ?? WorldAssistOptions.DefaultAllow);
             block.Text = string.Join("，", options.PickUpBlock ?? WorldAssistOptions.DefaultBlock);
-            layout.Controls.AddRange(new Control[] { pickup, skip, login, travel, cursor, schedule,
+            layout.Controls.AddRange(new Control[] { startup, startupCloud, startupBattle, pickup, skip, login, travel, cursor, schedule,
                 Theme.Text("允许的对话交互（逗号分隔）", Theme.Muted), allow,
                 Theme.Text("禁止拾取的文字（逗号分隔）", Theme.Muted), block });
             var actions = new FlowLayoutPanel { Width = 390, AutoSize = true, FlowDirection = FlowDirection.RightToLeft };
@@ -64,6 +71,8 @@ namespace TideCombat
             {
                 return new WorldAssistOptions { PickUp = pickup.Checked, SkipDialog = skip.Checked,
                     Login = login.Checked, Travel = travel.Checked, RestoreCursor = cursor.Checked,
+                    StartWithUtility = startup.Checked,
+                    StartManagedCloudWithUtility = startupCloud.Checked, StartBattleWithUtility = startupBattle.Checked,
                     CheckMonthlyCard = monthly.Checked, MonthlyCardHour = (int)hour.Value,
                     PickUpAllow = Terms(allow.Text), PickUpBlock = Terms(block.Text) };
             }

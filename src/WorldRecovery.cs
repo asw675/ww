@@ -112,53 +112,62 @@ namespace TideCombat
         {
             var monsters = new GuidebookNavigation(world, report, GuideTab.Monsters);
             if (!monsters.Open(EnsureWorld)) return false;
-            if (!world.Click(.13, .14)) return false;
-            world.Sleep(500);
-            if (!world.TypeText(RecoveryBoss(world.Window.Language))) return false;
-            world.Sleep(300);
-            if (!world.Click(.20, .14)) return false;
-            world.Sleep(300);
-            if (!world.Key((char)13)) return false;
-            world.Sleep(500);
-            if (!world.Click(.13, .24)) return false;
-            world.Sleep(500);
-            if (!world.Click(.89, .92)) return false;
-            world.Sleep(1000);
+            int route = world.InputRouteVersion;
+            Func<int, bool> delay = milliseconds =>
+            {
+                if (world.Token.WaitHandle.WaitOne(milliseconds)) return false;
+                // During a loading frame, the next observation may still succeed on the same route.
+                world.Tick();
+                return world.InputRouteVersion == route;
+            };
+            Func<double, double, bool> click = (x, y) => world.Tick() && world.ClickOnRoute(
+                new Point((int)(world.Frame.Width * x), (int)(world.Frame.Height * y)), route);
+            Func<Func<bool>, int, bool> wait = (condition, timeout) => world.WaitUntil(
+                () => world.InputRouteVersion != route || condition(), timeout) && world.InputRouteVersion == route;
+
+            if (!click(.13, .14) || !delay(500)) return false;
+            if (!world.Tick() || world.InputRouteVersion != route ||
+                !world.Input.TypeText(RecoveryBoss(world.Window.Language), world.Token) || !delay(300)) return false;
+            if (!click(.20, .14) || !delay(300)) return false;
+            if (!world.Key((char)13, route: route) || !delay(500)) return false;
+            if (!click(.13, .24) || !delay(500)) return false;
+            if (!click(.89, .92) || !delay(1000)) return false;
+
             List<Rectangle> points = null;
             Func<bool> mapOpen = () =>
             {
                 Rectangle sidebar;
                 bool selected;
                 if (world.VerifiedWorld || world.Vision.InspectGuidebook(world.Frame, out sidebar, out selected)) return false;
-                points = world.Vision.FindWaypoints(world.Frame);
+                points = world.Vision.FindWaypoints(world.Frame, confidenceOrder: true);
                 return points.Count > 0;
             };
-            if (!world.WaitUntil(mapOpen, 4000))
+            if (!wait(mapOpen, 4000))
             {
                 // A late map frame must never receive a second press on the Detect position.
                 Rectangle tab;
                 bool selected;
-                if (!world.Tick() || !world.Vision.InspectSidebarGuidebook(world.Frame, "gray_book_all_monsters", out tab, out selected) ||
-                    !selected || !world.Click(.89, .92)) return false;
-                world.Sleep(1000);
-                if (!world.WaitUntil(mapOpen, 4000)) return false;
+                if (!world.Tick() || world.InputRouteVersion != route ||
+                    !world.Vision.InspectSidebarGuidebook(world.Frame, "gray_book_all_monsters", out tab, out selected) ||
+                    !selected || !click(.89, .92) || !delay(1000) || !wait(mapOpen, 4000)) return false;
             }
-            foreach (Rectangle point in points)
+
+            // Detect may reveal waypoints before the map finishes centering on the boss.
+            if (!delay(2000) || !wait(mapOpen, 1000)) return false;
+            Rectangle point = points[0];
+            if (!world.ClickOnRoute(point, route) || !delay(1000)) return false;
+            Rectangle travel = Rectangle.Empty;
+            if (!wait(() => world.FindNear("gray_teleport", .76, out travel), 3000))
             {
-                if (!world.Click(point)) return false;
-                world.Sleep(1000);
-                Rectangle travel = Rectangle.Empty;
-                if (world.WaitUntil(() => world.FindNear("gray_teleport", .76, out travel), 3000))
-                {
-                    if (!world.Click(new Point(travel.X + 3 * travel.Width / 2, travel.Y + travel.Height / 2))) return false;
-                    if (!world.WaitUntil(() => world.VerifiedWorld && !world.InRealm, 20000)) return false;
-                    world.Sleep(2000);
-                    return true;
-                }
-                if (!world.Click(.06, .5)) return false;
-                world.Sleep(1000);
+                Rectangle popup;
+                if (!world.Tick() || world.InputRouteVersion != route || world.VerifiedWorld ||
+                    !world.Vision.FindWaypointPopup(world.Frame, out popup) || !world.ClickOnRoute(popup, route) ||
+                    !delay(1000) || !wait(() => world.FindNear("gray_teleport", .76, out travel), 3000)) return false;
             }
-            return false;
+            var destination = new Point(travel.X + 3 * travel.Width / 2, travel.Y + travel.Height / 2);
+            if (!world.ClickOnRoute(destination, route)) return false;
+            if (!wait(() => world.VerifiedWorld && !world.InRealm, 20000)) return false;
+            return delay(2000);
         }
 
         internal bool EnsureWorld()

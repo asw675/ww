@@ -1,3 +1,5 @@
+// Independent C# geometry for the OnnxOCR 0.0.1 DBPostProcess behavior.
+// Reference: Copyright (c) 2020 PaddlePaddle Authors, Apache-2.0.
 using System;
 using System.Collections.Generic;
 using System.Drawing;
@@ -61,7 +63,7 @@ namespace TideCombat
             }
         }
 
-        internal static bool Fit(List<Point> pixels, out PointF[] corners)
+        internal static bool Fit(List<Point> pixels, out PointF[] corners, double minimumShortSide = 3)
         {
             corners = null;
             if (pixels.Count < 3) return false;
@@ -119,7 +121,7 @@ namespace TideCombat
                 bestHeight = (float)Math.Sqrt((double)vx * vx + (double)vy * vy);
                 angle = (float)((float)Math.Atan2(uy, ux) * 180 / Math.PI);
             }
-            if (Math.Min(bestWidth, bestHeight) < 3) return false;
+            if (Math.Min(bestWidth, bestHeight) < minimumShortSide) return false;
             double radians = angle * (Math.PI / 180);
             float cos = (float)Math.Cos(radians) * .5f, sin = (float)Math.Sin(radians) * .5f;
             PointF first = new PointF(cx - sin * bestHeight - cos * bestWidth, cy + cos * bestHeight - sin * bestWidth);
@@ -131,24 +133,50 @@ namespace TideCombat
 
         internal static double Score(Tensor<float> map, int width, int height, PointF[] corners)
         {
+            int x0 = Math.Max(0, (int)Math.Floor(corners.Min(p => p.X)));
+            int x1 = Math.Min(width - 1, (int)Math.Ceiling(corners.Max(p => p.X)));
             int y0 = Math.Max(0, (int)Math.Floor(corners.Min(p => p.Y)));
             int y1 = Math.Min(height - 1, (int)Math.Ceiling(corners.Max(p => p.Y)));
-            if (y0 > y1) return 0;
-            var left = Enumerable.Repeat(width, y1 - y0 + 1).ToArray();
+            if (x0 > x1 || y0 > y1) return 0;
+            int maskWidth = x1 - x0 + 1, maskHeight = y1 - y0 + 1;
+            var left = Enumerable.Repeat(maskWidth, maskHeight).ToArray();
             var right = Enumerable.Repeat(-1, left.Length).ToArray();
+
+            // DB.box_score_fast first translates the float quad to a local
+            // clipped ROI, then casts to int32 and calls cv2.fillPoly. Model
+            // the filled convex polygon AND its LINE_8 border; merely tracing
+            // the unbounded edges and taking their min/max does not reproduce
+            // clipped borders or the integer interior at subpixel crossings.
+            var points = corners.Select(p => new Point((int)(p.X - x0), (int)(p.Y - y0))).ToArray();
+            var minX = Enumerable.Repeat(long.MaxValue, maskHeight).ToArray();
+            var maxX = Enumerable.Repeat(long.MinValue, maskHeight).ToArray();
+            const int shift = 16;
             for (int i = 0; i < corners.Length; i++)
             {
-                Point a = Point.Truncate(corners[i]), b = Point.Truncate(corners[(i + 1) % corners.Length]);
+                Point a = points[i], b = points[(i + 1) % points.Length];
+                Point top = a.Y <= b.Y ? a : b, bottom = a.Y <= b.Y ? b : a;
+                if (top.Y != bottom.Y)
+                {
+                    long step = ((long)(bottom.X - top.X) << shift) / (bottom.Y - top.Y);
+                    int begin = Math.Max(0, top.Y), end = Math.Min(maskHeight, bottom.Y);
+                    long edgeX = ((long)top.X << shift) + (begin - (long)top.Y) * step;
+                    for (int rowIndex = begin; rowIndex < end; rowIndex++, edgeX += step)
+                    {
+                        if (edgeX < minX[rowIndex]) minX[rowIndex] = edgeX;
+                        if (edgeX > maxX[rowIndex]) maxX[rowIndex] = edgeX;
+                    }
+                }
+                if (!ClipBorder(ref a, ref b, maskWidth, maskHeight)) continue;
                 if (a.X > b.X) { Point swap = a; a = b; b = swap; }
                 int dx = b.X - a.X, dy = Math.Abs(b.Y - a.Y), direction = Math.Sign(b.Y - a.Y);
                 int major = Math.Max(dx, dy), minor = Math.Min(dx, dy), error = major / 2;
                 int x = a.X, y = a.Y;
                 for (int j = 0; j <= major; j++)
                 {
-                    if (y >= y0 && y <= y1)
+                    if (y >= 0 && y < maskHeight)
                     {
-                        left[y - y0] = Math.Min(left[y - y0], x);
-                        right[y - y0] = Math.Max(right[y - y0], x);
+                        left[y] = Math.Min(left[y], x);
+                        right[y] = Math.Max(right[y], x);
                     }
                     if (dx >= dy) x++; else y += direction;
                     error -= minor;
@@ -162,12 +190,73 @@ namespace TideCombat
             double sum = 0;
             int count = 0;
             for (int row = 0; row < left.Length; row++)
-                for (int x = Math.Max(0, left[row]); x <= Math.Min(width - 1, right[row]); x++)
+            {
+                if (minX[row] != long.MaxValue && maxX[row] != long.MinValue)
                 {
-                    sum += map.GetValue((y0 + row) * width + x);
+                    int interiorLeft = (int)((minX[row] + (1L << shift) - 1) >> shift);
+                    int interiorRight = (int)(maxX[row] >> shift);
+                    if (interiorLeft <= interiorRight)
+                    {
+                        left[row] = Math.Min(left[row], interiorLeft);
+                        right[row] = Math.Max(right[row], interiorRight);
+                    }
+                }
+                for (int x = Math.Max(0, left[row]); x <= Math.Min(maskWidth - 1, right[row]); x++)
+                {
+                    sum += map.GetValue((y0 + row) * width + x0 + x);
                     count++;
                 }
+            }
             return count == 0 ? 0 : sum / count;
+        }
+
+        private static int BorderCode(long x, long y, int width, int height)
+        {
+            return (x < 0 ? 1 : x >= width ? 2 : 0) | (y < 0 ? 4 : y >= height ? 8 : 0);
+        }
+
+        // Clip the polygon's raster boundary to the mask before drawing it.
+        // The integer quotients match the endpoint truncation of a clipped
+        // LINE_8 segment. This does not alter the independent interior fill.
+        private static bool ClipBorder(ref Point a, ref Point b, int width, int height)
+        {
+            long ax = a.X, ay = a.Y, bx = b.X, by = b.Y;
+            int ca = BorderCode(ax, ay, width, height), cb = BorderCode(bx, by, width, height);
+            if ((ca & cb) != 0) return false;
+            if ((ca | cb) != 0)
+            {
+                if ((ca & 12) != 0)
+                {
+                    long y = ay < 0 ? 0 : height - 1;
+                    ax += (y - ay) * (bx - ax) / (by - ay);
+                    ay = y;
+                    ca = BorderCode(ax, ay, width, height);
+                }
+                if ((cb & 12) != 0)
+                {
+                    long y = by < 0 ? 0 : height - 1;
+                    bx += (y - by) * (bx - ax) / (by - ay);
+                    by = y;
+                    cb = BorderCode(bx, by, width, height);
+                }
+                if ((ca & cb) != 0) return false;
+                if (ca != 0)
+                {
+                    long x = ax < 0 ? 0 : width - 1;
+                    ay += (x - ax) * (by - ay) / (bx - ax);
+                    ax = x;
+                }
+                if (cb != 0)
+                {
+                    long x = bx < 0 ? 0 : width - 1;
+                    by += (x - bx) * (by - ay) / (bx - ax);
+                    bx = x;
+                }
+            }
+            if ((BorderCode(ax, ay, width, height) | BorderCode(bx, by, width, height)) != 0) return false;
+            a = new Point((int)ax, (int)ay);
+            b = new Point((int)bx, (int)by);
+            return true;
         }
     }
 }

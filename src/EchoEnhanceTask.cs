@@ -4,7 +4,6 @@ using System.Drawing;
 using System.Globalization;
 using System.IO;
 using System.Linq;
-using System.Runtime.InteropServices;
 using System.Runtime.Serialization;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -63,21 +62,11 @@ namespace TideCombat
 
     internal static class EnhanceText
     {
-        private const uint SimplifiedChinese = 0x02000000;
-
-        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, ExactSpelling = true)]
-        private static extern int LCMapStringEx(string localeName, uint flags, string source, int sourceLength,
-            StringBuilder destination, int capacity, IntPtr version, IntPtr reserved, IntPtr sortHandle);
-
         internal static string Normalize(string text)
         {
             if (string.IsNullOrWhiteSpace(text))
                 return string.Empty;
-            text = text.Trim().Normalize(NormalizationForm.FormKC);
-            var result = new StringBuilder(text.Length * 2);
-            int length = LCMapStringEx("zh-CN", SimplifiedChinese, text, -1, result, result.Capacity,
-                IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
-            return length > 0 ? result.ToString() : text;
+            return OcrText.Simplify(text.Trim().Normalize(NormalizationForm.FormKC));
         }
     }
 
@@ -368,25 +357,27 @@ namespace TideCombat
         private const string LogArea = "强化声骸";
         private const int SelectionTimeoutMs = 15000;
         private const int SelectionRetryDelayMs = 1600;
-        private const int CultivateRetryDelayMs = 1600;
-        private const int StageRetryDelayMs = 1800;
-        private const int MaxStageClicks = 2;
+        private const int CultivateRetryDelayMs = 500;
+        private const int StageRetryDelayMs = 300;
         private const int MenuSettleMs = 120;
         private const int ResultQuietMs = 2000;
-        private const int ResultRetryDelayMs = 1800;
+        private const int ResultStatsSettleMs = 100;
+        private const int ResultDismissSettleMs = 1000;
+        private const int OverflowConfirmSettleMs = 200;
+        private const int ResultRetryDelayMs = 1000;
         private const int BackgroundResultRetryDelayMs = 4500;
         private const int ResultCloseTimeoutMs = 12000;
         private readonly EnhanceOptions options;
         private Step step = Step.WaitBag;
         private SelectionStep selection;
-        private long stepAt, nextAction, roundAt, cultivateClickAt, stageClickAt, resultReadAt, resultClickAt;
-        private long resultShownAt = -1;
+        private long stepAt, nextAction, roundAt, cultivateClickAt, stageClickAt, materialStartedAt, resultReadAt, resultClickAt;
+        private long resultShownAt = -1, escapeClickAt = -1, overflowSeenAt = -1;
         private long selectionInputAt;
         private int lastBagLevel, bagLevelSamples;
         private bool selectionRetried;
-        private int cultivateClicks, cultivateSamples, resultClicks, resultSamples;
+        private int cultivateClicks, resultClicks, resultSamples;
         private int materialCount, stageClicks, emptyMaterialSamples;
-        private int submissionAttempts, unchangedPreviewSamples, confirmedStatCount;
+        private int confirmedStatCount;
         private int submittedLevel = -1;
         private string submittedPreview;
         private bool foregroundRequested, dialogSeen, resultClickInBackground;
@@ -504,7 +495,7 @@ namespace TideCombat
         {
             Status = "等待背包声骸界面";
             if (!frame.HasCultivate)
-                return now - stepAt > 6000 ? Fail("请先在背包声骸页筛选并按等级升序排列。") : default(EnhanceDecision);
+                return Fail("请先在背包声骸页筛选并按等级升序排列。");
             selection = SelectionStep.SelectFirst;
             Move(Step.SelectEcho, now);
             return default(EnhanceDecision);
@@ -554,7 +545,7 @@ namespace TideCombat
                 LastStage = null;
                 reason = string.Empty;
                 confirmedStatCount = 0;
-                cultivateClicks = cultivateSamples = 0;
+                cultivateClicks = 0;
                 ResetResultDismissal();
                 RunLog.Info(LogArea, "确认列表第一格等级为 +0");
                 Evidence("before");
@@ -659,29 +650,26 @@ namespace TideCombat
                 BeginMaterial(now);
                 return default(EnhanceDecision);
             }
-            if (now - stepAt > 5000)
+            if (now - stepAt >= 5000)
                 return Fail("未确认打开声骸强化界面。");
             if (!frame.HasCultivate)
-            {
-                cultivateSamples = 0;
                 return default(EnhanceDecision);
-            }
             if (!frame.ZeroLevelCandidate)
             {
                 Status = "重新核对将要培养的首格声骸";
-                cultivateSamples = 0;
                 return default(EnhanceDecision);
             }
-            if (cultivateClicks > 0 && (cultivateClicks >= 2 ||
-                now - cultivateClickAt < CultivateRetryDelayMs || ++cultivateSamples < 2))
+            // The reference retries the visible Cultivate button every 0.5s
+            // for up to five seconds. Still require a fresh selected +0 card
+            // and the visible button before each navigation action.
+            if (cultivateClicks > 0 && now - cultivateClickAt < CultivateRetryDelayMs)
                 return default(EnhanceDecision);
 
             EnhanceDecision decision = Click(frame.CultivateBox, cultivateClicks == 0 ? "打开培养" : "重试打开培养",
-                now, 550, sent =>
+                now, 500, sent =>
                 {
                     cultivateClicks++;
                     cultivateClickAt = sent;
-                    cultivateSamples = 0;
                 });
             decision.SettleMs = MenuSettleMs;
             decision.UseWindowMessage = cultivateClicks == 0;
@@ -691,8 +679,8 @@ namespace TideCombat
         private void BeginMaterial(long now)
         {
             stageClicks = emptyMaterialSamples = 0;
+            materialStartedAt = now;
             materialCount = -1;
-            submissionAttempts = unchangedPreviewSamples = 0;
             submittedPreview = null;
             foregroundRequested = dialogSeen = false;
             Move(Step.AddMaterial, now);
@@ -709,14 +697,7 @@ namespace TideCombat
                 Move(Step.PressEnhance, now);
                 return default(EnhanceDecision);
             }
-            if (stageClicks == 0 && frame.HasEnhanceTune && frame.MaterialCount > 0 &&
-                frame.CurrentLevel >= 0 && frame.CurrentLevel / 5 == confirmedStatCount &&
-                frame.PreviewLevel > frame.CurrentLevel && frame.TargetStatCount == confirmedStatCount + 1)
-            {
-                Evidence("materials", "已核对下一档预选材料数量=" + frame.MaterialCount);
-                return SubmitEnhance(frame, now);
-            }
-            if (now - stepAt >= 5000)
+            if (now - materialStartedAt >= 5000)
             {
                 RunLog.Warn(LogArea, "未确认材料预选 · OCR=" + Readout(frame.Lines));
                 return Fail(materialCount == 0
@@ -730,10 +711,10 @@ namespace TideCombat
         {
             Status = "等待「强化并调谐」";
             ReadMaterialState(frame, now);
-            if (frame.HasEnhanceTune)
+            if (frame.HasEnhanceTune && frame.MaterialCount != 0)
                 return SubmitEnhance(frame, now);
             if (now - stepAt <= 4500)
-                return ClickStageWhenReady(frame, now);
+                return default(EnhanceDecision);
             RunLog.Warn(LogArea, "未找到组合按钮 · 上一次读到的预选材料数量=" + materialCount +
                 " · OCR=" + Readout(frame.Lines));
             if (materialCount == 0 && !frame.MaterialsStaged)
@@ -748,7 +729,7 @@ namespace TideCombat
             if (stageClicks == 0)
                 return;
             emptyMaterialSamples = now - stageClickAt >= StageRetryDelayMs &&
-                frame.HasStageInsert && !frame.MaterialsStaged ? emptyMaterialSamples + 1 : 0;
+                frame.HasStageInsert && frame.MaterialCount == 0 && !frame.MaterialsStaged ? emptyMaterialSamples + 1 : 0;
             if (frame.MaterialCount < 0 || frame.MaterialCount == materialCount)
                 return;
             materialCount = frame.MaterialCount;
@@ -757,16 +738,16 @@ namespace TideCombat
 
         private EnhanceDecision ClickStageWhenReady(EnhanceFrame frame, long now)
         {
-            if (frame.MaterialsStaged || stageClicks >= MaxStageClicks ||
+            if (frame.MaterialsStaged || now - materialStartedAt >= 5000 ||
                 (stageClicks > 0 && emptyMaterialSamples < 2))
                 return default(EnhanceDecision);
-            EnhanceDecision decision = Click(frame.StageBox, stageClicks == 0 ? "阶段放入" : "再次阶段放入", now, 350, sent =>
+            EnhanceDecision decision = Click(frame.StageBox, stageClicks == 0 ? "阶段放入" : "再次阶段放入", now, 300, sent =>
             {
                 stageClickAt = sent;
                 stageClicks++;
                 emptyMaterialSamples = 0;
                 materialCount = -1;
-                Move(Step.AddMaterial, sent, 350);
+                Move(Step.AddMaterial, sent, 300);
             });
             decision.SettleMs = MenuSettleMs;
             decision.UseWindowMessage = stageClicks == 0;
@@ -785,29 +766,72 @@ namespace TideCombat
                 return default(EnhanceDecision);
             if (step == Step.Stats)
                 return ReadStats(frame, now);
-            Move(Step.Stats, now, 300);
+            Move(Step.Stats, now);
             return default(EnhanceDecision);
+        }
+
+        private void WaitForResultQuiet(long now, int actionSettleMs = 0)
+        {
+            // The source waits for a result-closing input to settle, then
+            // performs another full 2s dialog OCR wait and sleeps .1s before
+            // reading stats. Re-observing a still-present dialog must never
+            // shorten a previously scheduled post-input wait.
+            resultReadAt = Math.Max(resultReadAt,
+                now + actionSettleMs + ResultQuietMs + ResultStatsSettleMs);
+        }
+
+        private void ResultActionSent(long sent, int settleMs)
+        {
+            nextAction = Math.Max(nextAction, sent + settleMs);
+            WaitForResultQuiet(sent, settleMs);
+            if (step != Step.Dialog && step != Step.Stats)
+                stepAt = resultReadAt;
         }
 
         private EnhanceDecision HandleDialog(EnhanceFrame frame, long now)
         {
             dialogSeen = true;
-            resultReadAt = now + ResultQuietMs;
+            WaitForResultQuiet(now);
             if (!frame.OverflowDialog)
                 return DismissResult(frame, now);
             if (now - roundAt > 12000)
                 return Fail("未确认材料溢出弹窗已经关闭。");
             Status = "处理材料溢出提示";
             if (frame.ConfirmBox.IsEmpty || overflowConfirmed)
+            {
+                if (!overflowChecked) overflowSeenAt = -1;
                 return default(EnhanceDecision);
-            if (!overflowChecked && !frame.CheckBox.IsEmpty)
-                return Click(frame.CheckBox, "勾选本次登录不再提示", now, 550, sent => overflowChecked = true);
-            return Click(frame.ConfirmBox, "确认材料溢出提示", now, 1200, sent => overflowConfirmed = true);
+            }
+            if (!overflowChecked)
+            {
+                // BaseWWTask.click_skip_dialog_confirm waits .5s after both
+                // controls are present, checks the box, waits .5s, confirms,
+                // then waits .2s. Never guess a missing control.
+                if (frame.CheckBox.IsEmpty)
+                {
+                    overflowSeenAt = -1;
+                    return default(EnhanceDecision);
+                }
+                if (overflowSeenAt < 0)
+                    overflowSeenAt = now;
+                if (now - overflowSeenAt < 500)
+                    return default(EnhanceDecision);
+                return Click(frame.CheckBox, "勾选本次登录不再提示", now, 500, sent =>
+                {
+                    overflowChecked = true;
+                    nextAction = Math.Max(nextAction, sent + 500);
+                });
+            }
+            return Click(frame.ConfirmBox, "确认材料溢出提示", now, OverflowConfirmSettleMs, sent =>
+            {
+                overflowConfirmed = true;
+                ResultActionSent(sent, OverflowConfirmSettleMs);
+            });
         }
 
         private EnhanceDecision HandleLateResult(EnhanceFrame frame, long now)
         {
-            resultReadAt = now + ResultQuietMs;
+            WaitForResultQuiet(now);
             stepAt = resultReadAt;
             lastMark = EchoMark.Unknown;
             markerSamples = 0;
@@ -837,12 +861,13 @@ namespace TideCombat
             }
 
             EnhanceDecision dismiss = Click(frame.DismissBox, resultClicks == 0 ? "关闭调谐结果" : "重试关闭调谐结果",
-                now, 850, sent =>
+                now, ResultDismissSettleMs, sent =>
                 {
                     resultClicks++;
                     resultClickAt = sent;
                     resultClickInBackground = frame.Background;
                     resultSamples = 0;
+                    ResultActionSent(sent, ResultDismissSettleMs);
                 });
             dismiss.SettleMs = MenuSettleMs;
             dismiss.UseWindowMessage = resultClicks > 0 && !resultClickInBackground;
@@ -857,25 +882,21 @@ namespace TideCombat
 
         private EnhanceDecision SubmitEnhance(EnhanceFrame frame, long now)
         {
-            EnhanceDecision decision = Click(frame.EnhanceBox, submissionAttempts == 0 ? "强化并调谐" : "重试强化并调谐",
+            EnhanceDecision decision = Click(frame.EnhanceBox, "强化并调谐",
                 now, 500, sent =>
                 {
-                    if (submissionAttempts == 0)
-                    {
-                        submittedPreview = frame.Preview;
-                        submittedLevel = frame.PreviewLevel;
-                        RequiredStatCount = Math.Max(confirmedStatCount + 1, frame.TargetStatCount);
-                    }
-                    submissionAttempts++;
-                    unchangedPreviewSamples = 0;
+                    submittedPreview = frame.Preview;
+                    submittedLevel = frame.PreviewLevel;
+                    RequiredStatCount = Math.Max(confirmedStatCount + 1, frame.TargetStatCount);
                     roundAt = sent;
-                    resultReadAt = sent + 1500 + ResultQuietMs;
+                    resultReadAt = sent + 1500 + ResultQuietMs + ResultStatsSettleMs;
                     overflowChecked = overflowConfirmed = false;
+                    overflowSeenAt = -1;
                     ResetResultDismissal();
                     Move(Step.Dialog, sent, 1500);
                 });
             decision.SettleMs = MenuSettleMs;
-            decision.UseWindowMessage = submissionAttempts == 0;
+            decision.UseWindowMessage = true;
             return decision;
         }
 
@@ -885,27 +906,16 @@ namespace TideCombat
             if (dialogSeen || !frame.HasEnhanceTune ||
                 submittedPreview == null || frame.Preview != submittedPreview ||
                 EchoRules.Parse(frame.Lines).Count >= RequiredStatCount)
-            {
-                unchangedPreviewSamples = 0;
                 return false;
-            }
             Status = "等待游戏执行强化并调谐";
             if (now - roundAt > 13000)
             {
                 decision = Fail("游戏未执行「强化并调谐」，声骸仍停在强化预览。");
                 return true;
             }
-            if (++unchangedPreviewSamples < 2 || now - roundAt < 2000 || submissionAttempts >= 2)
-                return true;
-            if (frame.AutoBackground && !foregroundRequested)
-            {
-                foregroundRequested = true;
-                nextAction = now + 800;
-                decision = new EnhanceDecision { Action = EnhanceAction.ActivateGame, Label = "申请切到游戏前台重试" };
-                return true;
-            }
-            RunLog.Info(LogArea, "仍是同一强化预览，重试一次 · " + submittedPreview);
-            decision = SubmitEnhance(frame, now);
+            // As in the reference, submit each upgrade only once. Keep checking
+            // the result to distinguish delayed feedback from a missing click,
+            // but do not risk spending materials again on a stale preview.
             return true;
         }
 
@@ -977,7 +987,7 @@ namespace TideCombat
             }
             if (now - stepAt > 5000)
                 return Fail(locking ? "无法确认声骸锁定成功。" : "无法确认声骸弃置成功。");
-            EnhanceDecision decision = Key(locking ? 'C' : 'Z', locking ? "锁定当前声骸" : "弃置当前声骸", now, 1100);
+            EnhanceDecision decision = Key(locking ? 'C' : 'Z', locking ? "锁定当前声骸" : "弃置当前声骸", now, 1000);
             decision.Sent = sent => { markerSamples = 0; };
             return decision;
         }
@@ -987,13 +997,16 @@ namespace TideCombat
             Status = "返回背包声骸页";
             if (frame.HasCultivate)
             {
-                Move(Step.WaitBag, now);
+                Move(Step.WaitBag, now, 100);
                 return default(EnhanceDecision);
             }
             if (now - stepAt > 10000)
                 return Fail("返回背包超时。");
-            return frame.HasEnhancePanel
-                ? Key((char)0x1b, "返回背包", now, 1100) : default(EnhanceDecision);
+            if (!frame.HasEnhancePanel || escapeClickAt >= 0 && now - escapeClickAt < 4000)
+                return default(EnhanceDecision);
+            EnhanceDecision escape = Key((char)0x1b, "返回背包", now, 200);
+            escape.Sent = sent => escapeClickAt = sent;
+            return escape;
         }
 
         private void Move(Step next, long now, int delay = 0)
@@ -1001,6 +1014,8 @@ namespace TideCombat
             step = next;
             stepAt = now;
             nextAction = now + delay;
+            if (next == Step.Escaping)
+                escapeClickAt = -1;
             lastMark = EchoMark.Unknown;
             markerSamples = 0;
         }

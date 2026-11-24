@@ -315,6 +315,8 @@ namespace TideCombat
             Step(farm, Hud(false), Ui(), ref now, 100);
             for (int index = 0; index < 6; index++)
                 Step(farm, Hud(true), Ui(), ref now, 400, null);
+            Require(farm.Attempts == 1 && farm.Kills == 0 && farm.EchoThreshold(Ui()) == .30f,
+                "进入战斗即计尝试轮次，战中固定使用 .30 检测阈值");
             var echoes = new System.Collections.Generic.List<EchoBox>
             {
                 new EchoBox { Box = new Rectangle(780, 640, 40, 30), Score = .8f }
@@ -322,10 +324,26 @@ namespace TideCombat
             for (int index = 0; index < 6; index++)
                 Step(farm, Hud(true), Ui(), ref now, 300, echoes);
             Require(farm.Kills == 0 && farm.Planner.Fighting, "有敌人血条时不应因声骸识别而结束战斗");
-            Step(farm, Hud(false), Ui(), ref now, 300, echoes);
-            Require(farm.Kills == 0, "短时间看不到敌人信号时应继续观察");
-            Step(farm, Hud(false), Ui(), ref now, 300, echoes);
-            Require(farm.Kills == 1, "没有敌人信号且检测到声骸时进入拾取");
+            var unlockedHealth = Hud(true);
+            unlockedHealth.Locked = false;
+            for (int i = 0; i < 10 && farm.Phase == "Fight"; i++)
+                Step(farm, unlockedHealth, Ui(), ref now, 300, echoes);
+            Require(farm.Kills == 1 && farm.Attempts == 1 && farm.Phase == "Loot",
+                "PC 未锁敌时即使仍有血条，已确认掉落可结束战斗");
+            Step(farm, unlockedHealth, Ui(), ref now, 300, echoes);
+            Require(farm.Phase == "Loot", "仅残余血条不能立即覆盖掉落结束判定");
+
+            var cloud = new Farm4C(CombatSettings.Defaults(), FarmOptions.Defaults(), cloud: true);
+            Step(cloud, Hud(false), Ui(), ref now);
+            for (int i = 0; i < 6; i++) Step(cloud, Hud(true), Ui(), ref now, 400);
+            for (int i = 0; i < 6; i++) Step(cloud, unlockedHealth, Ui(), ref now, 400, echoes);
+            Require(cloud.Kills == 0, "云游戏有敌方血条时不提前结束");
+            Step(cloud, Hud(false), Ui(), ref now, 300, echoes);
+            Step(cloud, Hud(false), Ui(), ref now, 2999, echoes);
+            Require(cloud.Kills == 0, "云端健康条消失不足三秒仍继续观察");
+            for (int i = 0; i < 12 && cloud.Phase == "Fight"; i++)
+                Step(cloud, Hud(false), Ui(), ref now, 400, echoes);
+            Require(cloud.Kills == 1, "云端宽限后正常进入拾取");
         }
 
         private static Farm4C ReadyToPickUp(FarmOptions options, ref long now, Farm4C farm = null)
@@ -363,7 +381,9 @@ namespace TideCombat
             var team = Ui();
             team.TeamStart = team.Challenge = true;
             team.TeamStartBox = new Rectangle(1400, 800, 100, 60);
-            FarmDecision finish = Step(farm, null, team, ref now, 400);
+            FarmDecision waitFinal = Step(farm, null, team, ref now, 4999);
+            Require(!farm.Finished && waitFinal.Request == FarmRequest.None, "最后一轮确认掉落且无宝箱也等待五秒，不点击后续入口");
+            FarmDecision finish = Step(farm, null, team, ref now, 1);
             Require(farm.Finished && farm.Failure == null && finish.Request == FarmRequest.None,
                 "达到次数上限时不得点击下一轮组队按钮");
         }
@@ -384,7 +404,7 @@ namespace TideCombat
             FarmDecision wait = Step(farm, Hud(false), prompt, ref now, 1000, absorb: true);
             Require(wait.Request == FarmRequest.None, "第二次尝试仍需等待获取通知");
             Step(farm, Hud(false), prompt, ref now, 1600, absorb: true);
-            FarmDecision open = Step(farm, Hud(false), prompt, ref now, absorb: true);
+            FarmDecision open = Step(farm, Hud(false), prompt, ref now, 1000, absorb: true);
             Require(open.Request == FarmRequest.Key && open.Key == 0x1b && !open.PickupKey &&
                 farm.MovementKey == '\0' && !farm.Finished && farm.Echoes == 0,
                 "两次未确认后应松开移动并打开重开菜单，即使仍显示吸收");
@@ -399,7 +419,7 @@ namespace TideCombat
             Step(lastRound, Hud(false), prompt, ref now, absorb: true);
             Step(lastRound, Hud(false), prompt, ref now, 2600, absorb: true);
             Step(lastRound, Hud(false), prompt, ref now, 2600, absorb: true);
-            Require(Step(lastRound, Hud(false), prompt, ref now, absorb: true).Request == FarmRequest.None &&
+            Require(Step(lastRound, Hud(false), prompt, ref now, 1000, absorb: true).Request == FarmRequest.None &&
                 lastRound.Finished && lastRound.Failure == null && lastRound.Echoes == 0,
                 "最后一轮吸收未确认也应正常完成，不再打开重开菜单");
         }
@@ -431,7 +451,9 @@ namespace TideCombat
             var settlement = Ui();
             settlement.InRealm = settlement.FPrompt = true;
             settlement.Rechallenge = RechallengeChoice.Selected;
-            FarmDecision restart = Step(farm, Hud(false), settlement, ref now);
+            Require(Step(farm, Hud(false), settlement, ref now, 1000).Request == FarmRequest.None,
+                "结算后先等待一秒与0.2秒交互稳定");
+            FarmDecision restart = Step(farm, Hud(false), settlement, ref now, 200);
             Require(restart.Request == FarmRequest.Key && restart.StartsRechallenge,
                 "只看见过掉落时也应在搜寻结束后重新挑战");
 
@@ -609,7 +631,9 @@ namespace TideCombat
             Step(farm, Hud(false), idle, ref now, 1500, navTurn: 0);
             Require(farm.MovementKey == 'W' && farm.WantsSprint, "有明确引导时应走向 Boss");
             Step(farm, Hud(false), idle, ref now, 300);
-            Require(farm.MovementKey == '\0' && !farm.WantsSprint, "丢失引导应立刻停止");
+            Require(farm.MovementKey == 'W' && farm.WantsSprint, "已确认导航期间临时缺失标记按0度继续");
+            Step(farm, null, idle, ref now);
+            Require(farm.MovementKey == '\0' && !farm.WantsSprint, "丢失场景验证应立刻停止");
             Step(farm, Hud(false), idle, ref now, navTurn: 0);
             Require(farm.MovementKey == 'W', "重新确认方向后可以再次接近");
             var challenge = Hud(false);
@@ -617,6 +641,14 @@ namespace TideCombat
             FarmDecision start = Step(farm, challenge, idle, ref now, navTurn: 0);
             Require(start.Request == FarmRequest.Key && start.Key == 'F' && farm.MovementKey == '\0',
                 "识别到场内挑战时，松开 W 并触发挑战");
+
+            var world = new FarmUi { OpenWorld = true };
+            var verified = new Farm4C(CombatSettings.Defaults(), FarmOptions.Defaults());
+            Step(verified, Hud(false), world, ref now);
+            Step(verified, Hud(false), world, ref now, 1500);
+            Require(verified.MovementKey == 'W', "初始即确认大世界时，无标记按零度前进");
+            Step(verified, Hud(false), world, ref now, 13500);
+            Require(verified.Phase == "MapTeleport" && verified.MovementKey == '\0', "导航十五秒无目标执行回传兜底");
         }
 
         internal static void TravelWalkIsBounded()
@@ -644,9 +676,110 @@ namespace TideCombat
             Step(farm, Hud(false), idle, ref now, 600);
             Require(farm.MovementKey == 'W', "已确认传送落地时允许短距离向前");
             Step(farm, Hud(false), idle, ref now, 3000);
-            Require(farm.MovementKey == '\0' && !farm.Finished, "短距离前进结束后应松开方向键");
-            Step(farm, Hud(false), idle, ref now, 600);
+            Require(farm.MovementKey == 'W' && !farm.Finished, "落地后未发现标记时不应在三秒过早停止");
+            Step(farm, Hud(false), idle, ref now, 16800);
+            Require(farm.MovementKey == 'W' && !farm.Finished, "确认落地后向前跑最多20秒");
+            Step(farm, Hud(false), idle, ref now, 100);
             Require(farm.Finished && farm.Failure.Contains("未锁定"), "落地无目标时应停止并给出原因");
+            Require(farm.RestartAfterWalkInFailure() == null, "未找到战斗不是已走入战斗后的回传异常");
+
+            var directCombat = new Farm4C(CombatSettings.Defaults(), options);
+            EnterConfiguredWorldCombat(directCombat, ref now);
+            Require(directCombat.Phase == "Fight" && directCombat.Attempts == 1,
+                "传送后成功直接走入战斗");
+            Step(directCombat, Hud(true), new FarmUi { InRealm = true }, ref now);
+            Require(!directCombat.Realm, "确认配置传送直接接敌后，参考 treat-as-world 覆盖不能被普通副本采样推翻");
+            directCombat.Stop("可恢复的刷取状态失败");
+            var retry = directCombat.RestartAfterWalkInFailure();
+            Require(retry != null && retry.AtStart && retry.Attempts == 1,
+                "已走入首领战斗后的状态失败允许重新传送并保留原轮数");
+
+            var neverTravels = new Farm4C(CombatSettings.Defaults(), options);
+            Step(neverTravels, Hud(false), idle, ref now);
+            Step(neverTravels, Hud(false), idle, ref now, 31000);
+            Require(neverTravels.Finished && neverTravels.Failure != null &&
+                neverTravels.RestartAfterWalkInFailure() == null, "配置传送自身超时直接失败，不进行走入战斗异常重传");
+            WalkInExecutionRecovery();
+        }
+
+        private static void EnterConfiguredWorldCombat(Farm4C farm, ref long now)
+        {
+            var idle = Ui();
+            var book = new FarmUi { Book = true, BookSelected = true };
+            book.BossRows.Add(new Rectangle(1480, 320, 40, 46));
+            var transport = new FarmUi { Teleport = true, TeleportBox = new Rectangle(1300, 700, 90, 60) };
+            Step(farm, Hud(false), idle, ref now);
+            Step(farm, null, book, ref now);
+            Step(farm, null, book, ref now);
+            Step(farm, null, book, ref now, 2200);
+            Require(Step(farm, null, transport, ref now, 1100).Request == FarmRequest.Click, "配置首领传送控件");
+            Step(farm, null, idle, ref now, 1000);
+            Step(farm, Hud(false), idle, ref now, 600);
+            Step(farm, Hud(true), idle, ref now);
+            Require(farm.Phase == "Fight" && farm.ConfiguredWalkCombat, "已确认配置传送直接走入首领战斗");
+        }
+
+        private static Exception DetectorError(string codeName)
+        {
+            // The shipped wrapper's exception constructor is internal. This
+            // constructs the exact managed type without running an ONNX model.
+            Type exceptionType = typeof(Microsoft.ML.OnnxRuntime.OnnxRuntimeException);
+            Type codeType = exceptionType.Assembly.GetType("Microsoft.ML.OnnxRuntime.ErrorCode", true);
+            object code = Enum.Parse(codeType, codeName);
+            return (Exception)Activator.CreateInstance(exceptionType,
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic,
+                null, new object[] { code, "synthetic detector execution failure" }, System.Globalization.CultureInfo.InvariantCulture);
+        }
+
+        private static void WalkInExecutionRecovery()
+        {
+            var engine = DetectorError("EngineError");
+            var runtime = DetectorError("RuntimeException");
+            var invalidGraph = DetectorError("InvalidGraph");
+            var invalidArgs = DetectorError("InvalidArgument");
+            var unknownOrt = DetectorError("Fail");
+            Require(Farm4C.IsRecoverableDetectorExecutionFailure(engine) && Farm4C.IsRecoverableDetectorExecutionFailure(runtime),
+                "仅已加载模型的ONNX引擎及执行错误属于可恢复候选");
+            foreach (Exception error in new[] { invalidGraph, invalidArgs, unknownOrt,
+                new InvalidOperationException(engine.Message), new OperationCanceledException(),
+                new UnauthorizedAccessException(), new InputElevationRequiredException() })
+                Require(!Farm4C.IsRecoverableDetectorExecutionFailure(error), "不把未知、永久、伪造消息、取消及权限错误当成可恢复执行异常");
+
+            var options = FarmOptions.Defaults();
+            options.Teleport = true;
+            var farm = new Farm4C(CombatSettings.Defaults(), options);
+            long now = 1000;
+            Require(farm.RestartAfterWalkInExecutionFailure(runtime, true, false) == null,
+                "尚未走入配置首领战斗时不得重传");
+            for (int attempt = 1; attempt <= 4; attempt++)
+            {
+                EnterConfiguredWorldCombat(farm, ref now);
+                Require(farm.Attempts == attempt && farm.Kills == 0 && farm.Echoes == 0,
+                    "执行失败不虚增击杀或掉落，尝试次数仍保留");
+                Require(farm.RestartAfterWalkInExecutionFailure(runtime, false, false) == null &&
+                    farm.RestartAfterWalkInExecutionFailure(runtime, true, true) == null &&
+                    farm.RestartAfterWalkInExecutionFailure(invalidGraph, true, false) == null,
+                    "重传前要求同一有效输入路由、未取消、明确可恢复错误");
+                var resumed = farm.RestartAfterWalkInExecutionFailure(attempt % 2 == 0 ? engine : runtime, true, false);
+                if (attempt == 4)
+                    Require(resumed == null, "三次连续恢复后停止，不无限重传");
+                else
+                {
+                    Require(resumed != null && resumed.AtStart && resumed.Attempts == attempt &&
+                        resumed.Kills == 0 && resumed.Echoes == 0, "恢复重新进入配置入口并保留全部统计");
+                    farm = resumed;
+                }
+            }
+            var manual = new Farm4C(CombatSettings.Defaults(), FarmOptions.Defaults());
+            Step(manual, Hud(false), Ui(), ref now);
+            Step(manual, Hud(true), Ui(), ref now);
+            Require(manual.Phase == "Fight" && manual.RestartAfterWalkInExecutionFailure(runtime, true, false) == null,
+                "手动进入世界首领不能擅自切换为配置目标重传");
+            options.RepeatCount = 1;
+            var lastRound = new Farm4C(CombatSettings.Defaults(), options);
+            EnterConfiguredWorldCombat(lastRound, ref now);
+            Require(lastRound.RestartAfterWalkInExecutionFailure(runtime, true, false) == null,
+                "已达到设定尝试轮次时不得再发起多余重传");
         }
 
         internal static void ManualStartAcceptsTeamScreen()
@@ -738,17 +871,75 @@ namespace TideCombat
             Require(back.Request == FarmRequest.KeyDown && back.Key == 'S', "宝箱居中且靠近画面底部时应后退接近");
             settlement.FPrompt = true;
             settlement.Rechallenge = RechallengeChoice.Below;
-            FarmDecision scroll = Step(farm, hud, settlement, ref now, 500);
+            Require(Step(farm, hud, settlement, ref now, 500).Request == FarmRequest.None && farm.MovementKey == '\0',
+                "新交互先等待0.2秒");
+            FarmDecision scroll = Step(farm, hud, settlement, ref now, 200);
             Require(scroll.Request == FarmRequest.Scroll && farm.MovementKey == '\0',
                 "出现交互后停止移动，重开选项在下方时先滚动");
             settlement.Rechallenge = RechallengeChoice.Selected;
-            FarmDecision restart = Step(farm, hud, settlement, ref now, 550);
+            Require(Step(farm, hud, settlement, ref now, 199).Request == FarmRequest.None, "滚动后等满0.2秒再F");
+            FarmDecision restart = Step(farm, hud, settlement, ref now, 1);
             Require(restart.Request == FarmRequest.Key && restart.Key == 'F' && restart.StartsRechallenge,
                 "确认为重新挑战后才按 F");
             Require(Step(farm, null, Ui(), ref now, 2000).Request == FarmRequest.None, "无 HUD 时等待下一轮加载");
             FarmDecision acquire = Step(farm, hud, Ui(), ref now, 1000);
             Require(acquire.Request == FarmRequest.Battle && acquire.Battle.Kind == ActionKind.Target,
                 "重开后返回场景时应尝试锁敌");
+        }
+
+        internal static void NamelessRechallengeApproach()
+        {
+            var options = FarmOptions.Defaults();
+            options.Boss = FarmBoss.NamelessExplorer;
+            var farm = new Farm4C(CombatSettings.Defaults(), options);
+            var dialog = Ui();
+            dialog.Claim = true;
+            dialog.RechallengeButton = new Rectangle(485, 548, 105, 32);
+            var world = Ui();
+            world.OpenWorld = true;
+            var hud = Hud(false);
+            long now = 1000;
+
+            FarmDecision restart = Step(farm, null, dialog, ref now, dispatch: false);
+            Require(restart.Request == FarmRequest.Click && restart.StartsRechallenge, "确认离开弹窗中的重开按钮");
+            Require(Step(farm, hud, world, ref now, 1000).Request == FarmRequest.None && farm.MovementKey == '\0',
+                "重开操作未发送时不能开始接近");
+            Step(farm, null, dialog, ref now);
+            var chest = Ui();
+            chest.Treasure = true;
+            Require(Step(farm, hud, chest, ref now, 1900).Request == FarmRequest.None, "旧宝箱仍在时等待重开完成");
+            Require(Step(farm, null, Ui(), ref now).Request == FarmRequest.None && farm.MovementKey == '\0',
+                "加载时不按住移动键");
+            Step(farm, hud, world, ref now);
+            FarmDecision forward = Step(farm, hud, world, ref now, navTurn: 100);
+            Require(forward.Request == FarmRequest.KeyDown && forward.Key == 'W' && farm.WantsSprint,
+                "重开完成后先向前冲刺接近无铭探索者");
+            Step(farm, null, Ui(), ref now);
+            Require(farm.MovementKey == '\0' && !farm.WantsSprint, "丢失场景确认时松开 W 和冲刺键");
+            Step(farm, hud, world, ref now);
+            Require(farm.MovementKey == 'W' && farm.WantsSprint, "恢复确认后继续接近");
+            Step(farm, Hud(true), world, ref now);
+            Require(farm.Phase == "Fight" && farm.MovementKey == '\0' && !farm.WantsSprint,
+                "发现敌人后结束接近并松开 W 和冲刺键");
+
+            var fallback = new Farm4C(CombatSettings.Defaults(), options);
+            Step(fallback, null, dialog, ref now);
+            Step(fallback, hud, world, ref now, 1900);
+            Step(fallback, hud, world, ref now);
+            FarmDecision guided = Step(fallback, hud, world, ref now, 7700, navTurn: 100);
+            Require(guided.Request == FarmRequest.Key && guided.Key == 'D' && guided.HoldMs == 50,
+                "前进满八秒后使用方向短按转身而非持续向右");
+            FarmDecision centered = Step(fallback, hud, world, ref now, 500, navTurn: 100);
+            Require(centered.Request == FarmRequest.Middle && centered.HoldMs == 200,
+                "转身后复位视角");
+            FarmDecision moved = Step(fallback, hud, world, ref now, 1000, navTurn: 100);
+            Require(moved.Request == FarmRequest.KeyDown && moved.Key == 'W' && fallback.WantsSprint,
+                "复位后按 W 持续前进");
+            Step(fallback, hud, world, ref now);
+            Require(fallback.MovementKey == 'W' && fallback.WantsSprint, "确认重开后无标记方向按零度前进");
+            Step(fallback, hud, world, ref now, 8200);
+            Require(!fallback.Finished && fallback.Phase == "MapTeleport" && fallback.MovementKey == '\0',
+                "重开后搜敌超时进入受控地图传送回退");
         }
 
         internal static void RechallengeChoiceUsesSelectedRow()
@@ -779,9 +970,12 @@ namespace TideCombat
             settlement.InRealm = settlement.Treasure = settlement.FPrompt = true;
             settlement.TreasureBox = new Rectangle(1108, 559, 25, 22);
             settlement.Rechallenge = RechallengeChoice.RewardSelected;
-            FarmDecision escape = Step(farm, Hud(false), settlement, ref now);
+            Require(Step(farm, Hud(false), settlement, ref now).Request == FarmRequest.None, "先等交互稳定");
+            FarmDecision scroll = Step(farm, Hud(false), settlement, ref now, 200);
+            Require(scroll.Request == FarmRequest.Scroll && scroll.ScrollTicks == 1, "按参考方向滚动探查重开选项，不能误领体力奖励");
+            FarmDecision escape = Step(farm, Hud(false), settlement, ref now, 4800);
             Require(escape.Request == FarmRequest.Key && escape.Key == 0x1b && !escape.StartsRechallenge,
-                "副本宝箱只展示领取奖励时，应按 Esc 打开副本重开菜单");
+                "五秒内无法确认重开选项时，才按 Esc 打开副本重开菜单");
 
             var modal = Ui();
             modal.Claim = true;
@@ -816,9 +1010,11 @@ namespace TideCombat
             var reward = Ui();
             reward.FPrompt = true;
             reward.Rechallenge = RechallengeChoice.RewardSelected;
-            FarmDecision escape = Step(farm, Hud(false), reward, ref now);
+            Require(Step(farm, Hud(false), reward, ref now).Request == FarmRequest.None && farm.MovementKey == '\0', "先停下等待交互稳定");
+            Require(Step(farm, Hud(false), reward, ref now, 200).Request == FarmRequest.Scroll, "尝试滚动找到重开项");
+            FarmDecision escape = Step(farm, Hud(false), reward, ref now, 4800);
             Require(escape.Request == FarmRequest.Key && escape.Key == 0x1b && farm.MovementKey == '\0',
-                "进入交互后宝箱和副本图标可以同时消失，仍应立即按 Esc");
+                "进入交互后宝箱和副本图标可以同时消失，五秒未确认后仍可按 Esc");
             FarmDecision retry = Step(farm, Hud(false), Ui(), ref now, 1200);
             Require(retry.Request == FarmRequest.Key && retry.Key == 0x1b && retry.RetryInput,
                 "副本场景保持可见但未弹窗时，允许用另一种输入补试一次");
@@ -843,7 +1039,7 @@ namespace TideCombat
                 Require(wait.Request == FarmRequest.None && farm.MovementKey == '\0',
                     "F 闪过后应原地等待，宝箱重现也不能再次走动");
             }
-            FarmDecision escape = Step(farm, Hud(false), Ui(), ref now, 600);
+            FarmDecision escape = Step(farm, Hud(false), Ui(), ref now, 2000);
             Require(escape.Request == FarmRequest.Key && escape.Key == 0x1b && !escape.StartsRechallenge,
                 "副本和交互已在之前确认，F 和文字暂时读不到时也可走 Esc 重开");
 
@@ -852,7 +1048,8 @@ namespace TideCombat
             world.Rechallenge = RechallengeChoice.RewardSelected;
             var outside = new Farm4C(CombatSettings.Defaults(), FarmOptions.Defaults());
             Step(outside, Hud(false), chest, ref now);
-            FarmDecision movedOut = Step(outside, Hud(false), world, ref now);
+            Require(Step(outside, Hud(false), world, ref now).Request == FarmRequest.None, "等待交互稳定");
+            FarmDecision movedOut = Step(outside, Hud(false), world, ref now, 200);
             Require(movedOut.Request == FarmRequest.Scroll, "明确返回大世界时，取消副本 Esc 路线");
             FarmDecision stopped = Step(outside, Hud(false), world, ref now, 5100);
             Require(outside.Finished && stopped.Request == FarmRequest.None, "大世界结算交互应有明确停止上限");
@@ -917,7 +1114,7 @@ namespace TideCombat
                 long now = 1000;
                 Step(farm, Hud(false), marker, ref now);
                 Step(farm, Hud(false), marker, ref now, 1700);
-                Require(farm.MovementKey == '\0', "大世界普通宝箱不能触发副本重开");
+                Require(farm.Phase == "Approach", "大世界普通宝箱不能触发副本重开");
                 Require(!vision.Read(reader.Read(unrelated), true).Treasure, "队伍界面不能当成结算宝箱");
             }
         }
@@ -936,6 +1133,64 @@ namespace TideCombat
             Step(farm, Hud(true), Ui(), ref now, 500);
             Step(farm, Hud(true), Ui(), ref now, 500);
             Require(farm.Planner.Fighting, "等待结束后才交给战斗规划器");
+
+            options.WaitSeconds = 61;
+            options.RepeatCount = 100001;
+            options.Validate();
+            options.WeeklyChallengeIndex = 999;
+            options.Validate();
+            options.Teleport = true;
+            options.TeleportMode = FarmTeleportMode.WeeklyChallenge;
+            bool rejected = false;
+            try { options.Validate(); } catch (InvalidDataException) { rejected = true; }
+            Require(rejected, "只有实际选中的类别越界时拒绝未知目标操作");
+            options.Teleport = false;
+            options.WaitSeconds = int.MaxValue;
+            options.Validate();
+            var longWait = new Farm4C(CombatSettings.Defaults(), options);
+            Step(longWait, Hud(false), Ui(), ref now);
+            Step(longWait, Hud(true), Ui(), ref now);
+            Require(Step(longWait, Hud(true), Ui(), ref now, 100000).Request == FarmRequest.None,
+                "大配置值保持等待，不因毫秒换算溢出变成即时开战");
+
+            options = FarmOptions.Defaults();
+            options.RepeatCount = 0;
+            options.Teleport = true;
+            options.Validate();
+            var noRounds = new Farm4C(CombatSettings.Defaults(), options);
+            Require(Step(noRounds, Hud(false), Ui(), ref now).Request == FarmRequest.None &&
+                noRounds.Finished && noRounds.Attempts == 0, "零轮配置不发出进入挑战或传送动作");
+
+            options = FarmOptions.Defaults();
+            options.RepeatCount = 1;
+            var neverStarts = new Farm4C(CombatSettings.Defaults(), options);
+            var challenge = Hud(false);
+            challenge.ChallengePrompt = true;
+            Step(neverStarts, Hud(false), Ui(), ref now);
+            Step(neverStarts, challenge, Ui(), ref now);
+            Require(neverStarts.Attempts == 1 && neverStarts.Kills == 0, "开始挑战即计一次尝试");
+            Step(neverStarts, Hud(false), Ui(), ref now, 5001);
+            Require(neverStarts.Phase == "Loot" && neverStarts.Attempts == 1 && neverStarts.Kills == 0,
+                "未检测到战斗进入掉落检查但不产生虚假击杀");
+
+            var profile = new Farm4C(CombatSettings.Defaults(), FarmOptions.Defaults());
+            Step(profile, Hud(false), new FarmUi { InRealm = true }, ref now);
+            Require(profile.Realm, "启动时识别副本，应采用副本配置");
+            Step(profile, Hud(false), new FarmUi { OpenWorld = true }, ref now);
+            Require(profile.Realm, "普通 HUD 更新不能取消已锁存的副本战斗及拾取配置");
+
+            var lateProfile = new Farm4C(CombatSettings.Defaults(), FarmOptions.Defaults());
+            Step(lateProfile, Hud(true), new FarmUi { OpenWorld = true }, ref now);
+            Step(lateProfile, Hud(true), new FarmUi { OpenWorld = true }, ref now);
+            Step(lateProfile, Hud(true), new FarmUi { InRealm = true }, ref now, 20001);
+            Require(!lateProfile.Realm, "进入战斗二十秒后不再用普通采样锁存副本配置");
+
+            var hecate = FarmOptions.Defaults();
+            hecate.Boss = FarmBoss.NightmareHecate;
+            var hecateProfile = new Farm4C(CombatSettings.Defaults(), hecate);
+            Step(hecateProfile, Hud(false), new FarmUi { OpenWorld = true }, ref now);
+            Step(hecateProfile, Hud(false), new FarmUi { InRealm = true }, ref now);
+            Require(!hecateProfile.Realm, "梦魇赫卡忒普通采样按参考 treat-as-world 不触发副本配置");
         }
 
         internal static void SpecialNightmareAndEntry()
@@ -1055,6 +1310,21 @@ namespace TideCombat
             Step(second, Hud(false), Ui(), ref clock, 100);
             FarmDecision map = Step(second, Hud(false), Ui(), ref clock, 300);
             Require(map.Request == FarmRequest.Key && map.Key == 'M', "无归的谬误应先开地图传送");
+
+            var fallacyPrompt = new Farm4C(CombatSettings.Defaults(), fallacy);
+            Step(fallacyPrompt, Hud(false), Ui(), ref clock);
+            Require(Step(fallacyPrompt, Hud(false), prompt, ref clock).Key == 'F', "无归的谬误已有交互时不需要回传");
+            Step(fallacyPrompt, Hud(false), Ui(), ref clock, 30000);
+            Require(!fallacyPrompt.Finished && fallacyPrompt.Phase == "Enter", "确认已交互的无归场景允许300秒等待战斗，不在15秒过早失败");
+            Step(fallacyPrompt, Hud(true), Ui(), ref clock, 600);
+            Require(fallacyPrompt.Phase == "Fight", "专属长等待期间出现实际敌人应立即进入战斗");
+
+            var nextRound = ReadyToPickUp(fenrico, ref now);
+            ConfirmDrop(nextRound, ref now);
+            Step(nextRound, Hud(false), Ui(), ref now);
+            Step(nextRound, Hud(false), Ui(), ref now, 1000);
+            Require(nextRound.Phase == "BossScript" && nextRound.Attempts == 1,
+                "芬里科首轮结束后重新进入下一轮特化脚本，而非只用普通接近");
         }
 
         internal static void ReviveFlow()
@@ -1112,7 +1382,13 @@ namespace TideCombat
                     Require(Step(farm, null, travel, ref now).Point == new Point(1424, 828), "地图传送按钮");
                 }
                 Require(Step(farm, Hud(false), world, ref now, 1000).Request == FarmRequest.None &&
-                    farm.Phase == "Approach", "已到达大世界时结束传送");
+                    farm.Phase == "BossScript", "已到达世界时继续无归的谬误专用流程");
+                FarmDecision right = Step(farm, Hud(false), world, ref now, 100);
+                Require(right.Request == FarmRequest.Key && right.Key == 'D' && right.HoldMs == 250,
+                    "回传后右移0.25秒");
+                Require(Step(farm, Hud(false), world, ref now, 750).Key == 'W', "右移后等待半秒再前进");
+                Step(farm, Hud(false), world, ref now, 500);
+                Require(farm.Phase == "Approach", "专用入场位移完成后接近");
             }
         }
 
@@ -1319,6 +1595,11 @@ namespace TideCombat
 
         internal static void HealWaypointRecovery()
         {
+            var best = new Rectangle(200, 300, 24, 24);
+            var close = new Rectangle(790, 450, 24, 24);
+            var order = FarmVision.SortWaypoints(new[] { best, close, best }, new Size(1600, 900), confidenceOrder: true);
+            Require(order.Count == 2 && order[0] == best && order[1] == close,
+                "置信度优先模式按既有模板评分顺序去重，不再按距离重排");
             var options = FarmOptions.Defaults();
             options.Teleport = true;
             options.TeleportMode = FarmTeleportMode.BossChallenge;
@@ -1342,16 +1623,16 @@ namespace TideCombat
             overworld.HealWaypoints = map.HealWaypoints;
             Require(Step(farm, Hud(false), overworld, ref now, 2200).Key == 'M',
                 "开图未生效时在有 HUD 的画面重试 M，不点地图候选");
-            Require(Step(farm, null, map, ref now, 2200).Point == new Point(792, 452), "按距离尝试第一个信标");
+            Require(Step(farm, null, map, ref now, 2200).Point == new Point(792, 452), "按置信排序尝试最佳信标");
 
             var overlap = Ui();
             overlap.Teleport = true;
             overlap.TeleportBox = new Rectangle(1280, 780, 60, 50);
             Require(Step(farm, null, overlap, ref now, 1200).Request == FarmRequest.None,
                 "确认回血路线时不能误点通用传送或移除标记");
-            Require(Step(farm, null, overlap, ref now, 2800).Point == new Point(96, 450),
-                "第一个信标无传送按钮后关闭重叠选单");
-            Require(Step(farm, null, map, ref now, 1000).Point == new Point(717, 432), "继续尝试下一个信标");
+            overlap.WaypointPopupBox = new Rectangle(1050, 450, 16, 24);
+            Require(Step(farm, null, overlap, ref now, 2800).Point == new Point(1058, 462),
+                "最佳信标无传送按钮时，选择已识别重叠选单中的同一类型信标，不切换其它地图候选");
 
             var waypoint = Ui();
             waypoint.WaypointTravelBox = new Rectangle(1310, 800, 40, 24);
@@ -1382,8 +1663,8 @@ namespace TideCombat
                 "回到首领位置应向前奔跑");
             Require(Step(farm, Hud(false), overworld, ref now, 500).Request == FarmRequest.Middle, "移动中搜索战斗");
             Step(farm, Hud(true), overworld, ref now, 500);
-            Require(farm.MovementKey == 0 && farm.Kills == 0 && farm.Phase == "Teleport.OpenBook",
-                "恢复后从配置入口重新挑战，死亡轮次不计入击杀");
+            Require(farm.MovementKey == 0 && farm.Kills == 0 && farm.Phase == "Fight" && farm.Attempts == 1,
+                "回血后已返回首领且确认战斗，直接继续，不重复打开图鉴");
         }
     }
 }

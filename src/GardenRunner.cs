@@ -28,9 +28,26 @@ namespace TideCombat
             return Regex.Matches(string.Join(" ", texts), "6000").Count != 1;
         }
 
+        internal static bool HasWeeklyLimit(IEnumerable<OcrLine> lines)
+        {
+            return lines.Any(line => line.Score >= .70f && IsCompleted(line.Text));
+        }
+
         internal static string Normalize(string text)
         {
             return Regex.Replace(text ?? string.Empty, @"\s+", string.Empty);
+        }
+
+        internal static Point PreferredPoint(Size frame, Rectangle detected, double x, double y)
+        {
+            Point reference = new Point((int)(frame.Width * x), (int)(frame.Height * y));
+            return detected.Contains(reference) ? reference : new Point(detected.X + detected.Width / 2,
+                detected.Y + detected.Height / 2);
+        }
+
+        internal static int WeeklyClaimSettleMs(bool initial, int attempt)
+        {
+            return (initial ? 3000 : 2000) - 1000 * attempt;
         }
     }
 
@@ -46,12 +63,15 @@ namespace TideCombat
     // Clicks garden weekly events until the 6000-point limit is reached.
     internal sealed class GardenRunner : IDisposable
     {
-        private static readonly string[] Priority = { "garden_get_skip", "garden_not_interested_confirm" };
-        private static readonly string[] Labels =
+        private static readonly string[] Priority = { "garden_get_skip" };
+        // The reference searches all garden event templates except two dependent
+        // confirmation buttons. Gold and purple may be found even when Skip is
+        // not detected. Confirmation is handled after its own initiating action.
+        internal static readonly string[] EventLabels =
         {
             "garden_not_interested", "garden_start_game", "garden_confirm", "garden_continue_game",
             "garden_new_stage", "garden_next_day", "garden_shop_buy", "garden_shop_close",
-            "garden_tip_close", "garden_unpause", "garden_get_skip", "garden_not_interested_confirm"
+            "garden_tip_close", "garden_unpause", "garden_get_skip", "garden_get_gold", "garden_get_purple"
         };
 
         private readonly CancellationToken token;
@@ -61,6 +81,7 @@ namespace TideCombat
         private readonly Action<string, PixelFrame> recordEvidence;
         private int actions;
         private long lastActivity;
+        private bool weeklyRewardVerified;
         internal bool Failed { get; private set; }
         internal string Failure { get; private set; }
         internal bool CompletionVerified { get; private set; }
@@ -89,21 +110,28 @@ namespace TideCombat
                 Fail("无法打开每周乐园页面。");
                 return;
             }
+            int route = world.InputRouteVersion;
             Record("garden-weekly-before");
-            if (!ClaimWeeklyRewards())
+            if (!ClaimWeeklyRewards(route, initial: true))
             {
                 Fail("周常乐园页面中的可领取奖励未得到确认。");
                 return;
             }
-            if (WeeklyCompleted())
+            if (WeeklyCompleted(route))
             {
+                if (!weeklyRewardVerified)
+                {
+                    Fail("已达到周积分上限，但未确认奖励已经领取。");
+                    return;
+                }
                 AlreadyCompleted = true;
                 CompletionVerified = true;
                 Record("after-garden-verified");
                 Finish();
                 return;
             }
-            if (!world.Click(garden))
+            if (!FindGardenEntry(out garden) || !world.ClickOnRoute(GardenMath.PreferredPoint(
+                new Size(world.Frame.Width, world.Frame.Height), garden, .246, .486), route))
             {
                 Fail("未能点击已识别的周常乐园入口。");
                 return;
@@ -154,19 +182,20 @@ namespace TideCombat
                 box = Rectangle.Empty;
                 return false;
             }
-            label = world.Vision.BestMatchScored(world.Frame, Labels, Priority, 20, .82, .72, out box);
+            label = world.Vision.BestMatchScored(world.Frame, EventLabels, Priority, 20, .82, .72, out box);
             return label != null;
         }
 
         private bool Handle(string label, Rectangle box)
         {
+            int route = world.InputRouteVersion;
             Report("处理 " + label);
             switch (label)
             {
                 case "garden_get_skip":
                 {
                     world.Sleep(1000);
-                    Rectangle gold, purple, confirm;
+                    Rectangle gold, purple;
                     bool selected;
                     if (FindWide("garden_get_gold", out gold))
                         selected = world.Click(gold);
@@ -177,7 +206,7 @@ namespace TideCombat
                     if (!selected)
                         return false;
                     world.Sleep(1000);
-                    return !world.FindNear("garden_get_confirm_gray", .80, out confirm) || world.Click(confirm);
+                    return ConfirmIfVisible("garden_get_confirm_gray", route);
                 }
                 case "garden_not_interested":
                 {
@@ -189,9 +218,7 @@ namespace TideCombat
                             return false;
                         world.Sleep(1000);
                     }
-                    Rectangle confirm;
-                    return world.FindNear("garden_not_interested_confirm", .80, out confirm)
-                        ? world.Click(confirm) : matches.Count > 0;
+                    return matches.Count > 0 && ConfirmIfVisible("garden_not_interested_confirm", route);
                 }
                 case "garden_start_game":
                     if (!Blessing())
@@ -202,6 +229,34 @@ namespace TideCombat
                 return false;
             world.Sleep(1000);
             return true;
+        }
+
+        private bool ConfirmIfVisible(string label, int route)
+        {
+            Rectangle confirm = Rectangle.Empty;
+            bool found = world.WaitUntil(() => world.InputRouteVersion == route &&
+                world.FindNear(label, .80, out confirm), 1500);
+            if (token.IsCancellationRequested || world.InputRouteVersion != route || !world.Captured)
+                return false;
+            // Match the reference's post-confirm settle time without clicking an
+            // arbitrary location if the expected confirmation never appears.
+            if (!found)
+                return false;
+            Point target = new Point(confirm.X + confirm.Width / 2, confirm.Y + confirm.Height / 2);
+            foreach (VisualPattern pattern in PatternBank.For(label))
+            {
+                Rectangle expected = pattern.Map(world.Frame.Width, 0);
+                Point reference = new Point(expected.X + expected.Width / 2, expected.Y + expected.Height / 2);
+                if (confirm.Contains(reference))
+                {
+                    target = reference;
+                    break;
+                }
+            }
+            if (!world.ClickOnRoute(target, route))
+                return false;
+            world.Sleep(1000);
+            return !token.IsCancellationRequested && world.InputRouteVersion == route;
         }
 
         private bool Blessing()
@@ -220,11 +275,21 @@ namespace TideCombat
 
         private bool TryFinish()
         {
+            int route = world.InputRouteVersion;
             Rectangle restart, back;
             if (!world.FindNear("a_garden_restart", .80, out restart) ||
                 !world.FindNear("a_garden_back", .80, out back))
                 return false;
             world.Sleep(2000);
+            token.ThrowIfCancellationRequested();
+            if (!world.Tick() || world.InputRouteVersion != route)
+            {
+                Fail("确认乐园结算时游戏窗口已变更或画面不可用。");
+                return true;
+            }
+            if (!world.FindNear("a_garden_restart", .80, out restart) ||
+                !world.FindNear("a_garden_back", .80, out back))
+                return false;
             var lines = world.Read(0.373, 0.346, 0.859, 0.615);
             var texts = new List<string>(lines.Count);
             foreach (OcrLine line in lines)
@@ -232,7 +297,7 @@ namespace TideCombat
                     texts.Add(line.Text);
             if (!GardenMath.IsFinished(texts))
             {
-                if (!world.Click(restart))
+                if (!world.ClickOnRoute(restart, route))
                 {
                     Fail("识别到乐园未达标，但未能发送重试点击。");
                     return true;
@@ -240,28 +305,45 @@ namespace TideCombat
                 lastActivity = DateTime.UtcNow.Ticks / TimeSpan.TicksPerMillisecond;
                 return false;
             }
-            Record("garden-result-limit");
-            if (!world.Click(back))
+            Record("garden-result");
+            if (!world.ClickOnRoute(back, route))
             {
-                Fail("结算已达标，但未能返回周常乐园页面。");
+                Fail("未能从结算画面返回周常乐园页面。");
                 return true;
             }
             world.Sleep(1000);
-            if (world.WaitFind("garden_start_game", 5000))
+            if (world.WaitUntil(() =>
             {
-                var entranceLimit = world.Read(.015, .10, .29, .28);
-                if (entranceLimit.Any(line => line.Score >= .70f && GardenMath.IsCompleted(line.Text)))
-                    Record("garden-entrance-limit");
-                world.Key((char)0x1B);
+                Rectangle start;
+                return world.InputRouteVersion == route && world.FindNear("garden_start_game", .80, out start);
+            }, 5000))
+            {
+                if (!world.Key((char)0x1B, route: route))
+                {
+                    Fail("未能退出乐园入口画面。");
+                    return true;
+                }
                 world.Sleep(800);
             }
             Rectangle quest = Rectangle.Empty;
-            if (world.WaitUntil(() => world.Vision.FindGuidebookQuest(world.Frame, out quest), 30000))
+            bool guide = world.WaitUntil(() => world.InputRouteVersion == route &&
+                world.Vision.FindGuidebookQuest(world.Frame, out quest), 30000);
+            token.ThrowIfCancellationRequested();
+            Rectangle garden;
+            if (!guide || !FindGardenEntry(out garden) && !SelectWeeklyTab(route, out garden))
             {
-                if (!world.Click(.927, .893)) { Fail("周常奖励点击未发送。"); return true; }
-                world.Sleep(2000);
-                if (!world.Click(.927, .893)) { Fail("周常奖励第二次点击未发送。"); return true; }
-                world.Sleep(1000);
+                Fail("退出后未确认回到周常乐园页面。");
+                return true;
+            }
+            if (!WeeklyCompleted(route))
+            {
+                Fail("返回周常页面后未确认积分达到上限。");
+                return true;
+            }
+            if (!ClaimWeeklyRewards(route) || !weeklyRewardVerified)
+            {
+                Fail("结算后的可领取奖励未得到确认。");
+                return true;
             }
             token.ThrowIfCancellationRequested();
             CompletionVerified = true;
@@ -269,25 +351,54 @@ namespace TideCombat
             return true;
         }
 
-        private bool ClaimWeeklyRewards()
+        private bool ClaimWeeklyRewards(int route, bool initial = false)
         {
-            Rectangle claim;
-            if (!FindWeeklyClaim(out claim))
-                return true;
-            Record("garden-reward-before");
-            if (!world.Click(claim))
-                return false;
-            if (!world.WaitUntil(HasWeeklyClaimConfirmation, 5000))
-                return false;
-            Record("garden-reward-confirmed");
-            if (HasWeeklyRewardReceipt())
+            // The reference clicks the weekly reward area twice. Handle that
+            // same maximum number of claims, but verify each receipt before
+            // checking for a second item instead of blindly clicking twice.
+            weeklyRewardVerified = false;
+            for (int attempt = 0; attempt < 2; attempt++)
             {
-                if (!world.Key((char)0x1B) ||
-                    !world.WaitUntil(() => { Rectangle entry; return FindGardenEntry(out entry); }, 5000))
+                if (!VerifyWeeklyPage(route))
                     return false;
+                Rectangle claim;
+                if (!FindWeeklyClaim(out claim))
+                {
+                    // An empty claim OCR is not proof of receipt. At the weekly
+                    // limit require an actual received or claimed indication.
+                    if (!VerifyWeeklyPage(route))
+                        return false;
+                    if (!weeklyRewardVerified)
+                        weeklyRewardVerified = HasWeeklyClaimedStatus();
+                    if (WeeklyCompleted(route) && !weeklyRewardVerified)
+                        return false;
+                    return world.InputRouteVersion == route && world.Captured;
+                }
+                Record("garden-reward-before");
+                if (!world.ClickOnRoute(GardenMath.PreferredPoint(new Size(world.Frame.Width, world.Frame.Height),
+                    claim, .927, .893), route))
+                    return false;
+                long clickedAt = world.Now;
+                if (!world.WaitUntil(() => world.InputRouteVersion == route && HasWeeklyClaimConfirmation(), 5000))
+                    return false;
+                weeklyRewardVerified = true;
+                Record("garden-reward-confirmed");
+                if (HasWeeklyRewardReceipt() && (!world.Key((char)0x1B, route: route) ||
+                    !world.WaitUntil(() => VerifyWeeklyPage(route), 5000)))
+                    return false;
+                int remainingDelay = (int)Math.Max(0, GardenMath.WeeklyClaimSettleMs(initial, attempt) - (world.Now - clickedAt));
+                if (remainingDelay > 0)
+                    world.Sleep(remainingDelay);
             }
-            // Another claim is still outstanding. The caller can keep this state as an unverified outcome.
-            return !FindWeeklyClaim(out claim);
+            Rectangle remaining;
+            return !FindWeeklyClaim(out remaining) && VerifyWeeklyPage(route);
+        }
+
+        private bool VerifyWeeklyPage(int route)
+        {
+            Rectangle entry;
+            return world.InputRouteVersion == route && FindGardenEntry(out entry) && world.Captured &&
+                world.InputRouteVersion == route;
         }
 
         private bool FindWeeklyClaim(out Rectangle button)
@@ -307,8 +418,11 @@ namespace TideCombat
 
         private bool HasWeeklyClaimConfirmation()
         {
-            if (HasWeeklyRewardReceipt())
-                return true;
+            return HasWeeklyRewardReceipt() || HasWeeklyClaimedStatus();
+        }
+
+        private bool HasWeeklyClaimedStatus()
+        {
             Rectangle entry;
             if (!FindGardenEntry(out entry))
                 return false;
@@ -327,14 +441,41 @@ namespace TideCombat
         private bool OpenWeeklyPage(out Rectangle garden)
         {
             garden = Rectangle.Empty;
+            if (ownsWorld && !EnsureWorld())
+                return false;
             var guide = new GuidebookNavigation(world, Report, GuideTab.Quest);
             if (!guide.Open(EnsureWorld))
                 return false;
+            int route = world.InputRouteVersion;
+            world.Sleep(1000);
+            return SelectWeeklyTab(route, out garden);
+        }
+
+        private bool SelectWeeklyTab(int route, out Rectangle garden)
+        {
+            garden = Rectangle.Empty;
             Rectangle weekly = Rectangle.Empty;
-            if (!world.WaitUntil(() => FindWeeklyTab(out weekly), 5000) || !world.Click(weekly))
-                return false;
+            if (world.WaitUntil(() => world.InputRouteVersion == route && FindWeeklyTab(out weekly), 5000))
+            {
+                if (!world.ClickOnRoute(GardenMath.PreferredPoint(new Size(world.Frame.Width, world.Frame.Height),
+                    weekly, .343, .129), route))
+                    return false;
+                world.Sleep(1000);
+            }
+            else
+            {
+                // Keep the source's known navigation coordinate as an OCR
+                // fallback, but only on the selected quest-guide page.
+                if (!world.Tick() || world.InputRouteVersion != route ||
+                    !world.Vision.IsGuidebookQuestSelected(world.Frame))
+                    return false;
+                Point known = new Point((int)(world.Frame.Width * .343), (int)(world.Frame.Height * .129));
+                if (!world.ClickOnRoute(known, route))
+                    return false;
+                world.Sleep(1000);
+            }
             Rectangle entry = Rectangle.Empty;
-            bool valid = world.WaitUntil(() => FindGardenEntry(out entry), 5000);
+            bool valid = world.WaitUntil(() => world.InputRouteVersion == route && FindGardenEntry(out entry), 5000);
             garden = entry;
             return valid;
         }
@@ -370,13 +511,10 @@ namespace TideCombat
             return false;
         }
 
-        private bool WeeklyCompleted()
+        private bool WeeklyCompleted(int route)
         {
             var lines = world.Read(0.102, 0.793, 0.284, 0.956);
-            foreach (OcrLine line in lines)
-                if (line.Score >= .70f && (line.Text ?? string.Empty).Contains("6000"))
-                    return true;
-            return false;
+            return world.InputRouteVersion == route && GardenMath.HasWeeklyLimit(lines);
         }
 
         private bool FindWide(string label, out Rectangle box)
@@ -386,25 +524,8 @@ namespace TideCombat
 
         private bool EnsureWorld()
         {
-            if (!world.Tick())
-                return false;
-            if (world.Ui != null && world.Ui.InRealm)
-            {
-                world.Key((char)0x1B);
-                world.Sleep(800);
-                Rectangle confirm;
-                if (world.FindNear("gray_confirm_exit_button", .74, out confirm))
-                {
-                    world.Click(confirm);
-                    world.Sleep(1200);
-                }
-            }
-            for (int attempt = 0; attempt < 3 && !world.VerifiedWorld; attempt++)
-            {
-                world.Key((char)0x1B);
-                world.Sleep(700);
-            }
-            return world.VerifiedWorld && !world.InRealm;
+            return new WorldRecovery(world, Report).EnsureMain(30000, loginPending: ownsWorld) &&
+                world.VerifiedWorld && !world.InRealm;
         }
 
         private void Report(string state)

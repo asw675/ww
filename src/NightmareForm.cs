@@ -15,7 +15,7 @@ namespace TideCombat
             Text = "梦魇净化（Nightmare Purification）", AutoSize = true, Margin = new Padding(0, 2, 0, 6)
         };
         private readonly Label hint = Theme.Text(
-            "需要已解锁 F2 图鉴中的对应页签。工具会逐个处理未完成的巢穴，死亡 3 次的目标本轮跳过。", Theme.Muted);
+            "需要已解锁 F2 图鉴中的对应页签。未选择时默认处理两类零进度巢穴；死亡 3 次的目标本轮跳过。", Theme.Muted);
 
         internal NightmareForm(NightmareOptions options, bool saveOnly = false)
         {

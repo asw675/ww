@@ -26,7 +26,10 @@ namespace TideCombat
         {
             if (config == null)
                 return 0;
-            int applied = ApplyEnhance(settings.Enhance, config) + ApplyReferenceTask(settings, config, task);
+            // OK-style top-level keys belong only to the selected task. Explicit
+            // WW nested sections can still override child-task configuration.
+            int applied = ApplyEnhance(settings.Enhance, config, task == null || task == "EnhanceEchoTask") +
+                ApplyReferenceTask(settings, config, task);
             foreach (KeyValuePair<string, object> pair in config)
             {
                 var values = pair.Value as Dictionary<string, object>;
@@ -36,7 +39,7 @@ namespace TideCombat
                 {
                     case "farm": applied += ApplyFarmOverrides(settings.Farm, values); break;
                     case "daily": applied += ApplyObject(settings.Daily, values); break;
-                    case "domain": applied += ApplyObject(settings.Domain, values); break;
+                    case "domain": applied += ApplyDomainOverrides(settings.Domain, values, task); break;
                     case "nightmare": applied += ApplyObject(settings.Nightmare, values); break;
                     case "change": applied += ApplyObject(settings.Change, values); break;
                     case "cultivation": applied += ApplyObject(settings.Cultivation, values); break;
@@ -55,11 +58,19 @@ namespace TideCombat
             {
                 case "FarmEchoTask": return ApplyReferenceFarm(settings.Farm, config);
                 case "TacetTask":
-                    return ApplyReferenceField(settings.Domain, config, tacetIndex, "Index");
+                    return ApplyReferenceDomainIndex(settings.Domain, config, tacetIndex, DomainKind.Tacet);
                 case "ForgeryTask":
-                    return ApplyReferenceField(settings.Domain, config, forgeryIndex, "Index");
+                    return ApplyReferenceDomainIndex(settings.Domain, config, forgeryIndex, DomainKind.Forgery);
                 case "SimulationTask":
                     return ApplyReferenceField(settings.Domain, config, material, "Material", ReferenceMaterial);
+                case "ChangeEchoTask":
+                    return ApplyReferenceField(settings.Change, config, "目标属性", "Target", value =>
+                    {
+                        var target = value as string;
+                        if (Array.IndexOf(ChangeOptions.Targets, target) < 0)
+                            throw new InvalidDataException("目标属性无效。");
+                        return target;
+                    });
                 case "CultivationTask":
                     return ApplyReferenceField(settings.Cultivation, config, "Ascension Materials", "Ascension") +
                         ApplyReferenceField(settings.Cultivation, config, "Skill Materials", "Skills") +
@@ -68,7 +79,10 @@ namespace TideCombat
                 case "NightmareNestTask":
                     if (!config.TryGetValue(farm, out choice))
                         return 0;
-                    IList nests = ReferenceSelection(choice, farm);
+                    // The reference treats a null or empty selection as its
+                    // default two nest types; only non-list non-null values
+                    // are malformed.
+                    IList nests = ReferenceSelection(choice, farm, allowNullAsEmpty: true);
                     settings.Nightmare.Purification = nests.Contains("Nightmare Purification");
                     settings.Nightmare.TacetNest = nests.Contains("Tacet Discord Nest");
                     settings.Nightmare.Validate();
@@ -77,6 +91,27 @@ namespace TideCombat
                     return ApplyReferenceDaily(settings.Daily, config, farm, tacetIndex, forgeryIndex, material);
                 default:
                     return 0;
+            }
+        }
+
+        private static int ApplyReferenceDomainIndex(DomainOptions domain, Dictionary<string, object> config,
+            string key, DomainKind kind)
+        {
+            object value;
+            if (domain == null || !config.TryGetValue(key, out value)) return 0;
+            try
+            {
+                int index = ToInt(value);
+                if (index < 1 || index > (kind == DomainKind.Forgery ? 20 : 21))
+                    throw new InvalidDataException("副本序号无效。");
+                domain.SetIndexForKind(kind, index);
+                return 1;
+            }
+            catch (Exception error)
+            {
+                if (!(error is InvalidDataException || error is FormatException || error is ArgumentException ||
+                    error is OverflowException || error is InvalidCastException)) throw;
+                throw new InvalidDataException("原版账号配置无效 · " + key, error);
             }
         }
 
@@ -127,14 +162,19 @@ namespace TideCombat
             bool hasAdditional = config.TryGetValue(additional, out saved);
             if (hasAdditional)
             {
-                IList tasks = ReferenceSelection(saved, additional);
+                // OKWW's `config.get(ADDITIONAL_TASKS) or []` explicitly
+                // accepts JSON null as no optional tasks.
+                IList tasks = ReferenceSelection(saved, additional, allowNullAsEmpty: true);
                 daily.CheckGarden = tasks.Contains("Check Weekly Garden");
                 daily.AutoNightmare = tasks.Contains("Auto Farm all Nightmare Nest");
                 daily.MergeIfNeeded = tasks.Contains("Merge Echo If discarded > 1000");
                 daily.Farm4C = tasks.Contains("Teleport and Farm 4C Echo");
                 applied += 4;
             }
-            if (hasAdditional || nightmare > 0)
+            // Flat reference keys explicitly describe a reference task. Do
+            // not accidentally combine them with a WW-only global ordered
+            // plan; an explicitly nested Daily override can still opt into WW.
+            if (applied > 0 || nightmare > 0)
             {
                 daily.Tasks = null;
                 daily.NightmareMode = null;
@@ -163,8 +203,9 @@ namespace TideCombat
             }
         }
 
-        private static IList ReferenceSelection(object value, string key)
+        private static IList ReferenceSelection(object value, string key, bool allowNullAsEmpty = false)
         {
+            if (value == null && allowNullAsEmpty) return new object[0];
             var items = value as IList;
             if (items == null)
                 throw new InvalidDataException("原版账号配置必须是列表 · " + key);
@@ -226,20 +267,49 @@ namespace TideCombat
             }
         }
 
-        private static int ApplyEnhance(EnhanceOptions options, Dictionary<string, object> config)
+        private static int ApplyEnhance(EnhanceOptions options, Dictionary<string, object> config, bool includeReference = true)
         {
             var reference = new Dictionary<string, object>();
             Dictionary<string, object> local = null;
             foreach (KeyValuePair<string, object> pair in config)
             {
                 string field;
-                if (ReferenceEnhanceKeys.TryGetValue(pair.Key, out field))
+                if (includeReference && ReferenceEnhanceKeys.TryGetValue(pair.Key, out field))
                     reference[field] = pair.Value;
                 else if (string.Equals(pair.Key, "Enhance", StringComparison.OrdinalIgnoreCase))
                     local = pair.Value as Dictionary<string, object>;
             }
             int applied = ApplyObject(options, reference);
             return local == null ? applied : applied + ApplyObject(options, local);
+        }
+
+        private static int ApplyDomainOverrides(DomainOptions domain, Dictionary<string, object> values, string task)
+        {
+            if (domain == null) return 0;
+            DomainKind previous = domain.Kind;
+            // Preserve the category selected before merging legacy Kind/Index.
+            domain.SetIndexForKind(DomainKind.Tacet, domain.IndexForKind(DomainKind.Tacet));
+            domain.SetIndexForKind(DomainKind.Forgery, domain.IndexForKind(DomainKind.Forgery));
+            var fields = new HashSet<string>(values.Keys, StringComparer.OrdinalIgnoreCase);
+            DomainKind? taskKind = task == "TacetTask" ? DomainKind.Tacet : task == "ForgeryTask" ? DomainKind.Forgery :
+                task == "SimulationTask" ? (DomainKind?)DomainKind.Simulation : null;
+            if (taskKind.HasValue && !fields.Contains("Kind"))
+            {
+                // Legacy account files may specify an Index without a Kind;
+                // that Index belongs to the selected account task, not the
+                // most recently opened standalone domain category.
+                int previousIndex = domain.IndexForKind(taskKind.Value);
+                domain.Kind = taskKind.Value;
+                domain.Index = previousIndex;
+            }
+            int count = ApplyObject(domain, values);
+            string category = domain.Kind + "Index";
+            if (!fields.Contains("Index") && (previous != domain.Kind || fields.Contains(category)))
+                domain.Index = domain.Kind == DomainKind.Tacet ? domain.TacetIndex ?? 1 :
+                    domain.Kind == DomainKind.Forgery ? domain.ForgeryIndex ?? 1 : 1;
+            if (domain.Kind == DomainKind.Tacet || domain.Kind == DomainKind.Forgery)
+                domain.SetIndexForKind(domain.Kind, domain.Index);
+            return count;
         }
 
         private static int ApplyFarmOverrides(FarmOptions farm, Dictionary<string, object> values)
@@ -295,19 +365,24 @@ namespace TideCombat
                     {
                         case "autotarget": settings.AutoTarget = ToBool(pair.Value); break;
                         case "autorevive": settings.AutoRevive = ToBool(pair.Value); break;
-                        case "useliberation": settings.UseLiberation = ToBool(pair.Value); break;
+                        case "useliberation":
+                            settings.UseLiberation = ToBool(pair.Value);
+                            settings.HasAccountLiberationOverride = true;
+                            break;
                         case "rotateparty": settings.RotateParty = ToBool(pair.Value); break;
                         case "preferconcerto": settings.PreferConcerto = ToBool(pair.Value); break;
                         case "switchatlowhealth": settings.SwitchAtLowHealth = ToBool(pair.Value); break;
                         case "supportopener": settings.SupportOpener = ToBool(pair.Value); break;
                         case "detectskillkeys": settings.DetectSkillKeys = ToBool(pair.Value); break;
-                        case "checklevitator": settings.CheckLevitator = ToBool(pair.Value); break;
                         case "source": settings.Source = (GameSource)Enum.ToObject(typeof(GameSource), ToInt(pair.Value)); break;
                         case "resonancekey": settings.ResonanceKey = Convert.ToString(pair.Value); break;
                         case "echokey": settings.EchoKey = Convert.ToString(pair.Value); break;
                         case "liberationkey": settings.LiberationKey = Convert.ToString(pair.Value); break;
                         case "guidebookkey": case "guidebook key": case "索拉指南":
                             settings.GuidebookKey = Convert.ToString(pair.Value); break;
+                        case "jumpkey": case "jump key": settings.JumpKey = Convert.ToString(pair.Value); break;
+                        case "dodgekey": case "dodge key": settings.DodgeKey = Convert.ToString(pair.Value); break;
+                        case "wheelkey": case "wheel key": settings.WheelKey = Convert.ToString(pair.Value); break;
                         case "toolkey": settings.ToolKey = Convert.ToString(pair.Value); break;
                         default: continue;
                     }
@@ -330,6 +405,7 @@ namespace TideCombat
         {
             if (type == typeof(bool)) return ToBool(value);
             if (type == typeof(int)) return ToInt(value);
+            if (type == typeof(int?)) return value == null ? null : (object)ToInt(value);
             if (type == typeof(double)) return Convert.ToDouble(value);
             if (type == typeof(decimal)) return Convert.ToDecimal(value);
             if (type == typeof(string)) return Convert.ToString(value);

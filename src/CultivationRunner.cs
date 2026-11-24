@@ -426,7 +426,7 @@ namespace TideCombat
             for (int attempt = 0; attempt < 2; attempt++)
             {
                 CombatOutcome outcome = CombatRunner.Engage(world, settings, token, 600000, 30000, seekTargets: true,
-                    timeoutFromEntry: true);
+                    timeoutFromEntry: true, openWorldAutoCombat: false);
                 if (outcome == CombatOutcome.Finished)
                     return true;
                 token.ThrowIfCancellationRequested();

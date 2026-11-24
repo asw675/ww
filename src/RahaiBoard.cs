@@ -5,18 +5,24 @@ using System.Linq;
 
 namespace TideCombat
 {
+    internal struct RahaiPoint
+    {
+        internal readonly double X, Y;
+        internal RahaiPoint(double x, double y) { X = x; Y = y; }
+    }
+
     internal sealed class RahaiPiece
     {
         internal int Slot;
         internal Point[] Cells;
-        internal PointF Pickup;
+        internal RahaiPoint Pickup;
     }
 
     internal sealed class RahaiMove
     {
         internal int Slot, Turns, Row, Column, Width, Height;
         internal ulong Mask;
-        internal PointF Drop
+        internal RahaiPoint Drop
         {
             get { return RahaiVision.CellCenter(Column + Width / 2.0, Row + Height / 2.0); }
         }
@@ -36,31 +42,33 @@ namespace TideCombat
 
         internal static bool Supported(PixelFrame frame)
         {
-            return frame.Height > 0 && Math.Abs(frame.Width / (double)frame.Height - 16.0 / 9) <= .012;
+            return frame.SourceHeight > 0 && Math.Abs(frame.SourceWidth / (double)frame.SourceHeight - 16.0 / 9) <= .012;
         }
 
-        internal static Point At(PixelFrame frame, PointF canonical)
+        internal static Point At(PixelFrame frame, RahaiPoint canonical)
         {
             return new Point((int)Math.Round(canonical.X * frame.Width / Width),
                 (int)Math.Round(canonical.Y * frame.Height / Height));
         }
 
-        internal static PointF CellCenter(double column, double row)
+        internal static RahaiPoint CellCenter(double column, double row)
         {
-            return new PointF((float)(BoardX + column * Cell), (float)(BoardY + row * Cell));
+            return new RahaiPoint(BoardX + column * Cell, BoardY + row * Cell);
         }
 
         internal static RahaiBoard Read(PixelFrame frame)
         {
-            if (!Supported(frame) || !HasBoardHeader(frame))
+            if (!Supported(frame))
                 return null;
+            var image = new CanonicalView(frame);
+            if (!HasBoardHeader(image)) return null;
             List<RahaiPiece> pieces = null;
-            var layouts = Trays.Where(layout => HasTrays(frame, layout)).ToList();
+            var layouts = Trays.Where(layout => HasTrays(image, layout)).ToList();
             foreach (int[] layout in layouts)
             {
                 if (layouts.Any(other => other.Length > layout.Length && layout.All(y => other.Contains(y))))
                     continue;
-                List<RahaiPiece> observed = ReadTrayLayout(frame, layout);
+                List<RahaiPiece> observed = ReadTrayLayout(image, layout);
                 if (observed == null)
                     continue;
                 if (pieces != null)
@@ -70,7 +78,7 @@ namespace TideCombat
             if (pieces == null)
                 return null;
             ulong occupied, fixedBlocks;
-            ReadCells(frame, out occupied, out fixedBlocks);
+            ReadCells(image, out occupied, out fixedBlocks);
             return new RahaiBoard { Mask = occupied, Fixed = fixedBlocks, Pieces = pieces };
         }
 
@@ -79,11 +87,11 @@ namespace TideCombat
             if (!Supported(frame))
                 return false;
             ulong occupied, fixedBlocks;
-            ReadCells(frame, out occupied, out fixedBlocks);
+            ReadCells(new CanonicalView(frame), out occupied, out fixedBlocks);
             return occupied == (before.Mask | move.Mask) && fixedBlocks == before.Fixed;
         }
 
-        private static bool HasBoardHeader(PixelFrame frame)
+        private static bool HasBoardHeader(CanonicalView frame)
         {
             int pale = 0;
             for (int y = 44; y < 102; y++)
@@ -102,7 +110,7 @@ namespace TideCombat
             return false;
         }
 
-        private static bool HasTrays(PixelFrame frame, int[] layout)
+        private static bool HasTrays(CanonicalView frame, int[] layout)
         {
             for (int slot = 0; slot < layout.Length; slot++)
             {
@@ -115,7 +123,7 @@ namespace TideCombat
             return true;
         }
 
-        private static List<RahaiPiece> ReadTrayLayout(PixelFrame frame, int[] layout)
+        private static List<RahaiPiece> ReadTrayLayout(CanonicalView frame, int[] layout)
         {
             var pieces = new List<RahaiPiece>();
             for (int slot = 0; slot < layout.Length; slot++)
@@ -129,7 +137,7 @@ namespace TideCombat
             return pieces;
         }
 
-        private static bool TryReadTray(PixelFrame frame, int slot, int trayY, out RahaiPiece piece)
+        private static bool TryReadTray(CanonicalView frame, int slot, int trayY, out RahaiPiece piece)
         {
             piece = null;
             int left = (int)Math.Round(TrayX) - 88, top = trayY - 88;
@@ -156,7 +164,7 @@ namespace TideCombat
                 return false;
 
             var cells = new List<Point>();
-            PointF pickup = PointF.Empty;
+            RahaiPoint pickup = default(RahaiPoint);
             double nearest = double.PositiveInfinity;
             for (int x = 0; x < width; x++)
                 for (int y = 0; y < height; y++)
@@ -165,11 +173,12 @@ namespace TideCombat
                     if (MedianValue(frame, cx + dx, cy + dy, 7) <= 83)
                         continue;
                     cells.Add(new Point(x, y));
-                    double distance = dx * dx + dy * dy;
+                    double px = cx + dx, py = cy + dy;
+                    double distance = (px - cx) * (px - cx) + (py - cy) * (py - cy);
                     if (distance < nearest)
                     {
                         nearest = distance;
-                        pickup = new PointF((float)(cx + dx), (float)(cy + dy));
+                        pickup = new RahaiPoint(px, py);
                     }
                 }
             if (cells.Count == 0 || cells.Max(point => point.X) != width - 1 || cells.Max(point => point.Y) != height - 1 ||
@@ -195,13 +204,13 @@ namespace TideCombat
             return reached.Count == cells.Count;
         }
 
-        private static void ReadCells(PixelFrame frame, out ulong occupied, out ulong fixedBlocks)
+        private static void ReadCells(CanonicalView frame, out ulong occupied, out ulong fixedBlocks)
         {
             occupied = fixedBlocks = 0;
             for (int row = 0; row < 8; row++)
                 for (int column = 0; column < 8; column++)
                 {
-                    PointF center = CellCenter(column + .5, row + .5);
+                    RahaiPoint center = CellCenter(column + .5, row + .5);
                     int votes = 0, fixedVotes = 0;
                     for (int dy = -25; dy <= 25; dy += 50)
                         for (int dx = -24; dx <= 24; dx += 48)
@@ -221,7 +230,7 @@ namespace TideCombat
                 }
         }
 
-        private static int MedianValue(PixelFrame frame, double x, double y, int radius)
+        private static int MedianValue(CanonicalView frame, double x, double y, int radius)
         {
             int centerX = (int)Math.Round(x), centerY = (int)Math.Round(y);
             var values = new int[(radius * 2 + 1) * (radius * 2 + 1)];
@@ -233,17 +242,91 @@ namespace TideCombat
             return values[count / 2];
         }
 
-        private static int Value(PixelFrame frame, int x, int y)
+        private static int Value(CanonicalView frame, int x, int y)
         {
             int red, green, blue;
             ReadColor(frame, x, y, out red, out green, out blue);
             return Math.Max(red, Math.Max(green, blue));
         }
 
-        private static void ReadColor(PixelFrame frame, int x, int y, out int red, out int green, out int blue)
+        private static void ReadColor(CanonicalView frame, int x, int y, out int red, out int green, out int blue)
         {
-            frame.Rgb((int)((x + .5) * frame.Width / Width), (int)((y + .5) * frame.Height / Height),
-                out red, out green, out blue);
+            frame.Rgb(x, y, out red, out green, out blue);
+        }
+
+        // Equivalent area-weighted samples of the native image resized directly
+        // to 2048x1152 (INTER_AREA), without first using the standard HUD frame.
+        // Evaluate only the pixels the board detector actually reads; previews
+        // require only 256 samples, not a second full-frame allocation per drag.
+        internal sealed class CanonicalView
+        {
+            private struct Slice
+            {
+                internal int First, Last, FirstWeight, LastWeight;
+            }
+
+            private readonly PixelFrame source;
+            private readonly Slice[] horizontal, vertical;
+            private readonly double area;
+            private readonly bool halfScale;
+
+            internal CanonicalView(PixelFrame frame)
+            {
+                source = frame.FullResolution;
+                if (source.Width == Width && source.Height == Height) return;
+                horizontal = Axis(source.Width, Width);
+                vertical = Axis(source.Height, Height);
+                area = (double)source.Width * source.Height;
+                halfScale = source.Width == 2 * Width && source.Height == 2 * Height;
+            }
+
+            private static Slice[] Axis(int sourceLength, int targetLength)
+            {
+                var slices = new Slice[targetLength];
+                for (int i = 0; i < targetLength; i++)
+                {
+                    long start = (long)i * sourceLength, end = start + sourceLength;
+                    int first = (int)(start / targetLength), last = (int)((end - 1) / targetLength);
+                    slices[i] = new Slice
+                    {
+                        First = first, Last = last,
+                        FirstWeight = first == last ? sourceLength : targetLength - (int)(start % targetLength),
+                        LastWeight = (int)(end - (long)last * targetLength)
+                    };
+                }
+                return slices;
+            }
+
+            internal void Rgb(int x, int y, out int red, out int green, out int blue)
+            {
+                if (horizontal == null)
+                {
+                    source.Rgb(x, y, out red, out green, out blue);
+                    return;
+                }
+                Slice xs = horizontal[x], ys = vertical[y];
+                long r = 0, g = 0, b = 0;
+                for (int sy = ys.First; sy <= ys.Last; sy++)
+                {
+                    long wy = sy == ys.First ? ys.FirstWeight : sy == ys.Last ? ys.LastWeight : Height;
+                    for (int sx = xs.First; sx <= xs.Last; sx++)
+                    {
+                        long wx = sx == xs.First ? xs.FirstWeight : sx == xs.Last ? xs.LastWeight : Width;
+                        int sr, sg, sb;
+                        source.Rgb(sx, sy, out sr, out sg, out sb);
+                        long weight = wx * wy;
+                        r += sr * weight; g += sg * weight; b += sb * weight;
+                    }
+                }
+                // OpenCV's optimized integer 2x shrink rounds half upwards;
+                // the generic area accumulation rounds to the nearest byte.
+                red = Round(r); green = Round(g); blue = Round(b);
+            }
+
+            private int Round(long value)
+            {
+                return halfScale ? (int)Math.Floor(value / area + .5) : (int)Math.Round(value / area);
+            }
         }
     }
 

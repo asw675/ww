@@ -30,21 +30,42 @@ namespace TideCombat
                 !defaults.MergeIfNeeded && !defaults.Farm4C, "by default only the garden is a selected post-daily task");
             Require(!DailyRunner.ShouldCheckNightmareProgress(defaults), "刷无音区时无需补日常声骸");
             Require(defaults.GetTasks().Take(3).SequenceEqual(new[]
-                { DailyTask.Stamina, DailyTask.DailyRewards, DailyTask.Nightmare }),
-                "无音区应先刷完，再领取日常奖励，最后检查梦魇");
+                { DailyTask.Nightmare, DailyTask.Stamina, DailyTask.DailyRewards }),
+                "隐式计划应先检查梦魇（无音区按需模式直接跳过），再刷体力、领取日常奖励");
+            Require(defaults.IsReferencePlan && defaults.GetReferenceRunTasks(false, 0).First() == DailyTask.Stamina &&
+                !defaults.GetReferenceRunTasks(false, 0).Contains(DailyTask.Nightmare) &&
+                defaults.GetReferenceRunTasks(true, 0).First() == DailyTask.DailyRewards,
+                "参考按需条件不满足时不能执行虚拟梦魇或体力步骤");
             defaults.Farm = DomainKind.Forgery;
             Require(DailyRunner.ShouldCheckNightmareProgress(defaults), "刷材料本时按日常进度决定是否补梦魇");
             Require(defaults.GetTasks().Take(3).SequenceEqual(new[]
-                { DailyTask.Stamina, DailyTask.Nightmare, DailyTask.DailyRewards }),
-                "材料本的按需梦魇应在检查日常奖励前执行");
+                { DailyTask.Nightmare, DailyTask.Stamina, DailyTask.DailyRewards }),
+                "材料本按需梦魇在体力本之前，基于初始日常积分判断");
+            Require(defaults.GetReferenceRunTasks(false, 0).Take(2).SequenceEqual(new[] { DailyTask.Nightmare, DailyTask.Stamina }) &&
+                defaults.GetReferenceRunTasks(false, 180).First() == DailyTask.Nightmare &&
+                !defaults.GetReferenceRunTasks(false, 180).Contains(DailyTask.Stamina),
+                "材料本的两个前置任务基于同一初始快照并独立判断");
+            defaults.AutoNightmare = true;
+            defaults.Farm = DomainKind.Tacet;
+            Require(defaults.GetTasks().First() == DailyTask.Nightmare &&
+                defaults.GetNightmareMode() == DailyNightmareMode.All, "全清梦魇同样必须在无音区前");
+            Require(defaults.GetReferenceRunTasks(true, 180).First() == DailyTask.Nightmare &&
+                !defaults.GetReferenceRunTasks(true, 180).Contains(DailyTask.Stamina), "原版全清模式不受日常奖励积分制约");
+            defaults.AutoNightmare = false;
+            defaults.FarmNightmareEcho = false;
+            Require(!defaults.GetTasks().Contains(DailyTask.Nightmare), "禁用两种梦魇选项时不运行梦魇");
 
-            DailyTask[] standard = defaults.GetTasks();
-            DailyPlan.OrderRewardsAndNightmare(standard, true);
-            Require(standard[1] == DailyTask.DailyRewards && standard[2] == DailyTask.Nightmare,
-                "无音区或培养目标实际领奖后先领日常");
-            DailyPlan.OrderRewardsAndNightmare(standard, false);
-            Require(standard[1] == DailyTask.Nightmare && standard[2] == DailyTask.DailyRewards,
-                "没有体力回执时先执行已启用的梦魇");
+            defaults.FarmNightmareEcho = true;
+            defaults.Farm = DomainKind.Cultivation;
+            DailyTask[] cultivationPlan = defaults.GetTasks();
+            Require(!defaults.IsReferencePlan, "无原版对应的培养目标明确使用 WW 扩展路径");
+            Require(cultivationPlan[0] == DailyTask.Stamina, "WW 培养目标优先执行，避免重复梦魇");
+            DailyPlan.OrderCultivationRewardsAndNightmare(cultivationPlan, false);
+            Require(cultivationPlan[1] == DailyTask.Nightmare && cultivationPlan[2] == DailyTask.DailyRewards,
+                "培养无消耗时保留旧版先梦魇后领奖的顺序");
+            DailyPlan.OrderCultivationRewardsAndNightmare(cultivationPlan, true);
+            Require(cultivationPlan[1] == DailyTask.DailyRewards && cultivationPlan[2] == DailyTask.Nightmare,
+                "培养有确认消耗时保留旧版先领奖后梦魇的顺序");
 
             int value;
             Require(DailyPlan.TryReadPoints(new[] { Line("２０／１００") }, out value) && value == 20,
@@ -60,6 +81,36 @@ namespace TideCombat
                 "需要区分确认消耗 0 体力与未识别");
             Require(!DailyPlan.TryReadStamina(new[] { Line("40/180"), Line("120/180") }, out value),
                 "冲突的体力计数不得用于计算消耗额度");
+            bool uncertain;
+            Require(!DailyPlan.TryReadStamina(new[] { Line("40/180"), Line("120/180") }, out value, out uncertain) && uncertain &&
+                !DailyPlan.TryReadStamina(new[] { Line("已完成") }, out value, out uncertain) && !uncertain,
+                "必须区分冲突与参考允许按零计算的缺失计数");
+            OcrLine weak = Line("40/180"); weak.Score = .5f;
+            Require(!DailyPlan.TryReadStamina(new[] { weak }, out value, out uncertain) && uncertain,
+                "低置信数值不得视作缺失并盲目消耗体力");
+            Require(DailyPlan.ReferenceControlPoint(new Rectangle(1780, 930, 60, 40), new Size(1920, 1080), .93, .882) == new Point(1785, 952) &&
+                DailyPlan.ReferenceControlPoint(new Rectangle(1500, 850, 60, 40), new Size(1920, 1080), .93, .882) == new Point(1530, 870),
+                "参考坐标只能在已识别按钮内部使用，布局不同改走已识别目标");
+            Require(DailyPlan.RecoverableReferenceTask(DailyTask.Nightmare) && DailyPlan.RecoverableReferenceTask(DailyTask.Garden) &&
+                DailyPlan.RecoverableReferenceTask(DailyTask.Merge) && !DailyPlan.RecoverableReferenceTask(DailyTask.Stamina) &&
+                !DailyPlan.RecoverableReferenceTask(DailyTask.Mail) && !DailyPlan.RecoverableReferenceTask(DailyTask.Farm4C),
+                "仅参考明确捕获的异常项目允许安全恢复后继续");
+            foreach (bool reference in new[] { false, true })
+            {
+                Require(DailyPlan.CanAttemptRecovery(DailyTask.Stamina, reference, false, true) &&
+                    DailyPlan.CanAttemptRecovery(DailyTask.Nightmare, reference, false, true) &&
+                    !DailyPlan.CanAttemptRecovery(DailyTask.Stamina, reference, false, false),
+                    "普通未核验返回允许安全恢复，真实体力本错误仍必须停止");
+            }
+            Require(!TaskContinuation.SameWindow(IntPtr.Zero, 0, IntPtr.Zero, 0) &&
+                TaskContinuation.SameWindow(new IntPtr(34), 56, new IntPtr(34), 56) &&
+                !TaskContinuation.SameWindow(new IntPtr(34), 56, new IntPtr(35), 56) &&
+                !TaskContinuation.SameWindow(new IntPtr(34), 56, new IntPtr(34), 57),
+                "正常未核验结果不能跨不明窗口或进程继续");
+            Require(GuidebookNavigation.ReferenceOpenDelayMs == 4000 &&
+                GuidebookNavigation.ReferenceBeforeTabDelayMs == 2000 && GuidebookNavigation.ReferenceAfterTabDelayMs == 1500 &&
+                GuidebookNavigation.ShouldClickTab(false) && !GuidebookNavigation.ShouldClickTab(true),
+                "真实图鉴导航采用参考等待，已确认选中不重复发送输入");
         }
 
         private static OcrLine Line(string text)
@@ -79,6 +130,22 @@ namespace TideCombat
             }
             catch (System.IO.InvalidDataException) { threw = true; }
             Require(threw, "越界序号应拒绝");
+
+            foreach (DailyNightmareMode mode in new[] { DailyNightmareMode.AsNeeded, DailyNightmareMode.CaptureOnce })
+            {
+                var configured = new NightmareOptions { Purification = true };
+                NightmareOptions capture = DailyRunner.CreateNightmareOptions(configured, mode);
+                Require(capture.CaptureOnce && capture.Purification && !capture.TacetNest && !configured.CaptureOnce,
+                    "单次捕获应只检查选中的巢穴类型，且不得修改独立梦魇任务配置");
+                NightmareOptions empty = DailyRunner.CreateNightmareOptions(new NightmareOptions(), mode);
+                Require(empty.CaptureOnce && empty.Purification && empty.TacetNest,
+                    "未配置巢穴类型的单次捕获应检查两种巢穴");
+            }
+
+            NightmareOptions all = DailyRunner.CreateNightmareOptions(new NightmareOptions { TacetNest = true,
+                CaptureOnce = true }, DailyNightmareMode.All);
+            Require(!all.CaptureOnce && all.TacetNest && !all.Purification,
+                "全部模式应清理选中的巢穴类型");
         }
 
         internal static void AdditionalConfig()
@@ -158,10 +225,10 @@ namespace TideCombat
                 settings = (CombatSettings)new DataContractJsonSerializer(typeof(CombatSettings)).ReadObject(source);
             DailyOptions daily = settings.Daily;
             daily.Validate();
-            Require(daily.GetTasks().SequenceEqual(new[] { DailyTask.Stamina, DailyTask.DailyRewards, DailyTask.Nightmare,
+            Require(daily.GetTasks().SequenceEqual(new[] { DailyTask.Nightmare, DailyTask.Stamina, DailyTask.DailyRewards,
                 DailyTask.Mail, DailyTask.BattlePass, DailyTask.Merge, DailyTask.Farm4C }) &&
                 daily.GetNightmareMode() == DailyNightmareMode.All && daily.Farm == DomainKind.Forgery,
-                "旧配置的任务、顺序或梦魇方式发生变化");
+                "旧配置保留任务和梦魇方式，并采用参考版本的隐式顺序");
         }
     }
 }

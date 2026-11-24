@@ -24,12 +24,40 @@ namespace TideCombat
                 "menu tasks must preserve configured capture modes before discovering the game window");
             Require(CombatSettings.Defaults().Source == GameSource.AutoLocal,
                 "fresh settings must discover the local window automatically");
+            Require(GameWindow.SupportedSize(new Size(1280, 720)) && GameWindow.SupportedSize(new Size(1366, 768)) &&
+                GameWindow.SupportedSize(new Size(1920, 1080)) && GameWindow.SupportedSize(new Size(3840, 2160)) &&
+                !GameWindow.SupportedSize(new Size(2560, 1080)) && !GameWindow.SupportedSize(new Size(1024, 576)),
+                "window admission follows the reference 16:9 and minimum-size contract");
+            var fullWindow = new Rectangle(-12, 20, 1616, 940);
+            var client = new Rectangle(-4, 52, 1600, 900);
+            Require(WindowCapture.FullRenderCrop(client, fullWindow, client.Size) == new Rectangle(8, 32, 1600, 900) &&
+                WindowCapture.FullRenderCrop(fullWindow, fullWindow, fullWindow.Size) == new Rectangle(Point.Empty, fullWindow.Size) &&
+                WindowCapture.FullRenderCrop(client, fullWindow, new Size(1599, 900)).IsEmpty &&
+                WindowCapture.FullRenderCrop(client, new Rectangle(0, 0, 1600, 900), client.Size).IsEmpty,
+                "the optional full-window renderer crops only the unchanged verified client, including negative monitor coordinates");
             foreach (GameSource source in ExistingModes)
             {
                 Require(GameWindow.ResolveMode(source, true) == source &&
                     GameWindow.ResolveMode(source, false) == source,
                     "a manually selected mode changed with focus: " + source);
             }
+            foreach (MainForm.WorkMode mode in Enum.GetValues(typeof(MainForm.WorkMode)))
+                Require(MainForm.SupportsManagedCloudTask(mode) == (mode == MainForm.WorkMode.Change),
+                    "do not admit unimplemented one-time tasks to the dedicated menu route: " + mode);
+            var route = new ManagedCloudTaskRoute(1, "https://mc.kurogames.com/cloud/#/", 123.5, new Rectangle(10, 20, 1600, 900));
+            Require(route.Matches(new ManagedCloudTaskRoute(1, route.Page, route.DocumentEpoch, route.Viewport)) &&
+                !route.Matches(new ManagedCloudTaskRoute(2, route.Page, route.DocumentEpoch, route.Viewport)) &&
+                !route.Matches(new ManagedCloudTaskRoute(1, route.Page + "different", route.DocumentEpoch, route.Viewport)) &&
+                !route.Matches(new ManagedCloudTaskRoute(1, route.Page, 124.5, route.Viewport)) &&
+                !route.Matches(new ManagedCloudTaskRoute(1, route.Page, route.DocumentEpoch, new Rectangle(10, 20, 1280, 720))) &&
+                !default(ManagedCloudTaskRoute).Matches(route),
+                "pin connection, exact page including fragment, document generation and viewport for one-time input");
+            var unsupported = CombatSettings.Defaults();
+            unsupported.Source = GameSource.ManagedCloud;
+            bool denied = false;
+            try { using (new WorldSession(unsupported, CancellationToken.None)) { } }
+            catch (InvalidOperationException) { denied = true; }
+            Require(denied, "the shared WorldSession constructor refuses implicit dedicated browser authority before opening a route");
 
             var input = new WindowInput(new GameWindow(GameSource.AutoLocal));
             Require(!input.Send(BattleAction.Attack(), CancellationToken.None),
@@ -52,6 +80,14 @@ namespace TideCombat
                 SettingsFile.Save(path, settings);
                 Require(SettingsFile.Load(path).Source == GameSource.Foreground,
                     "an explicitly saved foreground source must remain foreground");
+                settings.Source = GameSource.ManagedCloud;
+                settings.WorldAssist.StartManagedCloudWithUtility = true;
+                settings.WorldAssist.StartBattleWithUtility = true;
+                SettingsFile.Save(path, settings);
+                CombatSettings restored = SettingsFile.Load(path);
+                Require(restored.Source == GameSource.ManagedCloud && restored.WorldAssist.AllowsStartup(restored.Source) &&
+                    restored.WorldAssist.StartsBattleAutomatically && !restored.WorldAssist.ForStartup().Login,
+                    "explicit resident cloud/battle authorization round-trips without enabling startup login");
             }
             finally
             {

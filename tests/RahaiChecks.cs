@@ -43,11 +43,91 @@ namespace TideCombat
             Require(RahaiRunner.TryIncompleteDifficulty("进行中 ０１／０２", out completed) && completed == 1,
                 "normalize recognized difficulty counts");
             Require(!RahaiRunner.TryIncompleteDifficulty("进行中 2/2", out completed), "skip completed stages");
+            Require(!RahaiRunner.TryIncompleteDifficulty("进 行 中 0/2", out completed), "match the exact progress prefix");
+            var nativeTitle = new OcrLine { Text = "关卡", RawText = " 原 关卡 ", Score = .52f,
+                NativeQuad = new[] { new PointF(200, 200), new PointF(300, 190), new PointF(310, 225), new PointF(205, 235) } };
+            var nativeStatus = new OcrLine { Text = "进行中 0/2", Score = .55f, Box = new Rectangle(205, 398, 110, 25) };
+            var recognized = RahaiRunner.ReferenceLines(new[] { nativeStatus, nativeTitle,
+                new OcrLine { Text = "关卡目标说明", Box = new Rectangle(95, 50, 100, 25), Score = .8f },
+                new OcrLine { Text = "开始挑战", Box = new Rectangle(95, 50, 100, 25), Score = .49f },
+                new OcrLine { Text = "关卡目标", Box = new Rectangle(70, 65, 100, 25), Score = .51f },
+                new OcrLine { Text = "未知", Score = .5f, NativeQuad = new[] { new PointF(40, 40), new PointF(30, 40), new PointF(20, 50) } },
+                new OcrLine { Text = "关卡", RawText = "關卡", Box = new Rectangle(500, 50, 100, 25), Score = .9f } });
+            Require(recognized.Count == 5 && recognized[0].Text == "关卡目标" &&
+                recognized.Any(line => line.Text == "關卡") && recognized.Any(line => line.Text == "原 关卡" &&
+                    line.Box == new Rectangle(200, 200, 110, 25)), "native box, stable row sorting, engine score floor and original zh_CN text");
+            Require(RahaiRunner.FindReferenceLine(recognized, "关卡目标", true).X == 70 &&
+                RahaiRunner.FindReferenceLine(recognized, "目标说明").X == 95 &&
+                RahaiRunner.FindReferenceLine(recognized, "开始挑战", true).IsEmpty, "exact string and regex matching preserve OCR gating");
+            var nativeStages = RahaiRunner.StagesFromLines(recognized, 1600, 1024);
+            Require(nativeStages.Count == 1 && nativeStages[0].Name == "原 关卡" && nativeStages[0].Box == nativeStatus.Box,
+                "native stage position and original name form the attempt identity");
             var before = new[] { new RahaiRunner.Stage { Name = "第一关", Box = new Rectangle(400, 365, 100, 25) } };
             var after = new[] { new RahaiRunner.Stage { Name = "第1关", Box = new Rectangle(404, 365, 100, 25) } };
             Require(!RahaiRunner.StageListMoved(before, after, 1600), "do not mistake OCR drift for card movement");
             after[0].Box.Offset(10, 0);
             Require(RahaiRunner.StageListMoved(before, after, 1600), "recognize an actual card shift");
+            Require(RahaiRunner.ScrollPath(new Size(1280, 720), true).SequenceEqual(
+                new[] { 1037, 937, 837, 736, 636, 536, 435 }.Select(x => new Point(x, 353))) &&
+                RahaiRunner.ScrollPath(new Size(1280, 720), false).SequenceEqual(
+                new[] { 435, 535, 635, 736, 836, 936, 1037 }.Select(x => new Point(x, 353))),
+                "reference swipe emits six truncated native intermediate points and the exact final endpoint");
+
+            // Synthetic pixels on the .625x upsample and 1.25x downsample grids
+            // distinguish area accumulation from nearest and HUD interpolation.
+            foreach (int nativeWidth in new[] { 1280, 2560 })
+            {
+                int nativeHeight = nativeWidth * 9 / 16;
+                var source = new byte[nativeWidth * nativeHeight * 4];
+                int start = nativeWidth == 1280 ? 0 : 1;
+                source[((start * nativeWidth + start) * 4) + 2] = 100;
+                source[((start * nativeWidth + start + 1) * 4) + 1] = 200;
+                source[(((start + 1) * nativeWidth + start) * 4)] = 250;
+                source[(((start + 1) * nativeWidth + start + 1) * 4) + 2] = 200;
+                var retained = new PixelFrame(new byte[1600 * 900 * 4], 1600, 900, sourceWidth: nativeWidth,
+                    sourceHeight: nativeHeight, echoPixels: source);
+                var canonical = new RahaiVision.CanonicalView(retained);
+                int r, g, b;
+                canonical.Rgb(1, 1, out r, out g, out b);
+                Require(r == 68 && g == 48 && b == 60, "native fractional area resize (0.6/0.4 weights) at " + nativeWidth);
+            }
+
+            foreach (int width in new[] { 1280, 1600, 2048, 2560, 4096 })
+            {
+                RahaiBoard scaledBoard = RahaiVision.Read(SyntheticBoard(width));
+                Require(scaledBoard != null && scaledBoard.Mask == (corners | (1UL << 9)) && scaledBoard.Fixed == corners &&
+                    scaledBoard.Pieces.Select(piece => piece.Cells.Length).SequenceEqual(new[] { 1, 2 }),
+                    "native area resize preserves board, edge gray pieces and tray shapes at " + width +
+                    ": " + (scaledBoard == null ? "unrecognized" : scaledBoard.Mask.ToString("X16") + "/" + scaledBoard.Fixed.ToString("X16") +
+                    " pieces=" + string.Join(",", scaledBoard.Pieces.Select(piece => piece.Cells.Length))));
+            }
+        }
+
+        private static PixelFrame SyntheticBoard(int width)
+        {
+            int height = width * 9 / 16;
+            var pixels = new byte[width * height * 4];
+            Action<double, double, double, double, Color> paint = (left, top, right, bottom, color) =>
+            {
+                for (int y = (int)Math.Round(top * height / RahaiVision.Height); y < (int)Math.Round(bottom * height / RahaiVision.Height); y++)
+                    for (int x = (int)Math.Round(left * width / RahaiVision.Width); x < (int)Math.Round(right * width / RahaiVision.Width); x++)
+                    {
+                        int offset = (y * width + x) * 4;
+                        pixels[offset] = color.B; pixels[offset + 1] = color.G; pixels[offset + 2] = color.R; pixels[offset + 3] = 255;
+                    }
+            };
+            paint(50, 44, 110, 102, Color.White);
+            paint(990, 74, 1060, 84, Color.White);
+            paint(1680, 600, 1740, 630, Color.White);
+            paint(1767, 476.5, 1804, 513.5, Color.Orange);
+            paint(1748, 716.5, 1823, 753.5, Color.Orange);
+            foreach (int index in new[] { 0, 7, 9, 56, 63 })
+            {
+                RahaiPoint center = RahaiVision.CellCenter(index % 8 + .5, index / 8 + .5);
+                paint(center.X - 42, center.Y - 42, center.X + 42, center.Y + 42,
+                    index == 9 ? Color.Red : Color.FromArgb(120, 120, 120));
+            }
+            return new PixelFrame(new byte[1600 * 900 * 4], 1600, 900, sourceWidth: width, sourceHeight: height, echoPixels: pixels);
         }
 
         internal static void Replay(string images)
@@ -57,7 +137,7 @@ namespace TideCombat
                 Func<string, PixelFrame> load = name =>
                 {
                     using (var image = new Bitmap(Path.Combine(images, "rahai_" + name + ".jpg")))
-                        return reader.Read(image);
+                        return reader.Read(image, retainEcho: true);
                 };
                 PixelFrame score = load("score");
                 RahaiBoard board = RahaiVision.Read(score);
@@ -105,6 +185,36 @@ namespace TideCombat
                 var unsupported = new PixelFrame(new byte[1800 * 900 * 4], 1800, 900);
                 Require(RahaiVision.Read(unrelated) == null && !RahaiVision.Supported(unsupported) &&
                     RahaiVision.Read(unsupported) == null, "reject unrelated or unsupported frames");
+            }
+        }
+
+        // Optional native-model replay on the separately versioned 3.8.14
+        // Rahai fixtures; it does not require a live Windows game or input.
+        internal static void OcrReplay(string images)
+        {
+            using (var reader = new FrameReader())
+            using (var ocr = new OcrReader(OcrReader.Directory))
+            {
+                using (var score = new Bitmap(Path.Combine(images, "rahai_score.jpg")))
+                {
+                    PixelFrame frame = reader.Read(score, true);
+                    var title = RahaiRunner.ReadReferenceRoi(ocr, frame, .045, .04, .20, .09);
+                    Require(!RahaiRunner.FindReferenceLine(title, "拉海洛方块").IsEmpty,
+                        "the captured board title in its exact native ROI: " + string.Join(",", title.Select(line => line.Text)));
+                    var points = RahaiRunner.ReadReferenceRoi(ocr, frame, .09, .125, .235, .181);
+                    Require(!RahaiRunner.FindReferenceLine(points, @"2900\s*[/／]\s*3500").IsEmpty,
+                        "the captured challenge score in its exact native ROI: " + string.Join(",", points.Select(line => line.Text)));
+                    Require(RahaiRunner.FindReferenceLine(RahaiRunner.ReadReferenceRoi(ocr, frame, .36, .216, .64, .29),
+                        @"^获\s*得$").IsEmpty, "do not identify a reward on the playable board");
+                }
+                foreach (string name in new[] { "rahai_reward.jpg", "rahai_reward_4500.jpg" })
+                    using (var reward = new Bitmap(Path.Combine(images, name)))
+                    {
+                        PixelFrame frame = reader.Read(reward, true);
+                        var lines = RahaiRunner.ReadReferenceRoi(ocr, frame, .36, .216, .64, .29);
+                        Require(!RahaiRunner.FindReferenceLine(lines, @"^获\s*得$").IsEmpty,
+                            "the captured reward in its exact native ROI (" + name + "): " + string.Join(",", lines.Select(line => line.Text)));
+                    }
             }
         }
     }

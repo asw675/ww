@@ -15,9 +15,12 @@ namespace TideCombat
         private readonly ComboBox material = Theme.Select(DomainOptions.Materials);
         private readonly Label hint = Theme.Text(
             "需要已解锁 F2 图鉴中的对应副本，工具会自动读取体力并反复刷取。", Theme.Muted);
+        private readonly DomainOptions configured;
+        private DomainKind? previousKind;
 
         internal DomainForm(DomainOptions options, bool saveOnly = false)
         {
+            configured = options.ForKind(options.Kind);
             Text = "体力本";
             StartPosition = FormStartPosition.CenterParent;
             FormBorderStyle = FormBorderStyle.FixedDialog;
@@ -63,15 +66,22 @@ namespace TideCombat
 
             kind.SelectedIndexChanged += delegate
             {
-                index.Maximum = kind.SelectedIndex == (int)DomainKind.Forgery ? 20 : 21;
-                index.Enabled = kind.SelectedIndex != (int)DomainKind.Simulation;
-                material.Enabled = kind.SelectedIndex == (int)DomainKind.Simulation;
+                // 最大值变化之前保留当前类型已输入的序号。
+                if (previousKind.HasValue)
+                    configured.SetIndexForKind(previousKind.Value, (int)index.Value);
+                DomainKind selected = (DomainKind)kind.SelectedIndex;
+                index.Maximum = selected == DomainKind.Forgery ? 20 : 21;
+                index.Value = configured.IndexForKind(selected);
+                index.Enabled = selected != DomainKind.Simulation;
+                material.Enabled = selected == DomainKind.Simulation;
+                previousKind = selected;
             };
             kind.SelectedIndex = (int)options.Kind;
             kind.Enabled = !saveOnly;
             index.Enabled = options.Kind != DomainKind.Simulation;
             material.Enabled = options.Kind == DomainKind.Simulation;
             index.Value = Math.Max(1, Math.Min(index.Maximum, options.Index));
+            previousKind = options.Kind;
             int materialIndex = Array.IndexOf(DomainOptions.Materials, options.Material);
             material.SelectedIndex = materialIndex >= 0 ? materialIndex : DomainOptions.Materials.Length - 1;
             AcceptButton = ok;
@@ -84,13 +94,11 @@ namespace TideCombat
         {
             if (DialogResult == DialogResult.OK)
             {
-                Result = new DomainOptions
-                {
-                    Kind = (DomainKind)kind.SelectedIndex,
-                    Index = (int)index.Value,
-                    Material = material.SelectedItem == null ? DomainOptions.Materials[2] :
-                        material.SelectedItem.ToString()
-                };
+                DomainKind selected = (DomainKind)kind.SelectedIndex;
+                configured.SetIndexForKind(selected, (int)index.Value);
+                Result = configured.ForKind(selected);
+                Result.Material = material.SelectedItem == null ? DomainOptions.Materials[2] :
+                    material.SelectedItem.ToString();
                 try { Result.Validate(); }
                 catch (Exception error)
                 {

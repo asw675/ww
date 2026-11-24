@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Drawing;
 using System.IO;
 using System.Linq;
+using System.Runtime.InteropServices;
 using System.Text;
 using Microsoft.ML.OnnxRuntime;
 using Microsoft.ML.OnnxRuntime.Tensors;
@@ -11,9 +12,106 @@ namespace TideCombat
 {
     internal static class OcrText
     {
+        private const uint ChineseSimplifiedLocale = 0x0804;
+        private const uint SimplifiedChinese = 0x02000000;
+        private const string CoreFoundation = "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation";
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, EntryPoint = "LCMapStringW", ExactSpelling = true)]
+        private static extern int MapSimplified(uint locale, uint flags, string source, int sourceLength,
+            StringBuilder destination, int destinationLength);
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct CFRange
+        {
+            internal IntPtr Location, Length;
+        }
+
+        [DllImport(CoreFoundation)]
+        private static extern IntPtr CFStringCreateWithCharacters(IntPtr allocator, IntPtr characters, IntPtr length);
+        [DllImport(CoreFoundation)]
+        private static extern IntPtr CFStringCreateMutableCopy(IntPtr allocator, IntPtr maxLength, IntPtr source);
+        [DllImport(CoreFoundation)]
+        [return: MarshalAs(UnmanagedType.I1)]
+        private static extern bool CFStringTransform(IntPtr source, IntPtr range, IntPtr transform,
+            [MarshalAs(UnmanagedType.I1)] bool reverse);
+        [DllImport(CoreFoundation)]
+        private static extern IntPtr CFStringGetLength(IntPtr source);
+        [DllImport(CoreFoundation)]
+        private static extern void CFStringGetCharacters(IntPtr source, CFRange range, IntPtr buffer);
+        [DllImport(CoreFoundation)]
+        private static extern void CFRelease(IntPtr value);
+
+        private static bool ContainsHan(string text)
+        {
+            for (int i = 0; i < text.Length; i++)
+            {
+                int code = text[i];
+                if (char.IsHighSurrogate(text[i]) && i + 1 < text.Length && char.IsLowSurrogate(text[i + 1]))
+                    code = char.ConvertToUtf32(text[i], text[++i]);
+                if (code >= 0x3400 && code <= 0x9fff || code >= 0xf900 && code <= 0xfaff ||
+                    code >= 0x20000 && code <= 0x323af)
+                    return true;
+            }
+            return false;
+        }
+
+        // Normalize recognized Chinese text before it reaches the task-specific
+        // matching rules, without translating or modifying English/digits.
+        internal static string Simplify(string text)
+        {
+            if (string.IsNullOrEmpty(text) || !ContainsHan(text))
+                return text ?? "";
+            if (Environment.OSVersion.Platform != PlatformID.Win32NT)
+                return SimplifyWithCoreFoundation(text);
+            int length = MapSimplified(ChineseSimplifiedLocale, SimplifiedChinese, text, text.Length, null, 0);
+            if (length <= 0) return text;
+            var mapped = new StringBuilder(length);
+            return MapSimplified(ChineseSimplifiedLocale, SimplifiedChinese, text, text.Length, mapped, length) > 0
+                ? mapped.ToString() : text;
+        }
+
+        private static IntPtr CreateCFString(string text)
+        {
+            IntPtr characters = Marshal.StringToHGlobalUni(text);
+            try { return CFStringCreateWithCharacters(IntPtr.Zero, characters, new IntPtr(text.Length)); }
+            finally { Marshal.FreeHGlobal(characters); }
+        }
+
+        // The macOS offline runner previously returned all Han text unchanged.
+        // Use the system ICU-backed Traditional-Simplified conversion there, while
+        // retaining Windows NLS in production. No external runtime is installed;
+        // unsupported Unix platforms safely keep the original text.
+        private static string SimplifyWithCoreFoundation(string text)
+        {
+            IntPtr source = IntPtr.Zero, transform = IntPtr.Zero, mutable = IntPtr.Zero, buffer = IntPtr.Zero;
+            try
+            {
+                source = CreateCFString(text);
+                transform = CreateCFString("Traditional-Simplified");
+                if (source == IntPtr.Zero || transform == IntPtr.Zero) return text;
+                mutable = CFStringCreateMutableCopy(IntPtr.Zero, IntPtr.Zero, source);
+                if (mutable == IntPtr.Zero || !CFStringTransform(mutable, IntPtr.Zero, transform, false)) return text;
+                long length = CFStringGetLength(mutable).ToInt64();
+                if (length < 0 || length > int.MaxValue / 2) return text;
+                if (length == 0) return "";
+                buffer = Marshal.AllocHGlobal(checked((int)length * 2));
+                CFStringGetCharacters(mutable, new CFRange { Length = new IntPtr(length) }, buffer);
+                return Marshal.PtrToStringUni(buffer, (int)length);
+            }
+            catch (DllNotFoundException) { return text; }
+            catch (EntryPointNotFoundException) { return text; }
+            finally
+            {
+                if (buffer != IntPtr.Zero) Marshal.FreeHGlobal(buffer);
+                if (mutable != IntPtr.Zero) CFRelease(mutable);
+                if (transform != IntPtr.Zero) CFRelease(transform);
+                if (source != IntPtr.Zero) CFRelease(source);
+            }
+        }
+
         internal static string Compact(string text)
         {
-            return string.Concat((text ?? "").Normalize(NormalizationForm.FormKC)
+            return string.Concat(Simplify((text ?? "").Normalize(NormalizationForm.FormKC))
                 .Where(character => !char.IsWhiteSpace(character)));
         }
     }
@@ -22,6 +120,10 @@ namespace TideCombat
     {
         internal Rectangle Box;
         internal string Text;
+        // Preserve the engine output and quadrilateral before screen projection
+        // and text normalization. Box/Text remain compatible with task callers.
+        internal string RawText;
+        internal PointF[] NativeQuad;
         internal float Score;
     }
 
@@ -29,8 +131,16 @@ namespace TideCombat
     internal sealed class OcrReader : IDisposable
     {
         private const int LimitSide = 960;
-        private const float DetThreshold = .3f, BoxThreshold = .5f, UnclipRatio = 1.6f;
         private const int RecHeight = 48, RecWidth = 320;
+        private const int RecBatch = 6;
+
+        private sealed class TextRegion
+        {
+            internal PixelFrame Crop;
+            internal Rectangle Bounds;
+            internal PointF[] NativeQuad;
+            internal int Index;
+        }
 
         private readonly InferenceSession det, rec;
         private readonly string[] dictionary;
@@ -56,14 +166,34 @@ namespace TideCombat
 
         internal OcrReader(string directory)
         {
-            var options = new SessionOptions { IntraOpNumThreads = 2, InterOpNumThreads = 1 };
-            det = new InferenceSession(Path.Combine(directory, "det.onnx"), options);
-            rec = new InferenceSession(Path.Combine(directory, "rec.onnx"), options);
-            detInput = det.InputMetadata.Keys.First();
-            recInput = rec.InputMetadata.Keys.First();
             dictionary = File.ReadAllLines(Path.Combine(directory, "ppocrv6_dict.txt"));
             var withSpace = new List<string>(dictionary) { " " };
             dictionary = withSpace.ToArray();
+            using (SessionOptions options = CreateCpuOptions())
+            {
+                det = new InferenceSession(Path.Combine(directory, "det.onnx"), options);
+                try { rec = new InferenceSession(Path.Combine(directory, "rec.onnx"), options); }
+                catch { det.Dispose(); throw; }
+            }
+            detInput = det.InputMetadata.Keys.First();
+            recInput = rec.InputMetadata.Keys.First();
+        }
+
+        private static SessionOptions CreateCpuOptions()
+        {
+            // Exact reference CPU fallback explicitly selects CPUExecutionProvider
+            // and ORT_ENABLE_ALL. Keep WW's bounded threads for concurrent readers.
+            var options = new SessionOptions
+            {
+                GraphOptimizationLevel = GraphOptimizationLevel.ORT_ENABLE_ALL,
+                ExecutionMode = ExecutionMode.ORT_SEQUENTIAL,
+                EnableCpuMemArena = true,
+                EnableMemoryPattern = true,
+                IntraOpNumThreads = 2,
+                InterOpNumThreads = 1
+            };
+            try { options.AppendExecutionProvider_CPU(1); return options; }
+            catch { options.Dispose(); throw; }
         }
 
         internal List<OcrLine> Read(PixelFrame frame, Rectangle area)
@@ -112,39 +242,61 @@ namespace TideCombat
                 return results;
             int resizedW, resizedH;
             float[] input = PrepareDet(frame, region, out resizedW, out resizedH);
-            var regions = new List<Rectangle>();
+            List<PointF[]> quads;
             using (IDisposableReadOnlyCollection<DisposableNamedOnnxValue> output =
                 det.Run(new[] { NamedOnnxValue.CreateFromTensor(detInput,
                     new DenseTensor<float>(input, new[] { 1, 3, resizedH, resizedW })) }))
             {
                 Tensor<float> map = output.First().AsTensor<float>();
-                float scaleX = (float)region.Width / resizedW, scaleY = (float)region.Height / resizedH;
-                foreach (Rectangle box in DetBoxes(map, resizedW, resizedH))
-                {
-                    var source = new Rectangle(
-                        region.X + (int)(box.X * scaleX), region.Y + (int)(box.Y * scaleY),
-                        Math.Max(2, (int)(box.Width * scaleX)), Math.Max(2, (int)(box.Height * scaleY)));
-                    source = Rectangle.Intersect(source, region);
-                    if (source.Width < 3 || source.Height < 3)
-                        continue;
-                    regions.Add(source);
-                }
+                // OnnxOCR 0.0.1 retains the original pre-padding image shape in shape_list.
+                // DB coordinates are projected using the actual output map dimensions.
+                quads = OcrDbPostprocess.Detect(map, region.Width, region.Height);
             }
-            var ordered = regions.OrderBy(box => box.Width / (double)box.Height).ToList();
-            for (int start = 0; start < ordered.Count; start += 6)
-                Recognize(frame, ordered.GetRange(start, Math.Min(6, ordered.Count - start)), results);
-            results.Sort(CompareLines);
+            if (quads.Count == 0) return results;
+            var regions = new List<TextRegion>();
+            foreach (PointF[] quad in SortReferenceBoxes(quads))
+            {
+                PointF[] source = quad.Select(point => new PointF(point.X + region.X, point.Y + region.Y)).ToArray();
+                Rectangle bounds = Rectangle.Intersect(QuadBounds(source), region);
+                if (bounds.Width <= 0 || bounds.Height <= 0) continue;
+                // The reference receives an already-cropped ROI. Clamp interpolation
+                // to that ROI, without making an additional full-image copy per box.
+                PixelFrame crop = OcrRecognition.Crop(frame, source, region);
+                if (crop.Width <= 0 || crop.Height <= 0) continue;
+                regions.Add(new TextRegion { Crop = crop, Bounds = bounds, NativeQuad = source, Index = regions.Count });
+            }
+            // Recognition batches are ordered by the actual perspective-cropped width/height.
+            // Restore the reference box order after inference, rather than sorting OCR results.
+            var ordered = regions.OrderBy(item => item.Crop.Width / (double)item.Crop.Height).ToList();
+            var recognized = new OcrLine[regions.Count];
+            for (int start = 0; start < ordered.Count; start += RecBatch)
+                Recognize(ordered.GetRange(start, Math.Min(RecBatch, ordered.Count - start)), recognized);
+            foreach (OcrLine line in recognized)
+                if (line != null && line.Score >= .5f)
+                    results.Add(line);
             return results;
         }
 
-        private static int CompareLines(OcrLine left, OcrLine right)
+        internal static List<PointF[]> SortReferenceBoxes(IEnumerable<PointF[]> boxes)
         {
-            Rectangle a = left.Box, b = right.Box;
-            bool sameRow = a.Top <= b.Bottom && b.Top <= a.Bottom;
-            int cmp = sameRow ? a.Left.CompareTo(b.Left) : a.Top.CompareTo(b.Top);
-            if (cmp == 0) cmp = sameRow ? a.Top.CompareTo(b.Top) : a.Left.CompareTo(b.Left);
-            if (cmp == 0) cmp = (int)(left.Score * 1000.0 - right.Score * 1000.0);
-            return cmp != 0 ? cmp : string.CompareOrdinal(left.Text, right.Text);
+            var ordered = boxes.OrderBy(box => box[0].Y).ThenBy(box => box[0].X).ToList();
+            for (int i = 0; i < ordered.Count - 1; i++)
+                for (int j = i; j >= 0; j--)
+                {
+                    PointF left = ordered[j][0], right = ordered[j + 1][0];
+                    if (Math.Abs(right.Y - left.Y) >= 10 || right.X >= left.X) break;
+                    PointF[] swap = ordered[j];
+                    ordered[j] = ordered[j + 1];
+                    ordered[j + 1] = swap;
+                }
+            return ordered;
+        }
+
+        internal static Rectangle QuadBounds(PointF[] box)
+        {
+            return Rectangle.FromLTRB((int)Math.Floor(box.Min(point => point.X)),
+                (int)Math.Floor(box.Min(point => point.Y)), (int)Math.Ceiling(box.Max(point => point.X)),
+                (int)Math.Ceiling(box.Max(point => point.Y)));
         }
 
         internal static float[] PrepareDet(PixelFrame frame, Rectangle area, out int width, out int height)
@@ -169,54 +321,6 @@ namespace TideCombat
             var data = new float[3 * width * height];
             WriteImage(frame, area, width, height, width, data, 0, true);
             return data;
-        }
-
-        private static IEnumerable<Rectangle> DetBoxes(Tensor<float> map, int width, int height)
-        {
-            var boxes = new List<Rectangle>();
-            var visited = new bool[width * height];
-            var queue = new Queue<int>();
-            for (int index = 0; index < visited.Length; index++)
-            {
-                if (visited[index] || map.GetValue(index) <= DetThreshold)
-                    continue;
-                int minX = width, minY = height, maxX = 0, maxY = 0;
-                var pixels = new List<Point>();
-                visited[index] = true;
-                queue.Enqueue(index);
-                while (queue.Count > 0)
-                {
-                    int current = queue.Dequeue();
-                    int x = current % width, y = current / width;
-                    minX = Math.Min(minX, x); maxX = Math.Max(maxX, x);
-                    minY = Math.Min(minY, y); maxY = Math.Max(maxY, y);
-                    pixels.Add(new Point(x, y));
-                    for (int dy = -1; dy <= 1; dy++)
-                        for (int dx = -1; dx <= 1; dx++)
-                        {
-                            int nx = x + dx, ny = y + dy;
-                            if (nx < 0 || ny < 0 || nx >= width || ny >= height) continue;
-                            int next = ny * width + nx;
-                            if (visited[next] || map.GetValue(next) <= DetThreshold) continue;
-                            visited[next] = true;
-                            queue.Enqueue(next);
-                        }
-                }
-                PointF[] corners;
-                if (pixels.Count < 4 || !OcrDetectionBox.Fit(pixels, out corners) ||
-                    OcrDetectionBox.Score(map, width, height, corners) < BoxThreshold)
-                    continue;
-                int boxWidth = maxX - minX + 1, boxHeight = maxY - minY + 1;
-                double perimeter = 2.0 * (boxWidth + boxHeight);
-                double distance = perimeter <= 0 ? 0 : boxWidth * boxHeight * UnclipRatio / perimeter;
-                var box = new Rectangle((int)(minX - distance), (int)(minY - distance),
-                    (int)(boxWidth + 2 * distance), (int)(boxHeight + 2 * distance));
-                box = Rectangle.Intersect(box, new Rectangle(0, 0, width, height));
-                if (box.Width >= 3 && box.Height >= 3)
-                    boxes.Add(box);
-            }
-            boxes.Sort((left, right) => left.Y.CompareTo(right.Y));
-            return boxes;
         }
 
         internal static void PrepareRecognition(PixelFrame frame, Rectangle area, int stride, float[] data, int offset)
@@ -256,13 +360,24 @@ namespace TideCombat
             }
         }
 
-        private void Recognize(PixelFrame frame, List<Rectangle> regions, List<OcrLine> results)
+        internal static int RecognitionBatchWidth(IEnumerable<PixelFrame> crops)
         {
-            int width = Math.Max(RecWidth, (int)(RecHeight * regions.Max(box => box.Width / (double)box.Height)));
-            int batchStride = 3 * RecHeight * width;
-            var data = new float[regions.Count * batchStride];
+            double ratio = RecWidth / (double)RecHeight;
+            foreach (PixelFrame crop in crops)
+                ratio = Math.Max(ratio, crop.Width / (double)crop.Height);
+            return checked((int)(RecHeight * ratio));
+        }
+
+        private void Recognize(List<TextRegion> regions, OcrLine[] results)
+        {
+            int width = RecognitionBatchWidth(regions.Select(region => region.Crop));
+            int batchStride = checked(3 * RecHeight * width);
+            var data = new float[checked(regions.Count * batchStride)];
             for (int i = 0; i < regions.Count; i++)
-                PrepareRecognition(frame, regions[i], width, data, i * batchStride);
+            {
+                PixelFrame crop = regions[i].Crop;
+                PrepareRecognition(crop, new Rectangle(0, 0, crop.Width, crop.Height), width, data, i * batchStride);
+            }
             using (IDisposableReadOnlyCollection<DisposableNamedOnnxValue> output =
                 rec.Run(new[] { NamedOnnxValue.CreateFromTensor(recInput,
                     new DenseTensor<float>(data, new[] { regions.Count, 3, RecHeight, width })) }))
@@ -270,41 +385,12 @@ namespace TideCombat
                 Tensor<float> logits = output.First().AsTensor<float>();
                 for (int i = 0; i < regions.Count; i++)
                 {
-                    OcrLine line = Decode(logits, i, regions[i]);
-                    if (line.Score >= .5f && !string.IsNullOrWhiteSpace(line.Text)) results.Add(line);
+                    OcrLine line = OcrRecognition.Decode(logits, i, dictionary, regions[i].Bounds);
+                    line.NativeQuad = regions[i].NativeQuad;
+                    line.Text = OcrText.Simplify(line.RawText);
+                    results[regions[i].Index] = line;
                 }
             }
-        }
-
-        private OcrLine Decode(Tensor<float> logits, int batch, Rectangle region)
-        {
-            int[] dimensions = logits.Dimensions.ToArray();
-            var text = new System.Text.StringBuilder();
-            int previous = -1;
-            double total = 0;
-            int counted = 0;
-            for (int step = 0; step < dimensions[1]; step++)
-            {
-                int best = 0;
-                int start = (batch * dimensions[1] + step) * dimensions[2];
-                float max = logits.GetValue(start);
-                for (int label = 1; label < dimensions[2]; label++)
-                {
-                    float value = logits.GetValue(start + label);
-                    if (value <= max) continue;
-                    max = value;
-                    best = label;
-                }
-                if (best != 0 && best != previous && best - 1 < dictionary.Length)
-                {
-                    text.Append(dictionary[best - 1]);
-                    total += max;
-                    counted++;
-                }
-                previous = best;
-            }
-            return new OcrLine { Box = region, Score = counted > 0 ? (float)(total / counted) : 0,
-                Text = text.ToString().Trim() };
         }
 
         public void Dispose()

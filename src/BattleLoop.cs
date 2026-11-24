@@ -16,6 +16,7 @@ namespace TideCombat
         internal Size Size;
         internal GameSource? DetectedMode;
         internal string Notice;
+        internal string NoticeTitle;
     }
 
     internal static class BattleLoop
@@ -26,22 +27,34 @@ namespace TideCombat
             RunLog.Info("Battle", string.Format("开始识别和战斗循环｜来源={0} 仅检测={1}", settings.Source, preview));
             var window = new GameWindow(settings.Source);
             var input = new WindowInput(window);
-            var vision = new HudVision(settings, concerto);
+            OcrReader combatOcr = null;
+            if (!preview && !assistOnly)
+            {
+                try
+                {
+                    string directory = OcrReader.Directory;
+                    if (System.IO.File.Exists(System.IO.Path.Combine(directory, "det.onnx")))
+                        combatOcr = new OcrReader(directory);
+                }
+                catch (Exception error) { RunLog.Error("Battle", "冷却 OCR 未能初始化", error); }
+            }
+            var vision = new HudVision(settings, concerto, combatOcr);
             bool cloudStream = settings.Source == GameSource.Cloud || settings.Source == GameSource.ManagedCloud;
-            var planner = new BattlePlanner(settings, cloudStream, attackVisibleEnemies: settings.AutoTarget);
-            var reviveInput = new FarmInput(window);
-            var reviveVision = new FarmVision();
-            long nextReviveClick = 0;
+            var planner = CreateStandalonePlanner(settings, cloudStream);
+            var assistInput = new FarmInput(window);
+            var assistVision = new FarmVision();
+            bool awaitingManualRevival = false;
             long nextPopupClick = 0;
             var monthly = new MonthlyCardSchedule(settings.WorldAssist);
             MonthlyCardDismissal dismissingCard = null;
             long scheduledWaitEnd = 0;
             int browserRoute = 0;
             var browser = settings.Source == GameSource.ManagedCloud ? new CloudBrowser() : null;
+            var timer = Stopwatch.StartNew();
             WorldAssist assist = !preview && settings.WorldAssist != null &&
                 (settings.WorldAssist.NeedsVision || settings.WorldAssist.RestoreCursor)
-                ? new WorldAssist(settings.WorldAssist, reviveVision, updates: new GameUpdateRecovery(window, cancellation, cloudStream,
-                    message => progress.Report(new BattleReport { State = message, Notice = message }))) : null;
+                ? new WorldAssist(settings.WorldAssist, assistVision, sharedOcr: combatOcr, updates: new GameUpdateRecovery(window, cancellation, cloudStream,
+                    message => progress.Report(new BattleReport { State = message, Notice = message })), clock: () => timer.ElapsedMilliseconds) : null;
             Func<bool> release = browser == null ? (Func<bool>)input.ReleaseAll : browser.ReleaseAll;
             Func<BattleAction, CancellationToken, bool> send = browser == null ?
                 (Func<BattleAction, CancellationToken, bool>)input.Send : (action, token) =>
@@ -51,7 +64,6 @@ namespace TideCombat
                         RunLog.Info("Input", "云游戏浏览器｜" + action.Label + "｜" + action.Kind);
                     return sent;
                 };
-            var timer = Stopwatch.StartNew();
             string lastAction = "—";
             string lastObservation = null;
             long lastReport = -500;
@@ -71,7 +83,9 @@ namespace TideCombat
                     bool waitingFrame = false;
                     PixelFrame currentFrame = default(PixelFrame);
                     bool haveFrame = false;
-                    bool nativePixels = assist != null && !planner.Fighting && assist.NeedsNativeFrame(started);
+                    // The battle cooldown OCR and health-bar matcher use the
+                    // captured pixels, not a second 900p-normalized raster.
+                    bool nativePixels = true;
                     if (browser != null)
                     {
                         state = "等待已打开的官网云游戏窗口";
@@ -81,8 +95,11 @@ namespace TideCombat
                         {
                             if (browserRoute != browser.RouteVersion)
                             {
+                                planner = CreateStandalonePlanner(settings, true);
+                                vision = new HudVision(settings, concerto, combatOcr);
                                 dismissingCard = null;
                                 scheduledWaitEnd = 0;
+                                awaitingManualRevival = false;
                                 if (assist != null) assist.ResetWindow();
                                 browserRoute = browser.RouteVersion;
                             }
@@ -105,15 +122,17 @@ namespace TideCombat
                         if (window.Handle != lastWindow || window.ProcessId != lastOwner)
                         {
                             release();
-                            planner = new BattlePlanner(settings, cloudStream, attackVisibleEnemies: settings.AutoTarget);
-                            vision = new HudVision(settings, concerto);
+                            planner = CreateStandalonePlanner(settings, cloudStream);
+                            vision = new HudVision(settings, concerto, combatOcr);
+                            awaitingManualRevival = false;
                             if (assist != null) assist.ResetWindow();
                             lastWindow = window.Handle;
                             lastOwner = window.ProcessId;
                         }
-                        else if (window.Mode != lastMode && release())
+                        else if (window.Mode != lastMode)
                         {
-                            planner.HoldsCanceled(started);
+                            if (assist != null) assist.ResetPickups();
+                            if (release()) planner.HoldsCanceled(started);
                         }
                         lastMode = window.Mode;
                         try
@@ -141,8 +160,11 @@ namespace TideCombat
                     }
 
                     long now = timer.ElapsedMilliseconds;
-                    if (assist != null && browser == null && !bounds.IsEmpty)
-                        assist.UpdateCursor(window, bounds, now);
+                    if (assist != null && browser == null)
+                    {
+                        if (!bounds.IsEmpty) assist.UpdateCursor(window, bounds, now);
+                        else assist.ResetCursorRoute();
+                    }
                     if (hud == null)
                     {
                         if (waitingFrame && window.Available())
@@ -164,26 +186,37 @@ namespace TideCombat
                     }
                     else if (preview)
                         state = hud.Valid ? "仅检测" : hud.Detail;
+                    else if (!assistOnly && (hud.Dead || awaitingManualRevival && !hud.Valid))
+                    {
+                        state = "角色倒下，等待手动恢复";
+                        if (!awaitingManualRevival)
+                        {
+                            planner.Observe(hud, now);
+                            planner.TakeReleaseRequest();
+                            release();
+                            awaitingManualRevival = true;
+                            lastAction = state;
+                            RunLog.Warn("Battle", state);
+                            progress.Report(new BattleReport { State = state, LastAction = lastAction, Hud = hud,
+                                Size = bounds.Size, NoticeTitle = "自动战斗", Notice = state });
+                        }
+                    }
                     else
                     {
+                        if (hud.Valid)
+                            awaitingManualRevival = false;
                         var frameSize = new Size(currentFrame.Width, currentFrame.Height);
                         Func<Point, bool> click = point => browser == null
-                            ? reviveInput.Click(point, frameSize, bounds, FarmMouse.Left, 60, cancellation)
-                            : browser.Click(point, frameSize, cancellation);
+                            ? assistInput.Click(point, frameSize, bounds, FarmMouse.Left, WorldSession.MenuClickHoldMilliseconds, cancellation)
+                            : browser.Click(point, frameSize, cancellation, WorldSession.MenuClickHoldMilliseconds);
                         string frameAction = null;
-                        if (dismissingCard == null && !assistOnly && settings.AutoRevive && hud.Dead && haveFrame && now >= nextReviveClick)
-                        {
-                            nextReviveClick = now + 2600;
-                            if (TryRevive(currentFrame, reviveVision, click, allowFallback: browser == null))
-                                frameAction = "尝试自动复活";
-                        }
                         bool canWait = !planner.Fighting && hud.Valid && !hud.Locked && !hud.EnemyHealth && !hud.Dead;
                         if (dismissingCard == null && canWait && scheduledWaitEnd == 0 && monthly.Due(DateTime.Now) &&
-                            reviveVision.HasTeamNumbers(currentFrame))
+                            assistVision.HasTeamNumbers(currentFrame))
                             scheduledWaitEnd = now + 120000;
                         if (scheduledWaitEnd != 0 && now >= scheduledWaitEnd)
                             scheduledWaitEnd = 0;
-                        if (frameAction == null && haveFrame)
+                        if (haveFrame)
                         {
                             try
                             {
@@ -191,14 +224,14 @@ namespace TideCombat
                                 {
                                     nextPopupClick = now + 500;
                                     Rectangle card;
-                                    if (reviveVision.FindMonthlyCard(currentFrame, out card))
+                                    if (assistVision.FindMonthlyCard(currentFrame, out card))
                                         dismissingCard = new MonthlyCardDismissal(() => timer.ElapsedMilliseconds);
                                 }
                                 if (dismissingCard != null)
                                 {
                                     Point button = MonthlyCardDismissal.Button(currentFrame);
-                                    MonthlyCardResult result = dismissingCard.Observe(reviveVision.HasTeamNumbers(currentFrame),
-                                        () => browser == null ? reviveInput.Click(button, frameSize, bounds, FarmMouse.Left, 20, cancellation) :
+                                    MonthlyCardResult result = dismissingCard.Observe(assistVision.HasTeamNumbers(currentFrame),
+                                        () => browser == null ? assistInput.Click(button, frameSize, bounds, FarmMouse.Left, 20, cancellation) :
                                             browser.Click(button, frameSize, cancellation, 20));
                                     if (result != MonthlyCardResult.Waiting)
                                     {
@@ -222,14 +255,20 @@ namespace TideCombat
                         {
                             try
                             {
+                                Func<bool> sameRoute = () => browser == null ? window.Handle == lastWindow &&
+                                    window.ProcessId == lastOwner && window.Mode == lastMode : browser.RouteVersion == browserRoute;
+                                Func<bool> scroll = () => sameRoute() && (browser == null ? assistInput.Scroll(1,
+                                    new Point(frameSize.Width / 2, frameSize.Height / 2), frameSize, bounds, cancellation) :
+                                    browser.Scroll(1, cancellation));
                                 frameAction = assist.Observe(currentFrame, hud, planner.Fighting, now, click,
                                     () => {
-                                        bool pressed = browser == null ? reviveInput.Key('F', 70, cancellation)
+                                        if (!sameRoute()) return false;
+                                        bool pressed = browser == null ? assistInput.Key('F', 70, cancellation)
                                             : browser.Send(new BattleAction { Kind = ActionKind.Cast, Key = 'F', DownMilliseconds = 70 }, cancellation);
                                         if (pressed) planner.CancelChallengePrompt();
                                         return pressed;
                                     },
-                                    cloud: cloudStream, capturedAt: started);
+                                    cloud: cloudStream, capturedAt: started, scrollPickup: scroll);
                             }
                             catch (Win32Exception error) { RunLog.Error("战斗辅助", "辅助操作输入失败", error); }
                         }
@@ -246,7 +285,8 @@ namespace TideCombat
                             state = "后台辅助运行中";
                         else
                         {
-                            BattleAction action = planner.Observe(hud, now);
+                            BattleAction action = planner.Observe(hud, now,
+                                haveFrame && assist != null ? (Func<double>)(() => assist.ReadAbyssTimer(currentFrame)) : null);
                             state = planner.Status;
                             if (planner.TakeReleaseRequest())
                                 release();
@@ -281,8 +321,11 @@ namespace TideCombat
                         });
                         lastReport = now;
                     }
-                    int interval = planner.Fighting && !preview ? 50 : 100;
-                    int remaining = (int)Math.Max(8, interval - (timer.ElapsedMilliseconds - started));
+                    // Only WGC's consumed TryGetNextFrame proves a new frame
+                    // sequence. Desktop/PrintWindow/CDP may resample unchanged
+                    // content; keep their small pacing guard.
+                    bool freshFrame = haveFrame && hud != null && browser == null && capture.LastReadNewFrame && now - started <= 250;
+                    int remaining = PollingDelay(planner.Fighting && !preview, timer.ElapsedMilliseconds - started, freshFrame);
                     cancellation.WaitHandle.WaitOne(remaining);
                 }
               }
@@ -298,10 +341,28 @@ namespace TideCombat
                 {
                     planner.Invalidate(timer.ElapsedMilliseconds);
                     if (assist != null) assist.Dispose();
+                    if (combatOcr != null) combatOcr.Dispose();
                     concerto.Save();
                     RunLog.Info("Battle", "识别和战斗循环结束｜取消=" + cancellation.IsCancellationRequested);
                 }
             }
+        }
+
+        internal static int PollingDelay(bool inCombat, long workMilliseconds, bool freshFrame = true)
+        {
+            // The reference trigger runs every 100ms when idle; during combat,
+            // each character helper advances to the next available frame and
+            // imposes its own key interval. Capture is still cancellation-aware.
+            // Successful capture is already the next available observation;
+            // do not add an artificial sleep after reference-style next_frame.
+            // Failed/stale captures still back off to avoid a spinning loop.
+            int triggerDelay = inCombat ? 0 : (int)Math.Max(0, 100 - workMilliseconds);
+            return freshFrame ? triggerDelay : Math.Max(8, triggerDelay);
+        }
+
+        internal static BattlePlanner CreateStandalonePlanner(CombatSettings settings, bool cloud)
+        {
+            return new BattlePlanner(settings, cloud, standalone: true);
         }
 
         private static string DescribeHud(string state, HudSnapshot hud)
@@ -317,6 +378,7 @@ namespace TideCombat
         internal sealed class WindowFrames : IDisposable
         {
             private readonly GameWindow window;
+            internal bool LastReadNewFrame { get; private set; }
             private readonly GameCapture desktop;
             private readonly WindowCapture fallback = new WindowCapture();
             private GraphicsCapture graphics;
@@ -334,6 +396,7 @@ namespace TideCombat
 
             internal bool Read(Rectangle bounds, out PixelFrame frame, bool retainEcho = false)
             {
+                LastReadNewFrame = false;
                 try
                 {
                     bool captured = ReadCore(bounds, out frame, retainEcho);
@@ -394,6 +457,7 @@ namespace TideCombat
                     {
                         if (graphics.TryRead(window.Handle, bounds, out frame, retainEcho))
                         {
+                            LastReadNewFrame = true;
                             emptyFrames = 0;
                             ReportPath("Windows 图形捕获", bounds.Size);
                             return true;
@@ -408,8 +472,8 @@ namespace TideCombat
                         graphics = null;
                     }
                 }
-                bool captured = fallback.TryRead(window.Handle, bounds.Size, out frame, retainEcho);
-                ReportPath(captured ? "PrintWindow" : "PrintWindow 未返回可用画面", bounds.Size);
+                bool captured = fallback.TryRead(window.Handle, window.ProcessId, bounds.Size, out frame, retainEcho);
+                ReportPath(captured ? fallback.LastMethod : "PrintWindow 未返回可用画面", bounds.Size);
                 return captured;
             }
 
@@ -431,27 +495,6 @@ namespace TideCombat
                 if (graphics != null) graphics.Dispose();
                 desktop.Dispose();
                 fallback.Dispose();
-            }
-        }
-
-        private static bool TryRevive(PixelFrame frame, FarmVision vision, Func<Point, bool> click, bool allowFallback)
-        {
-            Rectangle box;
-            Point point;
-            if (vision.FindLabel(frame, "revive_confirm_hcenter_vcenter", .90, out box))
-                point = new Point(box.X + box.Width / 2, box.Y + box.Height / 2);
-            else if (allowFallback)
-                point = new Point((int)(frame.Width * .78), (int)(frame.Height * .72));
-            else
-                return false;
-            try
-            {
-                return click(point);
-            }
-            catch (Win32Exception error)
-            {
-                RunLog.Error("Battle", "自动复活输入失败", error);
-                return false;
             }
         }
 

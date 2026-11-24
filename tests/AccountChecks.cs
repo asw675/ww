@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Drawing;
 using System.Linq;
+using System.Threading;
 using System.Web.Script.Serialization;
 
 namespace TideCombat
@@ -116,6 +117,24 @@ namespace TideCombat
             {
                 if (File.Exists(store.ConfigPath)) File.Delete(store.ConfigPath);
                 Directory.Delete(path);
+            }
+        }
+
+        internal static void CancelledPlans()
+        {
+            foreach (MultiAccountMode mode in new[] { MultiAccountMode.Sequential, MultiAccountMode.Config })
+            {
+                var reports = new List<MultiAccountReport>();
+                var token = new CancellationToken(true);
+                using (var runner = new MultiAccountRunner(CombatSettings.Defaults(), mode, token,
+                    new StepProgress<MultiAccountReport>(reports.Add)))
+                {
+                    bool cancelled = false;
+                    try { runner.Run(); }
+                    catch (OperationCanceledException error) { cancelled = error.CancellationToken == token; }
+                    Require(cancelled && runner.Failure == null && reports.Count == 0,
+                        "已经取消的多账号任务不应启动账号或报告完成、失败状态");
+                }
             }
         }
 
@@ -303,6 +322,11 @@ namespace TideCombat
         internal static void ReferencePlan()
         {
             Require(AccountTasks.Resolve(null) == null, "None 应保持只登录");
+            Require(AccountTasks.ReferenceChoices.SequenceEqual(new[] { "None", "DailyTask", "FarmEchoTask", "NightmareNestTask",
+                "TacetTask", "ForgeryTask", "SimulationTask", "MergeEchoTask", "EnhanceEchoTask", "ChangeEchoTask", "GardenTask" }) &&
+                AccountTasks.Choices.Skip(AccountTasks.ReferenceChoices.Length).SequenceEqual(AccountTasks.ExtensionChoices) &&
+                AccountTasks.DisplayChoices.Skip(AccountTasks.ReferenceChoices.Length).All(name => name.StartsWith("WW 扩展")),
+                "参考注册顺序与 WW 显式扩展应分离，不注册递归任务");
             foreach (string name in AccountTasks.Choices.Skip(1))
             {
                 Require(AccountTasks.Resolve(new AccountTaskReference { module = "src.task." + name, @class = name }) == name,
@@ -338,8 +362,52 @@ namespace TideCombat
                 settings.Farm.IndexFor(FarmTeleportMode.BossChallenge) == 9 &&
                 settings.Farm.Pickup == FarmPickupMode.Circle && settings.Farm.Boss == FarmBoss.NightmareHecate,
                 "同一份原版配置分别记住三类序号和拾取方式");
+            settings.Domain.Index = 12;
+            AccountConfig.Apply(settings, new Dictionary<string, object>
+            {
+                { "Which Forgery Challenge to Farm", 7 }
+            }, "ForgeryTask");
+            Require(settings.Domain.ForKind(DomainKind.Tacet).Index == 12 &&
+                settings.Domain.ForKind(DomainKind.Forgery).Index == 7,
+                "独立副本任务的账号覆盖不得把其他副本的序号一并覆盖");
+            AccountConfig.Apply(settings, new Dictionary<string, object>
+            {
+                { "Domain", new Dictionary<string, object> { { "Index", 8 } } }
+            }, "ForgeryTask");
+            Require(settings.Domain.ForKind(DomainKind.Tacet).Index == 12 &&
+                settings.Domain.ForKind(DomainKind.Forgery).Index == 8,
+                "老账号缺省 Kind 时嵌套 Index 应归属所选副本任务");
+            AccountConfig.Apply(settings, new Dictionary<string, object>
+            {
+                { "目标属性", "暴击" }, { "必须有双爆", !settings.Enhance.RequireBothCrit }
+            }, "ChangeEchoTask");
+            Require(settings.Change.Target == "暴击" && settings.Enhance.RequireBothCrit == EnhanceOptions.Defaults().RequireBothCrit,
+                "原版改主属性配置应直接应用，其他任务顶层字段不得污染强化配置");
             settings.Daily.Tasks = new[] { DailyTask.DailyRewards, DailyTask.Garden };
             CombatSettings original = settings;
+            settings = AccountConfig.ForRun(original);
+            AccountConfig.Apply(settings, new Dictionary<string, object>
+            {
+                { "Which to Farm", "Forgery Challenge" }
+            }, "DailyTask");
+            Require(settings.Daily.IsReferencePlan && settings.Daily.Farm == DomainKind.Forgery &&
+                settings.Daily.GetTasks().Contains(DailyTask.Mail) && settings.Daily.GetTasks().Contains(DailyTask.BattlePass),
+                "原版顶层配置不得继承全局 WW 自定义任务数组的缺失步骤");
+            settings = AccountConfig.ForRun(original);
+            AccountConfig.Apply(settings, new Dictionary<string, object>
+            {
+                { "Additional Tasks to Run After Daily Task", null }
+            }, "DailyTask");
+            Require(settings.Daily.IsReferencePlan && !settings.Daily.CheckGarden && !settings.Daily.AutoNightmare &&
+                !settings.Daily.MergeIfNeeded && !settings.Daily.Farm4C && settings.Daily.GetTasks().Contains(DailyTask.Mail),
+                "参考 null 附加任务列表表示无附加项，而非账号配置错误");
+            AccountConfig.Apply(settings, new Dictionary<string, object> { { "Which to Farm", null } }, "NightmareNestTask");
+            Require(settings.Nightmare.TacetNest && settings.Nightmare.Purification,
+                "参考 null 梦魇选择回退两类");
+            bool invalidSelection = false;
+            try { AccountConfig.Apply(settings, new Dictionary<string, object> { { "Which to Farm", 17 } }, "NightmareNestTask"); }
+            catch (InvalidDataException) { invalidSelection = true; }
+            Require(invalidSelection, "非空且非列表的梦魇配置仍必须拒绝");
             settings = AccountConfig.ForRun(original);
             AccountConfig.Apply(settings, new Dictionary<string, object>
             {

@@ -11,6 +11,7 @@ namespace TideCombat
     internal sealed class SecondSolaRunner : IDisposable
     {
         private const string EventName = "第二索拉：未名之梦";
+        internal const int ClickHoldMilliseconds = 20, SpaceHoldMilliseconds = 20, RewardCloseDelayMilliseconds = 700;
         private static readonly string[] RewardPages = { "限时奖励", "常驻奖励" };
         private static readonly string[] StoryChoices =
         {
@@ -66,6 +67,7 @@ namespace TideCombat
         private readonly HashSet<Tuple<int, string>> skippedCommissions = new HashSet<Tuple<int, string>>();
         private readonly HashSet<string> tiredRooms = new HashSet<string>();
         private int activeDate, shopBuys, lotteryIndex;
+        private int? confirmedRoute;
         private bool startingSemester, storyEnding, needShop, finishedLottery;
         private string currentRoom;
 
@@ -73,7 +75,7 @@ namespace TideCombat
         {
             this.token = token;
             this.progress = progress;
-            world = new WorldSession(settings, token);
+            world = new WorldSession(settings, token) { RetainEchoFrames = true };
         }
 
         internal void Run()
@@ -83,6 +85,7 @@ namespace TideCombat
                 token.ThrowIfCancellationRequested();
                 throw new InvalidOperationException("请打开简体中文的「" + EventName + "」活动首页或正在进行的旅程。");
             }
+            confirmedRoute = world.InputRouteVersion;
 
             int completedJourneys = 0;
             bool entered = false;
@@ -108,7 +111,7 @@ namespace TideCombat
                         screen = CollectRewards(screen, candidate => Lobby(candidate) != null);
                         if (FinishIfComplete())
                             return;
-                        OcrLine resume = screen.ResumeJourney(() => world.Read(.64, .59, .97, .96));
+                        OcrLine resume = screen.ResumeJourney(() => ReadFocused(screen.Frame, .64, .59, .97, .96));
                         if (entered)
                         {
                             if (!(storyEnding || resume == null && activeDate >= 1201) || completedJourneys >= 2)
@@ -157,7 +160,7 @@ namespace TideCombat
             }
             catch (InvalidOperationException)
             {
-                if (world.Captured)
+                if (world.Captured && world.InputRouteVersion == confirmedRoute)
                     Screenshots.Save(world.Frame, "second-sola", "unconfirmed", new Rectangle(0, 0, 1600, 900));
                 throw;
             }
@@ -213,14 +216,17 @@ namespace TideCombat
                 CollectRewards(screen, Settings);
                 for (int attempt = 0; attempt < 3; attempt++)
                 {
-                    Close(800);
+                    Tap(.954, .067, 800);
                     if (world.WaitUntil(() => !Settings(Read()), 2000))
                         return true;
                 }
                 throw new InvalidOperationException("无法关闭学院手册。");
             }
-            if (screen.Find("角色档案", 0, 0, .2, .12, true) != null ||
-                screen.Find("档案管理", 0, 0, .2, .12, true) != null || RewardPages.Any(title => RewardPage(screen, title)) ||
+            if (screen.Find("角色档案", 0, 0, .2, .12, true) != null)
+                return Tap(.954, .067, 650);
+            if (RewardPages.Any(title => RewardPage(screen, title)))
+                return Tap(.954, .067, RewardCloseDelayMilliseconds);
+            if (screen.Find("档案管理", 0, 0, .2, .12, true) != null ||
                 screen.Find("历程已结束", 0, .45, 1, .85, true) != null)
                 return Close();
             if (Forum(screen))
@@ -241,9 +247,9 @@ namespace TideCombat
             if (Envelope(screen))
                 return Tap(.5, .58, 800);
             if (screen.Find("新增物品", .06, .2, .33, .4, true) != null)
-                return Hold(' ', 80, 550);
+                return Hold(' ', SpaceHoldMilliseconds, 550);
             if (screen.Find("日常补给") != null && screen.Find("珍藏道具") != null)
-                return Close(550);
+                return Tap(.954, .067, 550);
             return date != 0 && AdvanceDate(screen, date);
         }
 
@@ -312,7 +318,28 @@ namespace TideCombat
         private SecondSolaScreen Read()
         {
             List<OcrLine> words = world.Read(0, 0, 1, .987);
+            CheckRoute();
             return new SecondSolaScreen(world.Frame, words);
+        }
+
+        private void CheckRoute()
+        {
+            if (confirmedRoute.HasValue)
+                Require(world.InputRouteVersion == confirmedRoute.Value, "活动任务窗口已改变，请重新确认活动界面。");
+        }
+
+        // Focused recognition on a confirmed screenshot avoids mixing a new
+        // menu's labels with the controls of the preceding menu.
+        private List<OcrLine> ReadFocused(PixelFrame frame, double left, double top, double right, double bottom)
+        {
+            CheckRoute();
+            if (!world.Captured || frame.CaptureId != world.Frame.CaptureId) return new List<OcrLine>();
+            try { return world.Ocr.ReadRelative(frame, left, top, right, bottom); }
+            catch (Exception error)
+            {
+                RunLog.Error("第二索拉", "局部文字识别失败", error);
+                return new List<OcrLine>();
+            }
         }
 
         private static OcrLine Lobby(SecondSolaScreen screen) { return screen.Find("开始新学期", .65, .55, .98, .96); }
@@ -328,6 +355,27 @@ namespace TideCombat
             return screen.Find("学院商店", 0, 0, .2, .12) != null && screen.Find("商店刷新", .85, .14, .99, .22, true) != null;
         }
         private static bool RewardPage(SecondSolaScreen screen, string title) { return screen.Find(title, 0, 0, .2, .13) != null; }
+
+        private bool RewardPageFocused(string title)
+        {
+            return FocusedRewardPage(title, (left, top, right, bottom) =>
+            {
+                List<OcrLine> lines = world.Read(left, top, right, bottom);
+                CheckRoute();
+                return lines;
+            });
+        }
+
+        internal static bool FocusedRewardPage(string title, Func<double, double, double, double, IEnumerable<OcrLine>> read)
+        {
+            return FocusedLabel(read(.035, .035, .18, .09), title);
+        }
+
+        private static bool FocusedLabel(IEnumerable<OcrLine> lines, string title)
+        {
+            return lines.Any(line => line != null && line.Score >= .5 && !line.Box.IsEmpty &&
+                (line.Text ?? "").Trim() == title);
+        }
         private static bool Envelope(SecondSolaScreen screen) { return screen.Find("致:", .18, .22, .38, .33, true) != null; }
         private static bool Letter(SecondSolaScreen screen)
         {
@@ -400,7 +448,7 @@ namespace TideCombat
                 foreach (string phrase in new[] { "理事会组织的学院开放日" }.Concat(StoryChoices))
                 {
                     OcrLine choice = choices.FirstOrDefault(line => line.Text.Contains(phrase));
-                    if (choice != null && screen.Mean(screen.Region(.54, screen.Y(choice) - .009, .575, screen.Y(choice) + .009)) > 165)
+                    if (choice != null && screen.Mean(.54, screen.Y(choice) - .009, .575, screen.Y(choice) + .009) > 165)
                         return choice;
                 }
             }
@@ -419,17 +467,25 @@ namespace TideCombat
             return null;
         }
 
-        private static bool DialoguePanel(SecondSolaScreen screen)
+        internal static bool DialoguePanel(SecondSolaScreen screen)
         {
-            if (!screen.In(.24, .85, .76, .94).Any(line => SecondSolaScreen.Han.IsMatch(line.Text))) return false;
-            Rectangle panel = screen.Region(.755, .95, .785, .975);
-            return screen.LightFraction(panel, 155, true) > .70 && screen.LightFraction(panel, 90, false) > .015;
+            if (!screen.Lines.Any(line => line.Box.Left > .24 * screen.Frame.Width && line.Box.Left < .76 * screen.Frame.Width &&
+                screen.Y(line) > .85 && screen.Y(line) < .94 && SecondSolaScreen.Han.IsMatch(line.Text))) return false;
+            return screen.NativeLightFraction(.755, .95, .785, .975, 155, true) > .70 &&
+                screen.NativeLightFraction(.755, .95, .785, .975, 90, false) > .015;
         }
 
-        private static bool BlackNarration(SecondSolaScreen screen)
+        internal static bool BlackNarration(SecondSolaScreen screen)
         {
-            return screen.In(.15, .3, .85, .7).Any(line => SecondSolaScreen.Han.IsMatch(line.Text)) &&
-                screen.Mean(screen.Region(0, 0, 1, 1), 3) < 25;
+            return screen.In(.15, .3, .85, .7).Any(line => screen.X(line) > .15 && screen.X(line) < .85 &&
+                screen.Y(line) > .3 && screen.Y(line) < .7 && SecondSolaScreen.Han.IsMatch(line.Text)) && screen.NativeMeanBelow(25);
+        }
+
+        internal static bool HasDialogueChoiceKey(SecondSolaScreen screen, bool panel,
+            Func<double, double, double, double, IEnumerable<OcrLine>> readFocused)
+        {
+            return screen.Find("F", .65, .25, .70, .76) != null ||
+                panel && FocusedLabel(readFocused(.78, .05, .83, .11), "Tab");
         }
 
         private bool Dialogue(SecondSolaScreen screen)
@@ -445,8 +501,8 @@ namespace TideCombat
                 line.Box.Y > screen.Frame.Height * .25 && line.Box.Y < screen.Frame.Height * .73 &&
                 SecondSolaScreen.Han.IsMatch(line.Text)).ToList();
             bool panel = DialoguePanel(screen);
-            if (choices.Count > 0 && (screen.Find("F", .65, .25, .70, .76) != null ||
-                panel && screen.Find("Tab", .78, .05, .83, .11) != null))
+            if (choices.Count > 0 && HasDialogueChoiceKey(screen, panel,
+                (left, top, right, bottom) => ReadFocused(screen.Frame, left, top, right, bottom)))
             {
                 OcrLine answer = ExamAnswer(choices, screen.Date == 0 ? activeDate : screen.Date);
                 if (answer != null) return Click(answer, 650);
@@ -485,23 +541,42 @@ namespace TideCombat
             return screen.Selected(choices, screen.Find("F", .126, .61, .195, .90), .175, .197, .05) ?? choices.FirstOrDefault();
         }
 
-        private static OcrLine AttributeResult(SecondSolaScreen screen)
+        internal static OcrLine AttributeResult(SecondSolaScreen screen)
         {
             OcrLine button = screen.Find("完成", .43, .805, .58, .91);
-            return button != null && screen.LightFraction(screen.Region(.38, .49, .64, .74), 180, true) > .78 ? button : null;
+            return button != null && screen.ChannelLightFraction(.38, .49, .64, .74, 180) > .78 ? button : null;
+        }
+
+        internal static bool HasLotteryDigits(IEnumerable<OcrLine> lines)
+        {
+            return lines.Any(line => line != null && line.Score >= .5 && !line.Box.IsEmpty &&
+                Regex.IsMatch((line.Text ?? "").Trim(), @"^[1-9]\d?$"));
+        }
+
+        private bool ReadLotteryDigits(SecondSolaScreen screen)
+        {
+            CheckRoute();
+            if (!world.Captured || screen.Frame.CaptureId != world.Frame.CaptureId) return false;
+            PixelFrame crop = SecondSolaScreen.TargetOcrCrop(screen.Frame, .827, .038, .896, .103, 1440);
+            if (crop.Width <= 0 || crop.Height <= 0) return false;
+            try { return HasLotteryDigits(world.Ocr.Read(crop, new Rectangle(0, 0, crop.Width, crop.Height))); }
+            catch (Exception error)
+            {
+                RunLog.Error("第二索拉", "刮奖票余额识别失败", error);
+                return false;
+            }
         }
 
         private void PlayLottery(SecondSolaScreen screen)
         {
-            Rectangle balance = screen.Region(.788, .044, .833, .091);
-            if (screen.Fraction(balance, (h, s, v) => s > 115 && v > 150) < .03)
+            if (screen.Fraction(.788, .044, .833, .091, (h, s, v) => s > 115 && v > 150) < .03)
                 world.Sleep(500);
-            else if (screen.Fraction(balance, (h, s, v) => s > 115 && v > 150 && (h < 10 || h > 170)) < .02)
+            else if (screen.Fraction(.788, .044, .833, .091, (h, s, v) => s > 115 && v > 150 && (h < 10 || h > 170)) < .02)
             {
                 finishedLottery = true;
                 Tap(.942, .067, 750);
             }
-            else if (world.Read(.827, .038, .896, .103).Any(line => Regex.IsMatch(line.Text, @"^[1-9]\d?$")))
+            else if (ReadLotteryDigits(screen))
             {
                 int index = lotteryIndex++ % 28;
                 Tap(.231 + .0683 * (index % 7), .38 + .121 * (index / 7), 850);
@@ -530,13 +605,21 @@ namespace TideCombat
                 }
             }
             needShop = false;
-            Close();
+            Tap(.954, .067, 650);
         }
 
-        private static int? Stat(SecondSolaScreen screen, string name)
+        internal static int? Stat(SecondSolaScreen screen, string name)
         {
             OcrLine label = screen.Find(name, .035, .63, .10, .95, true);
-            return label == null ? null : screen.Number(.12, screen.Y(label) - .02, .18, screen.Y(label) + .02);
+            if (label == null) return null;
+            foreach (OcrLine line in screen.Lines)
+            {
+                int value;
+                if (line.Box.Left > .12 * screen.Frame.Width && line.Box.Left < .18 * screen.Frame.Width &&
+                    Math.Abs(screen.Y(line) - screen.Y(label)) < .02 &&
+                    SecondSolaScreen.TryDecimal(line.RawText, out value)) return value;
+            }
+            return null;
         }
 
         private static string[] CourseOrder(SecondSolaScreen screen)
@@ -652,8 +735,7 @@ namespace TideCombat
             Tap(.654, .15, 450);
             SecondSolaScreen screen = Read();
             if (Tutorial(screen)) screen = Read();
-            Rectangle tab = screen.Region(.64, .135, .67, .177);
-            exists = screen.Fraction(tab, (h, s, v) => h >= 13 && h <= 33 && s > 140) > .10 ||
+            exists = screen.Fraction(.64, .135, .67, .177, (h, s, v) => h >= 13 && h <= 33 && s > 140) > .10 ||
                 screen.Find("待执行次数", .42, .36, .61, .52, true) != null;
             commissionTabs[date] = exists;
             if (exists) ScheduleCommission(screen);
@@ -741,7 +823,7 @@ namespace TideCombat
                         returned = true;
                         break;
                     }
-                    if (RewardPage(Read(), title)) Close(700);
+                    if (RewardPageFocused(title)) Tap(.954, .067, RewardCloseDelayMilliseconds);
                 }
                 Require(returned, "领取奖励后无法返回活动菜单。");
             }
@@ -768,7 +850,7 @@ namespace TideCombat
                     if (button == null) continue;
                 }
                 Click(button, 550);
-                if (world.WaitUntil(() => RewardPage(Read(), title), 2500))
+                if (world.WaitUntil(() => RewardPageFocused(title), 2500))
                 {
                     opened = true;
                     break;
@@ -786,10 +868,10 @@ namespace TideCombat
                 }
                 if (Click(screen.Find("领取奖励", .81, .13, .95, .95), 650))
                     continue;
-                if (RewardPage(screen, title) && HasRewardStatus(screen))
+                if (HasRewardStatus(screen, title, area => world.Ocr.Read(screen.Frame, area)))
                 {
                     astriteRemaining[title] = CountRemainingRewards(screen, title);
-                    Close(700);
+                    Tap(.954, .067, RewardCloseDelayMilliseconds);
                     return;
                 }
                 world.Sleep(400);
@@ -797,11 +879,18 @@ namespace TideCombat
             throw new InvalidOperationException("无法确认" + title + "的领取状态。");
         }
 
-        private static bool HasRewardStatus(SecondSolaScreen screen)
+        internal static bool HasRewardStatus(SecondSolaScreen screen, string title, Func<Rectangle, IEnumerable<OcrLine>> readFocused)
         {
-            Rectangle status = screen.Region(.84, .19, .92, .27);
-            return screen.Fraction(status, (h, s, v) => h >= 35 && h <= 75 && s > 80 && v > 150) > .015 ||
-                screen.In(.80, .175, .95, .29).Any(line => Regex.IsMatch(line.Text, "进行中|已领取|已完成"));
+            if (!RewardPage(screen, title)) return false;
+            if (screen.Fraction(.84, .19, .92, .27, (h, s, v) => h >= 35 && h <= 75 && s > 80 && v > 150) > .015)
+                return true;
+
+            Func<OcrLine, bool> isStatus = line => Regex.IsMatch(line.Text, "进行中|已领取|已完成");
+            if (screen.In(.80, .175, .95, .29).Any(isStatus)) return true;
+
+            Rectangle region = screen.Region(.80, .175, .95, .29);
+            var focused = new SecondSolaScreen(screen.Frame, readFocused(region));
+            return focused.In(.80, .175, .95, .29).Any(isStatus);
         }
 
         private int CountRemainingRewards(SecondSolaScreen screen, string title)
@@ -809,8 +898,8 @@ namespace TideCombat
             bool limited = title == RewardPages[0];
             if (limited) needShop = screen.Find("累计购买商品", .35, .15, .75, .80, true) != null;
             return screen.In(.80, .15, .95, limited ? .80 : .92).Count(line =>
-                line.Text.Contains("进行中") && screen.Fraction(screen.Region(.655, screen.Y(line) - .045,
-                    .712, screen.Y(line) + .045), (h, s, v) => h >= 92 && h <= 122 && s >= 40 && v >= 150) > .03);
+                line.Text.Contains("进行中") && screen.Fraction(.655, screen.Y(line) - .045,
+                    .712, screen.Y(line) + .045, (h, s, v) => h >= 92 && h <= 122 && s >= 40 && v >= 150) > .03);
         }
 
         private string RewardSummary()
@@ -829,21 +918,19 @@ namespace TideCombat
         private bool Click(OcrLine line, int delay)
         {
             if (line == null) return false;
-            Require(world.Click(line.Box), "活动按钮的点击未发送。");
+            Require(confirmedRoute.HasValue && world.ClickOnRoute(line.Box, confirmedRoute.Value, ClickHoldMilliseconds), "活动按钮的点击未发送。");
             world.Sleep(delay);
             return true;
         }
 
         private bool Tap(double x, double y, int delay)
         {
-            Require(world.Click(x, y), "活动点击未发送。");
-            world.Sleep(delay);
-            return true;
+            return Tap(new Point((int)(x * world.Frame.Width), (int)(y * world.Frame.Height)), delay);
         }
 
         private bool Tap(Point point, int delay)
         {
-            Require(world.Click(point), "活动点击未发送。");
+            Require(confirmedRoute.HasValue && world.ClickOnRoute(point, confirmedRoute.Value, ClickHoldMilliseconds), "活动点击未发送。");
             world.Sleep(delay);
             return true;
         }
@@ -852,7 +939,7 @@ namespace TideCombat
 
         private bool Hold(char key, int holdMs, int delay)
         {
-            Require(world.Key(key, holdMs), "活动按键未发送。");
+            Require(confirmedRoute.HasValue && world.Key(key, holdMs, route: confirmedRoute.Value), "活动按键未发送。");
             world.Sleep(delay);
             return true;
         }

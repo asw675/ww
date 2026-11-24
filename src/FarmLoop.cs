@@ -13,6 +13,7 @@ namespace TideCombat
         internal string State;
         internal string LastAction;
         internal int Kills;
+        internal int Attempts;
         internal int Echoes;
         internal double Rate;
         internal Size Size;
@@ -31,6 +32,8 @@ namespace TideCombat
             RunLog.Info(LogArea, string.Format("开始 · 来源={0} · 首领={1} · 目标轮数={2} · 搜寻={3} · 自动传送={4} · 图鉴分类={5} · 序号={6}",
                 settings.Source, options.Boss, options.RepeatCount, options.Pickup, options.Teleport, options.TeleportMode,
                 options.IndexFor(options.TeleportMode)));
+            if (options.RepeatCount == 0)
+                return new FarmReport { State = "刷取完成（0 轮）", Finished = true };
             var window = GameWindow.ForTask(settings.Source);
             var input = new WindowInput(window);
             var farmInput = new FarmInput(window);
@@ -62,6 +65,7 @@ namespace TideCombat
                 if (File.Exists(Path.Combine(dir, "det.onnx"))) ocr = new OcrReader(dir);
             }
             catch (Exception error) { RunLog.Error(LogArea, "OCR 模型加载失败", error); }
+            if (ocr != null) vision = new HudVision(settings, concerto, ocr);
             long lastOcr = -1000;
             long lastEntryOcr = -1000;
             List<OcrLine> levelLines = null;
@@ -108,6 +112,7 @@ namespace TideCombat
             Size capturedSize = Size.Empty;
             try
             {
+                using (var cursorAssist = WorldAssist.CreateCursorOnly(settings.WorldAssist, farmVision))
                 using (var capture = new BattleLoop.WindowFrames(window))
                 {
                     while (!cancellation.IsCancellationRequested)
@@ -125,12 +130,9 @@ namespace TideCombat
                                 throw new InputElevationRequiredException();
                             try
                             {
-                                long captureTime = started - pausedMs;
-                                bool retainEcho = detector != null && farm.WantsEchoDetection(captureTime) &&
-                                    (farm.SearchingForEcho || captureTime - lastDetect >= 300);
-                                bool readText = ocr != null && (!farm.Planner.Fighting || cloudStream || farm.WantsLevelScan ||
-                                    farm.WaitingForEntryControls || farm.CanScanInteraction || farm.WantsPickupScan || farm.WantsRechallengeDialog);
-                                if (!capture.Read(bounds, out frame, retainEcho || readText))
+                                // The shared HUD below reads native cooldowns
+                                // and health-bar colors, including while fighting.
+                                if (!capture.Read(bounds, out frame, retainEcho: true))
                                     state = "已找到游戏窗口，等待截图";
                                 else if (!window.Available())
                                     state = "游戏窗口状态已变化，正在重新识别";
@@ -172,6 +174,11 @@ namespace TideCombat
                         bool captureChanged = captured && capturedWindow != IntPtr.Zero &&
                             (window.Handle != capturedWindow || window.ProcessId != capturedProcess ||
                             window.Mode != capturedMode || bounds.Size != capturedSize);
+                        if (cursorAssist != null)
+                        {
+                            if (captured) cursorAssist.UpdateCursor(window, bounds, elapsed);
+                            else cursorAssist.ResetWindow();
+                        }
                         if (!captured || captureChanged)
                         {
                             farmInput.ReleaseAll();
@@ -214,14 +221,57 @@ namespace TideCombat
                                 {
                                     echoes = detector.Detect(frame, farm.EchoThreshold(ui));
                                 }
-                                catch (Exception error)
+                                catch (Microsoft.ML.OnnxRuntime.OnnxRuntimeException error)
                                 {
-                                    RunLog.Error(LogArea, "声骸检测失败，禁用本次任务的检测模型", error);
+                                    RunLog.Error(LogArea, "声骸检测执行失败", error);
                                     echoes = null;
-                                    detector.Dispose();
+                                    cancellation.ThrowIfCancellationRequested();
+                                    // Do not begin recovery cleanup or send new actions on an
+                                    // invalidated route. The existing outer finally only releases
+                                    // inputs already owned by this task; background releases retain
+                                    // their original HWND/PID and foreground releases are key-up only.
+                                    if (!SameInputRoute(window, capturedWindow, capturedProcess, capturedMode, capturedSize))
+                                        throw;
+                                    // Release the failed turn before disposal or reinitialization.
+                                    farm.Suspend(now);
+                                    if (movement != '\0' && !farmInput.KeyUp(movement))
+                                        throw new InvalidOperationException("声骸检测异常后未能确认松开移动输入。", error);
+                                    farmInput.ReleaseAll();
+                                    input.ReleaseAll();
+                                    movement = '\0';
+                                    sprinting = false;
+                                    var failedDetector = detector;
                                     detector = null;
+                                    failedDetector.Dispose();
+                                    cancellation.ThrowIfCancellationRequested();
+                                    bool sameRoute = SameInputRoute(window, capturedWindow, capturedProcess, capturedMode, capturedSize);
+                                    var next = farm.RestartAfterWalkInExecutionFailure(error, sameRoute, cancellation.IsCancellationRequested);
+                                    if (next != null)
+                                    {
+                                        // Stop the failed turn and recreate the broken detector before
+                                        // allowing the fresh state machine to send any teleport/menu inputs.
+                                        detector = new EchoDetector(EchoModel.ModelPath);
+                                        cancellation.ThrowIfCancellationRequested();
+                                        if (!SameInputRoute(window, capturedWindow, capturedProcess, capturedMode, capturedSize))
+                                            throw new InvalidOperationException("重建声骸检测模型后未确认原游戏输入路由。", error);
+                                        farm = next;
+                                        vision = new HudVision(settings, concerto, ocr);
+                                        levelLines = null;
+                                        bossName = null;
+                                        navTurn = double.NaN;
+                                        pickupPrompt = EchoPrompt.None;
+                                        lastPickupScan = lastDetect = lastNav = lastOcr = lastEntryOcr =
+                                            lastEntryPrompt = lastRechallengeOcr = lastRechallengeDialogOcr =
+                                            lastBossOcr = lastDialogOcr = lastClaimScan = lastMarker = lastWaypointScan = -1000;
+                                        continue;
+                                    }
+                                    // An invalid/permanent/unknown execution code, unavailable
+                                    // route or exhausted walk-in recovery is not a normal fallback.
+                                    if (!sameRoute || farm.ConfiguredWalkCombat || !Farm4C.IsRecoverableDetectorExecutionFailure(error))
+                                        throw;
                                     if (options.Pickup == FarmPickupMode.Yolo)
                                         throw new InvalidOperationException("刷 4C 的声骸检测失败。", error);
+                                    RunLog.Warn(LogArea, "未进入配置传送走入战斗的恢复路径，禁用可选声骸检测，保留手动搜寻方式");
                                 }
                             }
                             else if (!wantEchoes)
@@ -253,11 +303,23 @@ namespace TideCombat
                                 lastWaypointScan = now;
                                 try
                                 {
-                                    ui.HealWaypoints = farmVision.FindWaypoints(frame);
+                                    ui.HealWaypoints = farmVision.FindWaypoints(frame, confidenceOrder: true);
                                 }
                                 catch (Exception error)
                                 {
                                     LogScanErrorOnce(loggedScanErrors, "查找回血传送点失败", error);
+                                }
+                            }
+                            if (ui != null && !Farm4C.PlayableScene(hud, ui) && farm.WantsWaypointPopup(now))
+                            {
+                                try
+                                {
+                                    Rectangle popup;
+                                    if (farmVision.FindWaypointPopup(frame, out popup)) ui.WaypointPopupBox = popup;
+                                }
+                                catch (Exception error)
+                                {
+                                    LogScanErrorOnce(loggedScanErrors, "查找重叠信标列表失败", error);
                                 }
                             }
                             if (!farm.WantsNavigation || hud == null || !hud.Valid)
@@ -443,7 +505,7 @@ namespace TideCombat
                                     {
                                         RunLog.Info(LogArea, message);
                                         if (progress != null) progress.Report(new FarmReport { State = message,
-                                            Kills = farm.Kills, Echoes = farm.Echoes, Rate = farm.EchoesPerHour,
+                                            Kills = farm.Kills, Attempts = farm.Attempts, Echoes = farm.Echoes, Rate = farm.EchoesPerHour,
                                             Size = bounds.Size, Hud = hud });
                                     });
                                     cancellation.ThrowIfCancellationRequested();
@@ -480,7 +542,7 @@ namespace TideCombat
                             }
                             if (farm.Finished)
                             {
-                                var next = farm.RestartAfterPopup(() =>
+                                var next = farm.RestartAfterWalkInFailure() ?? farm.RestartAfterPopup(() =>
                                 {
                                     using (var session = new WorldSession(settings, cancellation, ocr, window, capture, monthly))
                                         return new WorldRecovery(session, message => RunLog.Info(LogArea, message)).ClearFarmInterruption();
@@ -512,7 +574,7 @@ namespace TideCombat
                                 return new FarmReport
                                 {
                                     State = farm.Failure ?? farm.CompletionMessage ?? "刷取完成", Failure = farm.Failure, Finished = true,
-                                    Kills = farm.Kills, Echoes = farm.Echoes,
+                                    Kills = farm.Kills, Attempts = farm.Attempts, Echoes = farm.Echoes,
                                     Rate = farm.EchoesPerHour,
                                     Size = bounds.Size, Hud = hud, LastAction = lastAction
                                 };
@@ -533,7 +595,7 @@ namespace TideCombat
                         {
                             progress.Report(new FarmReport
                             {
-                                State = state, LastAction = lastAction, Kills = farm.Kills,
+                                State = state, LastAction = lastAction, Kills = farm.Kills, Attempts = farm.Attempts,
                                 Echoes = farm.Echoes,
                                 Rate = farm.EchoesPerHour,
                                 Size = bounds.Size, Hud = hud
@@ -564,6 +626,15 @@ namespace TideCombat
         {
             if (loggedErrors.Add(context))
                 RunLog.Error(LogArea, context, error);
+        }
+
+        private static bool SameInputRoute(GameWindow window, IntPtr handle, uint process, GameSource source, Size size)
+        {
+            Rectangle currentBounds;
+            string reason;
+            return window.TryLocate(out currentBounds, out reason) && window.Handle == handle &&
+                window.ProcessId == process && window.Mode == source && currentBounds.Size == size &&
+                !window.InputBlockedByIntegrity && window.Available();
         }
 
         private static string Execute(FarmDecision decision, PixelFrame frame, Rectangle bounds, FarmInput farmInput,

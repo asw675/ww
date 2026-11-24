@@ -8,6 +8,8 @@ namespace TideCombat
     {
         private readonly ComboBox teleport = Theme.Select("不使用（手动站到 Boss 前）", "Boss 挑战",
             "周常挑战", "特异梦魇");
+        private readonly int[] indices = new int[4];
+        private int selectedCategory;
         private readonly NumericUpDown bossIndex = Number(1, 20, 1);
         private readonly ComboBox level = Theme.Select("50", "60", "70", "80", "90");
         private readonly NumericUpDown repeat = Number(1, 100000, 10000);
@@ -16,10 +18,11 @@ namespace TideCombat
         private readonly ComboBox bossProfile = Theme.Select("通用 / 其它", "海之女", "无归的谬误", "异构武装",
             "罗蕾莱", "荣耀狮像", "梦魇·赫卡忒", "芬里科", "无铭探索者");
         private readonly CheckBox healer = new CheckBox { Text = "战斗前后切换到治疗", AutoSize = true };
+        private readonly CheckBox liberation = new CheckBox { Text = "允许使用共鸣解放", AutoSize = true };
         private readonly CheckBox exitAfter = new CheckBox { Text = "完成后退出游戏与程序", AutoSize = true };
-        private readonly Label hint = Theme.Text("自动传送会打开 F2 图鉴，需要游戏窗口可见。", Theme.Muted);
+        private readonly Label hint = Theme.Text(string.Empty, Theme.Muted);
 
-        internal FarmForm(FarmOptions options)
+        internal FarmForm(FarmOptions options, bool saveOnly = false)
         {
             Text = "刷 4C 声骸";
             StartPosition = FormStartPosition.CenterParent;
@@ -31,7 +34,7 @@ namespace TideCombat
             ForeColor = Theme.Ink;
             AutoScaleMode = AutoScaleMode.Dpi;
             AutoScaleDimensions = new SizeF(96, 96);
-            ClientSize = new Size(438, 404);
+            ClientSize = new Size(438, 442);
 
             var layout = new TableLayoutPanel
             {
@@ -50,10 +53,12 @@ namespace TideCombat
             Add(layout, "拾取方式", pickup, 5);
             Add(layout, "Boss 档案", bossProfile, 6);
             Add(layout, "战斗设置", healer, 7);
+            layout.Controls.Add(liberation, 1, 8);
             hint.AutoSize = false;
             hint.Height = 34;
             hint.Dock = DockStyle.Fill;
-            layout.Controls.Add(hint, 1, 9);
+            layout.Controls.Add(exitAfter, 1, 9);
+            layout.Controls.Add(hint, 1, 10);
 
             var actions = new FlowLayoutPanel
             {
@@ -61,22 +66,32 @@ namespace TideCombat
                 Margin = new Padding(0, 8, 0, 0)
             };
             var cancel = Theme.Button("取消");
-            var ok = Theme.Button("开始", true);
+            var ok = Theme.Button(saveOnly ? "保存" : "开始", true);
             cancel.Click += delegate { DialogResult = DialogResult.Cancel; Close(); };
             ok.Click += delegate { DialogResult = DialogResult.OK; Close(); };
             actions.Controls.Add(cancel);
             actions.Controls.Add(ok);
-            layout.Controls.Add(actions, 0, 10);
+            layout.Controls.Add(actions, 0, 11);
             layout.SetColumnSpan(actions, 2);
 
-            teleport.SelectedIndex = options.Teleport ? Math.Max(1, (int)options.TeleportMode) : 0;
-            bossIndex.Value = Math.Max(1, Math.Min(20, options.BossIndex));
+            for (int index = 0; index < indices.Length; index++)
+                indices[index] = options.IndexFor((FarmTeleportMode)index);
+            selectedCategory = options.Teleport ? Math.Max(1, (int)options.TeleportMode) : 0;
+            teleport.SelectedIndex = selectedCategory;
+            ShowCategory();
+            teleport.SelectedIndexChanged += delegate
+            {
+                indices[selectedCategory] = (int)bossIndex.Value;
+                selectedCategory = teleport.SelectedIndex;
+                ShowCategory();
+            };
             level.SelectedIndex = Math.Max(0, Math.Min(4, (options.BossLevel - 50) / 10));
             repeat.Value = Math.Max(1, Math.Min(100000, options.RepeatCount));
             wait.Value = Math.Max(0, Math.Min(60, options.WaitSeconds));
             pickup.SelectedIndex = (int)options.Pickup;
             bossProfile.SelectedIndex = (int)options.Boss;
             healer.Checked = options.SwitchHealer;
+            liberation.Checked = options.UseLiberation;
             exitAfter.Checked = options.ExitAfterTask;
             AcceptButton = ok;
             CancelButton = cancel;
@@ -84,21 +99,36 @@ namespace TideCombat
 
         internal FarmOptions Result { get; private set; }
 
+        private void ShowCategory()
+        {
+            bossIndex.Maximum = FarmOptions.LimitFor((FarmTeleportMode)selectedCategory);
+            bossIndex.Value = Math.Max(1, Math.Min((int)bossIndex.Maximum, indices[selectedCategory]));
+            bossIndex.Enabled = selectedCategory != 0;
+            hint.Text = teleport.SelectedIndex == 0
+                ? "手动模式从当前场景开始。请先站到 Boss 或挑战入口附近。"
+                : "识别游戏窗口后，任务会打开 F2 图鉴并前往选定的 Boss。";
+        }
+
         protected override void OnFormClosing(FormClosingEventArgs args)
         {
             if (DialogResult == DialogResult.OK)
             {
+                indices[selectedCategory] = (int)bossIndex.Value;
                 Result = new FarmOptions
                 {
                     Teleport = teleport.SelectedIndex > 0,
                     TeleportMode = (FarmTeleportMode)teleport.SelectedIndex,
                     BossIndex = (int)bossIndex.Value,
+                    BossChallengeIndex = indices[(int)FarmTeleportMode.BossChallenge],
+                    WeeklyChallengeIndex = indices[(int)FarmTeleportMode.WeeklyChallenge],
+                    SpecialNightmareIndex = indices[(int)FarmTeleportMode.SpecialNightmare],
                     BossLevel = 50 + level.SelectedIndex * 10,
                     RepeatCount = (int)repeat.Value,
                     WaitSeconds = (int)wait.Value,
                     Pickup = (FarmPickupMode)pickup.SelectedIndex,
                     Boss = (FarmBoss)bossProfile.SelectedIndex,
                     SwitchHealer = healer.Checked,
+                    UseLiberation = liberation.Checked,
                     ExitAfterTask = exitAfter.Checked
                 };
                 try { Result.Validate(); }

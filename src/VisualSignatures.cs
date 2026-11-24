@@ -165,15 +165,17 @@ namespace TideCombat
         internal readonly Rectangle Area;
         internal readonly VisualSignature Signature;
         private readonly byte[] light;
+        internal readonly byte[] SourcePng;
         private readonly int lightSum, lightSquares, lightHigh, lightLow, edgeFloor;
 
-        internal VisualPattern(string label, string fighter, Rectangle area, VisualSignature signature, byte[] light)
+        internal VisualPattern(string label, string fighter, Rectangle area, VisualSignature signature, byte[] light, byte[] sourcePng = null)
         {
             Label = label;
             Fighter = fighter;
             Area = area;
             Signature = signature;
             this.light = light;
+            SourcePng = sourcePng;
             if (light == null) return;
             for (int index = 0; index < light.Length; index++)
             {
@@ -188,10 +190,21 @@ namespace TideCombat
 
         internal bool HasLight { get { return light != null; } }
 
-        internal bool HasLightEdge(PixelFrame frame, Rectangle placement)
+        internal bool HasLightEdge(PixelFrame frame, Rectangle placement, double contrastFraction = 1)
         {
-            return light != null && frame.Light(placement.X + lightHigh % placement.Width, placement.Y + lightHigh / placement.Width) -
-                frame.Light(placement.X + lightLow % placement.Width, placement.Y + lightLow / placement.Width) >= edgeFloor;
+            return light != null && SampleLight(frame, placement, lightHigh) - SampleLight(frame, placement, lightLow) >=
+                edgeFloor * contrastFraction;
+        }
+
+        private int SampleLight(PixelFrame frame, Rectangle placement, int index)
+        {
+            int x = index % Area.Width, y = index / Area.Width;
+            if (placement.Width != Area.Width || placement.Height != Area.Height)
+            {
+                x = (2 * x + 1) * placement.Width / (2 * Area.Width);
+                y = (2 * y + 1) * placement.Height / (2 * Area.Height);
+            }
+            return frame.Light(placement.Left + x, placement.Top + y);
         }
 
         internal bool MatchesLight(PixelFrame frame, Rectangle placement)
@@ -200,14 +213,16 @@ namespace TideCombat
             return LightSimilarity(frame, placement) >= .63;
         }
 
-        internal double LightSimilarity(PixelFrame frame, Rectangle placement)
+        internal double LightSimilarity(PixelFrame frame, Rectangle placement, int negativeThreshold = -1)
         {
             if (light == null) return 0;
             int y = 0, yy = 0, xy = 0;
             for (int i = 0; i < light.Length; i++)
             {
                 int a = unchecked((sbyte)light[i]);
-                int b = frame.Light(placement.Left + i % placement.Width, placement.Top + i / placement.Width);
+                int b = SampleLight(frame, placement, i);
+                if (negativeThreshold >= 0)
+                    b = b <= negativeThreshold ? 255 : 0;
                 y += b;
                 yy += b * b;
                 xy += a * b;
@@ -252,11 +267,12 @@ namespace TideCombat
                     {
                         if (row.Length == 0 || row[0] == '#') continue;
                         var cells = row.Split('\t');
-                        if (cells.Length != 7 && cells.Length != 8) throw new InvalidDataException("Invalid visual signature row.");
+                        if (cells.Length < 7 || cells.Length > 9) throw new InvalidDataException("Invalid visual signature row.");
                         int[] coordinates = cells.Skip(2).Take(4).Select(x => int.Parse(x, CultureInfo.InvariantCulture)).ToArray();
                         result.Add(new VisualPattern(cells[0], cells[1] == "-" ? null : cells[1],
                             new Rectangle(coordinates[0], coordinates[1], coordinates[2], coordinates[3]),
-                            VisualSignature.Parse(cells[6]), cells.Length == 8 ? Convert.FromBase64String(cells[7]) : null));
+                            VisualSignature.Parse(cells[6]), cells.Length >= 8 && cells[7].Length != 0 ? Convert.FromBase64String(cells[7]) : null,
+                            cells.Length == 9 ? Convert.FromBase64String(cells[8]) : null));
                     }
                 }
             }

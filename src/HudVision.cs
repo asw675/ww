@@ -6,16 +6,20 @@ namespace TideCombat
 {
     internal struct PixelFrame
     {
-        private readonly byte[] pixels;
+        private readonly byte[] pixels, echoPixels;
+        private static long nextCaptureId;
+        internal readonly long CaptureId;
         internal readonly int Width, Height, SourceWidth, SourceHeight;
         internal readonly CloudTargetColors TargetColors;
         internal readonly CamellyaColors Camellya;
-        internal readonly FramePatch Concerto;
+        internal readonly FramePatch Concerto, MonthlyCard;
 
         internal PixelFrame(byte[] pixels, int width, int height, CloudTargetColors targetColors = null, int sourceWidth = 0,
-            CamellyaColors camellya = null, FramePatch concerto = null, int sourceHeight = 0)
+            CamellyaColors camellya = null, FramePatch concerto = null, int sourceHeight = 0, byte[] echoPixels = null, FramePatch monthlyCard = null)
         {
             this.pixels = pixels;
+            this.echoPixels = echoPixels;
+            CaptureId = System.Threading.Interlocked.Increment(ref nextCaptureId);
             Width = width;
             Height = height;
             SourceWidth = sourceWidth == 0 ? width : sourceWidth;
@@ -23,6 +27,13 @@ namespace TideCombat
             TargetColors = targetColors;
             Camellya = camellya;
             Concerto = concerto;
+            MonthlyCard = monthlyCard;
+        }
+
+        internal bool HasSourcePixels { get { return echoPixels != null; } }
+        internal PixelFrame FullResolution
+        {
+            get { return echoPixels == null ? this : new PixelFrame(echoPixels, SourceWidth, SourceHeight); }
         }
 
         internal void CopyBgra(Rectangle area, byte[] destination)
@@ -90,7 +101,7 @@ namespace TideCombat
         internal int LongActionLayout;
         internal string RoverForm;
         internal bool Airborne, LevitatorKnown, Countdown, BreakPrompt, OrdinaryBreakSampled, InChallenge;
-        internal bool ChallengePrompt, ChallengeMarker, OpenWorld, InRealm, Dead;
+        internal bool ChallengePrompt, ChallengeMarker, ChallengeInteractVisible, OpenWorld, InRealm, Dead;
         internal bool TeamHudHidden, LucillaTransform, BearTargetShifted;
         internal bool XigelikaForte, LinnaiAccelerating, LinnaiColorFull, CantarellaForte;
         internal bool LuhesiLiberation;
@@ -126,6 +137,7 @@ namespace TideCombat
             Badge right = Badge.Find(frame, frame.Width - 87, 847, 16, 10, skillGlyphs);
             if (!party)
             {
+                combatVision.ClearChallengeMarker();
                 snapshot.Detail = left.Found ? "技能栏可见，队伍栏未确认" : "未确认队伍栏和技能栏";
                 if (allowShortEnemyBar)
                 {

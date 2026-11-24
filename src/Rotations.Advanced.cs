@@ -160,6 +160,7 @@ namespace TideCombat
                 long supportStart = c.Now;
                 while (c.Since(supportStart) < duration && !c.Full)
                 {
+                    long cycleStart = c.Now;
                     if (c.RReady) yield return Move.Liberation(0);
                     else if (c.Hud.ForteFullColor)
                     {
@@ -173,10 +174,10 @@ namespace TideCombat
                     }
                     else
                     {
-                        yield return Move.Resonance();
+                        yield return Move.Resonance(0);
                         if (!c.Succeeded) yield return Move.Tap(Attack, 100);
                     }
-                    yield return Move.Wait(10);
+                    if (c.Now - cycleStart < 100) yield return Move.Wait((int)(100 - (c.Now - cycleStart)));
                 }
                 yield break;
             }
@@ -288,7 +289,8 @@ namespace TideCombat
                             spentFrames = c.Hud.GuaCount < 2 ? spentFrames + 1 : 0;
                             if (spentFrames >= 2) break;
                         }
-                        yield return Move.Wait(readable ? 50 : 100);
+                        int remaining = (int)(2500 - (c.Now - started));
+                        yield return Move.Wait(Math.Min(readable ? 50 : 100, remaining));
                     }
                     yield return Move.Release(Attack, 10);
                     if (!interrupted) break;
@@ -477,7 +479,6 @@ namespace TideCombat
                 }
                 if (c.Has("hsin_h2"))
                 {
-                    c.ContinueAfterLockLossUntil = c.Now + 4000;
                     yield return HsinHeavy(true);
                     secondHeavyComplete = c.Succeeded;
                     if (secondHeavyComplete)
@@ -506,7 +507,7 @@ namespace TideCombat
                 bool acted = false;
                 if (c.EReady)
                 {
-                    yield return Move.Resonance();
+                    yield return Move.Resonance(0);
                     acted = c.Succeeded;
                 }
                 if (!acted && (c.Has("hsin_lib1") || c.Has("hsin_lib2")) && c.RReady)
@@ -540,11 +541,13 @@ namespace TideCombat
         {
             Move move = Move.Hold(Attack, 1200, h => !h.Shows("hsin_h1") && !h.Shows("hsin_h2"), 10, 250);
             move.DetectHiddenRelease = second;
+            move.LockLossProtection = second ? 4000 : 0;
             return move;
         }
 
         private static IEnumerable<Move> HsinEnhancedResonance(TurnContext c)
         {
+            c.Succeeded = false;
             long end = c.Now + 1500, sentAt = -1, goneAt = -1;
             while (c.Now < end)
             {
@@ -553,17 +556,25 @@ namespace TideCombat
                     goneAt = -1;
                     if (sentAt < 0 || c.Now - sentAt >= 250)
                     {
-                        sentAt = c.Now;
-                        yield return Move.Tap(Skill, 0);
+                        long pressedAt = c.Now;
+                        yield return Move.Tap(Skill, 0, recordSkill: false);
+                        if (!c.Succeeded) yield break;
+                        sentAt = pressedAt;
                     }
                 }
                 else if (sentAt >= 0)
                 {
                     if (goneAt < 0) goneAt = c.Now;
-                    if (c.Now - goneAt >= 250) yield break;
+                    if (c.Now - goneAt >= 250)
+                    {
+                        c.Memory.LastSkill[0] = c.Now;
+                        c.Succeeded = true;
+                        yield break;
+                    }
                 }
                 yield return Move.Wait(50);
             }
+            c.Succeeded = false;
         }
 
         internal static IEnumerable<Move> Hiyuki(TurnContext c)

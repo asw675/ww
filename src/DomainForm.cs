@@ -16,7 +16,7 @@ namespace TideCombat
         private readonly Label hint = Theme.Text(
             "需要已解锁 F2 图鉴中的对应副本，工具会自动读取体力并反复刷取。", Theme.Muted);
 
-        internal DomainForm(DomainOptions options)
+        internal DomainForm(DomainOptions options, bool saveOnly = false)
         {
             Text = "体力本";
             StartPosition = FormStartPosition.CenterParent;
@@ -53,7 +53,7 @@ namespace TideCombat
                 Margin = new Padding(0, 8, 0, 0)
             };
             var cancel = Theme.Button("取消");
-            var ok = Theme.Button("开始", true);
+            var ok = Theme.Button(saveOnly ? "保存" : "开始", true);
             cancel.Click += delegate { DialogResult = DialogResult.Cancel; Close(); };
             ok.Click += delegate { DialogResult = DialogResult.OK; Close(); };
             actions.Controls.Add(cancel);
@@ -61,8 +61,17 @@ namespace TideCombat
             layout.Controls.Add(actions, 0, 4);
             layout.SetColumnSpan(actions, 2);
 
+            kind.SelectedIndexChanged += delegate
+            {
+                index.Maximum = kind.SelectedIndex == (int)DomainKind.Forgery ? 20 : 21;
+                index.Enabled = kind.SelectedIndex != (int)DomainKind.Simulation;
+                material.Enabled = kind.SelectedIndex == (int)DomainKind.Simulation;
+            };
             kind.SelectedIndex = (int)options.Kind;
-            index.Value = Math.Max(1, Math.Min(21, options.Index));
+            kind.Enabled = !saveOnly;
+            index.Enabled = options.Kind != DomainKind.Simulation;
+            material.Enabled = options.Kind == DomainKind.Simulation;
+            index.Value = Math.Max(1, Math.Min(index.Maximum, options.Index));
             int materialIndex = Array.IndexOf(DomainOptions.Materials, options.Material);
             material.SelectedIndex = materialIndex >= 0 ? materialIndex : DomainOptions.Materials.Length - 1;
             AcceptButton = ok;

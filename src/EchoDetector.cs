@@ -31,7 +31,64 @@ namespace TideCombat
     internal struct EchoBox
     {
         internal Rectangle Box;
+        internal Size SourceSize;
         internal float Score;
+
+        internal static void OrderOnScreen(List<EchoBox> boxes)
+        {
+            if (boxes.Count < 2) return;
+            // Rows can overlap vertically. Preserve the existing order for equal positions.
+            bool descending = CompareLocation(boxes[1], boxes[0]) < 0;
+            int sorted = 2;
+            while (sorted < boxes.Count && (CompareLocation(boxes[sorted], boxes[sorted - 1]) < 0) == descending) sorted++;
+            if (descending) boxes.Reverse(0, sorted);
+            for (int i = sorted; i < boxes.Count; i++)
+            {
+                EchoBox item = boxes[i];
+                int low = 0, high = i;
+                while (low < high)
+                {
+                    int mid = (low + high) / 2;
+                    if (CompareLocation(item, boxes[mid]) < 0) high = mid;
+                    else low = mid + 1;
+                }
+                for (int j = i; j > low; j--) boxes[j] = boxes[j - 1];
+                boxes[low] = item;
+            }
+        }
+
+        private static int CompareLocation(EchoBox first, EchoBox second)
+        {
+            Rectangle a = first.Box, b = second.Box;
+            bool sameRow = a.Top <= b.Bottom && b.Top <= a.Bottom;
+            int horizontal = a.X.CompareTo(b.X), vertical = a.Y.CompareTo(b.Y);
+            if (sameRow && horizontal != 0) return horizontal;
+            if (vertical != 0) return vertical;
+            if (horizontal != 0) return horizontal;
+            return (int)(first.Score * 1000.0 - second.Score * 1000.0);
+        }
+    }
+
+    internal sealed class EchoApproach
+    {
+        private long missingSince = -1;
+
+        internal char Direction(List<EchoBox> detections, Size screen, char previous, long now)
+        {
+            if (detections.Count == 0)
+            {
+                if (missingSince < 0) missingSince = now;
+                return now - missingSince > 3000 ? '\0' : 'W';
+            }
+            missingSince = -1;
+            EchoBox echo = detections[0];
+            if (!echo.SourceSize.IsEmpty) screen = echo.SourceSize;
+            Rectangle box = echo.Box;
+            double dx = Math.Round(box.X + box.Width / 2.0) - screen.Width / 2;
+            int tolerance = (int)(screen.Height * (previous == '\0' ? .05 : .15));
+            if (Math.Abs(dx) >= tolerance) return dx > 0 ? 'D' : 'A';
+            return box.Y + box.Height / 3.0 + 1 > (int)(screen.Height * .65) ? 'S' : 'W';
+        }
     }
 
     // YOLOv8 single-class detector for ground echoes. The model follows the
@@ -50,8 +107,8 @@ namespace TideCombat
 
         internal EchoDetector(string modelPath)
         {
-            var options = new SessionOptions { IntraOpNumThreads = 2, InterOpNumThreads = 1 };
-            session = new InferenceSession(modelPath, options);
+            using (var options = new SessionOptions { IntraOpNumThreads = 2, InterOpNumThreads = 1 })
+                session = new InferenceSession(modelPath, options);
             inputName = session.InputMetadata.Keys.First();
             tensor = new DenseTensor<float>(data, new[] { 1, 3, Side, Side });
         }
@@ -59,21 +116,23 @@ namespace TideCombat
         internal List<EchoBox> Detect(PixelFrame frame, float threshold)
         {
             var results = new List<EchoBox>();
+            frame = frame.FullResolution;
             if (frame.Width <= 0 || frame.Height <= 0)
                 return results;
             double scale = Math.Min((double)Side / frame.Width, (double)Side / frame.Height);
             int width = Math.Max(1, (int)Math.Round(frame.Width * scale));
             int height = Math.Max(1, (int)Math.Round(frame.Height * scale));
             int padX = (Side - width) / 2, padY = (Side - height) / 2;
-            Letterbox(frame, scale, width, height, padX, padY);
+            FillLetterbox(frame, data, width, height, padX, padY);
 
             using (IDisposableReadOnlyCollection<DisposableNamedOnnxValue> output =
                 session.Run(new[] { NamedOnnxValue.CreateFromTensor(inputName, tensor) }))
             {
                 Tensor<float> values = output.First().AsTensor<float>();
-                int rank = values.Dimensions.Length;
-                int channels = values.Dimensions[rank - 2];
-                int anchors = values.Dimensions[rank - 1];
+                int[] dimensions = values.Dimensions.ToArray();
+                int rank = dimensions.Length;
+                int channels = dimensions[rank - 2];
+                int anchors = dimensions[rank - 1];
                 bool transposed = channels > anchors;
                 if (transposed)
                 {
@@ -87,93 +146,52 @@ namespace TideCombat
                 candidates.Clear();
                 for (int index = 0; index < anchors; index++)
                 {
-                    float best = 0;
-                    for (int label = 0; label < classes; label++)
+                    float best = transposed ? values[0, index, 4] : values[0, 4, index];
+                    if (!(best > threshold)) continue;
+                    bool echoClass = true;
+                    for (int label = 1; label < classes; label++)
                     {
                         float score = transposed ? values[0, index, 4 + label] : values[0, 4 + label, index];
-                        if (score > best) best = score;
+                        if (score > best) { echoClass = false; break; }
                     }
-                    if (best < threshold)
-                        continue;
+                    if (!echoClass) continue;
                     float cx = transposed ? values[0, index, 0] : values[0, 0, index];
                     float cy = transposed ? values[0, index, 1] : values[0, 1, index];
                     float bw = transposed ? values[0, index, 2] : values[0, 2, index];
                     float bh = transposed ? values[0, index, 3] : values[0, 3, index];
-                    var box = new RectangleF((cx - bw / 2 - padX) / (float)scale, (cy - bh / 2 - padY) / (float)scale,
-                        bw / (float)scale, bh / (float)scale);
-                    candidates.Add(new EchoBox
-                    {
-                        Box = new Rectangle((int)Math.Round(box.X), (int)Math.Round(box.Y),
-                            Math.Max(1, (int)Math.Round(box.Width)), Math.Max(1, (int)Math.Round(box.Height))),
-                        Score = best
-                    });
+                    var box = new Rectangle((int)((cx - padX - bw / 2) / (float)scale),
+                        (int)((cy - padY - bh / 2) / (float)scale), (int)(bw / (float)scale), (int)(bh / (float)scale));
+                    candidates.Add(new EchoBox { Box = box, Score = best, SourceSize = new Size(frame.Width, frame.Height) });
                 }
-                candidates.Sort((left, right) => right.Score.CompareTo(left.Score));
-                foreach (EchoBox candidate in candidates)
-                {
-                    bool keep = true;
-                    foreach (EchoBox kept in results)
-                    {
-                        if (IoU(kept.Box, candidate.Box) > NmsIou)
-                        {
-                            keep = false;
-                            break;
-                        }
-                    }
-                    if (!keep)
-                        continue;
-                    var clipped = Rectangle.Intersect(candidate.Box, new Rectangle(0, 0, frame.Width, frame.Height));
-                    if (clipped.Width < 2 || clipped.Height < 2)
-                        continue;
-                    results.Add(new EchoBox { Box = clipped, Score = candidate.Score });
-                    if (results.Count >= 20)
-                        break;
-                }
+                // Equal scores retain the model's original anchor order.
+                foreach (EchoBox candidate in candidates.OrderByDescending(item => item.Score))
+                    if (!results.Any(kept => IoU(kept.Box, candidate.Box) > NmsIou))
+                        results.Add(candidate);
+                EchoBox.OrderOnScreen(results);
             }
             return results;
         }
 
-        private void Letterbox(PixelFrame frame, double scale, int width, int height, int padX, int padY)
+        internal static void FillLetterbox(PixelFrame frame, float[] destination, int width, int height, int padX, int padY)
         {
-            for (int channel = 0; channel < 3; channel++)
+            const int plane = Side * Side;
+            for (int i = 0; i < destination.Length; i++) destination[i] = PadColor;
+            var columns = new LinearAxis[width];
+            for (int x = 0; x < width; x++) columns[x] = new LinearAxis(x, frame.Width, width, true);
+            for (int y = 0; y < height; y++)
             {
-                int plane = channel * Side * Side;
-                for (int y = 0; y < Side; y++)
+                var row = new LinearAxis(y, frame.Height, height, false);
+                int index = (y + padY) * Side + padX;
+                for (int x = 0; x < width; x++, index++)
                 {
-                    bool insideY = y >= padY && y < padY + height;
-                    for (int x = 0; x < Side; x++)
-                    {
-                        float value = PadColor;
-                        if (insideY && x >= padX && x < padX + width)
-                        {
-                            double sx = (x - padX + 0.5) / scale - 0.5;
-                            double sy = (y - padY + 0.5) / scale - 0.5;
-                            value = Sample(frame, sx, sy, channel);
-                        }
-                        data[plane + y * Side + x] = value;
-                    }
+                    LinearAxis column = columns[x];
+                    int red, green, blue;
+                    LinearAxis.Sample(frame, column, row, out red, out green, out blue);
+                    destination[index] = red / 255f;
+                    destination[index + plane] = green / 255f;
+                    destination[index + 2 * plane] = blue / 255f;
                 }
             }
-        }
-
-        private static float Sample(PixelFrame frame, double x, double y, int channel)
-        {
-            int x0 = (int)Math.Floor(x), y0 = (int)Math.Floor(y);
-            double fx = x - x0, fy = y - y0;
-            int x1 = Math.Min(frame.Width - 1, Math.Max(0, x0 + 1));
-            int y1 = Math.Min(frame.Height - 1, Math.Max(0, y0 + 1));
-            x0 = Math.Min(frame.Width - 1, Math.Max(0, x0));
-            y0 = Math.Min(frame.Height - 1, Math.Max(0, y0));
-            double top = Pixel(frame, x0, y0, channel) * (1 - fx) + Pixel(frame, x1, y0, channel) * fx;
-            double bottom = Pixel(frame, x0, y1, channel) * (1 - fx) + Pixel(frame, x1, y1, channel) * fx;
-            return (float)((top * (1 - fy) + bottom * fy) / 255.0);
-        }
-
-        private static double Pixel(PixelFrame frame, int x, int y, int channel)
-        {
-            int r, g, b;
-            frame.Rgb(x, y, out r, out g, out b);
-            return channel == 0 ? r : channel == 1 ? g : b;
         }
 
         private static double IoU(Rectangle left, Rectangle right)
@@ -183,7 +201,7 @@ namespace TideCombat
             int width = Math.Max(0, x2 - x1), height = Math.Max(0, y2 - y1);
             int intersection = width * height;
             int union = left.Width * left.Height + right.Width * right.Height - intersection;
-            return union <= 0 ? 0 : (double)intersection / union;
+            return union <= 0 ? 1 : (double)intersection / union;
         }
 
         public void Dispose()

@@ -364,22 +364,28 @@ namespace TideCombat
             int limit = c.Intro ? 8000 : 12000;
             while (!ElectroReady(c.Hud) && c.Since(fillStart) < limit)
                 yield return Move.Tap(Attack, 100);
-            bool used = false;
+            foreach (Move action in RoverEnhancedResonance(c)) yield return action;
+            if (!c.Succeeded) yield break;
+            if (!c.Full) yield return Move.Liberation(animation: AnimationInput.None);
+            if (!c.Full) yield return Move.Attacks(2000, Full);
+        }
+
+        private static IEnumerable<Move> RoverEnhancedResonance(TurnContext c)
+        {
+            c.Succeeded = false;
             for (int attempt = 0; attempt < 2 && ElectroReady(c.Hud); attempt++)
             {
                 long castStarted = c.Now;
-                yield return Move.Tap(Skill, 0, downMilliseconds: 50);
+                yield return Move.Tap(Skill, 0, downMilliseconds: 50, recordSkill: false);
+                if (!c.Succeeded) yield break;
                 yield return Move.Wait((int)Math.Max(0, 2600 - (c.Now - castStarted)),
                     h => c.Since(castStarted) >= 1500 && !h.Shows("e_forte") && !h.ForteFullColor, 200);
                 if (c.Succeeded)
                 {
-                    used = true;
-                    break;
+                    c.Memory.LastSkill[0] = c.Now;
+                    yield break;
                 }
             }
-            if (!used) yield break;
-            if (!c.Full) yield return Move.Liberation(animation: AnimationInput.None);
-            if (!c.Full) yield return Move.Attacks(2000, Full);
         }
     }
 }

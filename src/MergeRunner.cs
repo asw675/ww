@@ -1,5 +1,6 @@
 using System;
 using System.Drawing;
+using System.Linq;
 using System.Text.RegularExpressions;
 using System.Threading;
 
@@ -7,11 +8,42 @@ namespace TideCombat
 {
     internal static class MergeMath
     {
-        private static readonly Regex FullBatch = new Regex(@"(?<!\d)100\s*/\s*100(?!\d)");
+        private static readonly Regex BatchCount = new Regex(@"(?<!\d)([0-9]{1,3})\s*[／/]\s*100(?!\d)");
 
         internal static bool IsFullBatch(string text)
         {
-            return !string.IsNullOrEmpty(text) && FullBatch.IsMatch(text);
+            int count;
+            return TryReadBatch(text, out count) && count == 100;
+        }
+
+        internal static bool TryReadBatch(string text, out int count)
+        {
+            count = 0;
+            Match match = BatchCount.Match(text ?? string.Empty);
+            return match.Success && int.TryParse(match.Groups[1].Value, out count) && count <= 100;
+        }
+
+        internal static bool ExplicitlyInsufficient(string text)
+        {
+            string value = Normalize(text);
+            if (!MentionsDiscarded(value))
+                return false;
+            return value.Contains("不足1000") || value.Contains("不满1000") || value.Contains("不滿1000") ||
+                value.Contains("未达到1000") || value.Contains("未達到1000") ||
+                value.Contains("未达1000") || value.Contains("未達1000") ||
+                value.Contains("少于1000") || value.Contains("少於1000") ||
+                value.IndexOf("fewerthan1000", StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        internal static bool MentionsDiscarded(string value)
+        {
+            return value.Contains("弃置") || value.Contains("棄置") ||
+                value.IndexOf("discarded", StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        internal static string Normalize(string text)
+        {
+            return Regex.Replace(text ?? string.Empty, @"\s+", string.Empty);
         }
     }
 
@@ -22,29 +54,41 @@ namespace TideCombat
         internal Size Size;
         internal bool Finished;
         internal string Failure;
+        internal string Notice;
     }
 
-    // Merges discarded echoes in full batches of 100 from the bag's synthesis UI.
+    // Merges discarded echoes in verified full batches from the bag synthesis UI.
     internal sealed class MergeRunner : IDisposable
     {
         private readonly CancellationToken token;
         private readonly WorldSession world;
         private readonly CombatSettings settings;
         private readonly IProgress<MergeReport> progress;
+        private readonly Action<string, PixelFrame> recordEvidence;
+        private readonly bool notifyIfInsufficient;
         internal bool Failed { get; private set; }
+        internal bool NeedsMoreDiscarded { get; private set; }
+        internal bool CompletionVerified { get; private set; }
         internal string Failure { get; private set; }
-        private int batches;
+        private int batches, menuRoute;
 
-        internal MergeRunner(CombatSettings settings, CancellationToken token, IProgress<MergeReport> progress)
+        internal MergeRunner(CombatSettings settings, CancellationToken token, IProgress<MergeReport> progress,
+            Action<string, PixelFrame> recordEvidence = null, bool notifyIfInsufficient = true)
         {
             this.token = token;
             this.progress = progress;
             this.settings = settings;
+            this.recordEvidence = recordEvidence;
+            this.notifyIfInsufficient = notifyIfInsufficient;
             world = new WorldSession(settings, token);
         }
 
         internal void Run()
         {
+            Failed = NeedsMoreDiscarded = CompletionVerified = false;
+            Failure = null;
+            batches = 0;
+            RunLog.Info("合并声骸", "开始");
             if (!EnsureWorld())
             {
                 Fail("无法回到游戏世界。");
@@ -52,104 +96,191 @@ namespace TideCombat
             }
             Report("打开背包");
             char bag = string.IsNullOrEmpty(settings.BagKey) ? 'B' : settings.BagKey[0];
-            world.Key(bag);
-            world.Sleep(400);
-            if (!world.WaitUntil(delegate { return !world.TeamHud; }, 5000))
+            if (!world.Key(bag) || !world.WaitUntil(() => !world.VerifiedWorld, 5000))
             {
-                EnsureWorld();
-                Fail("无法用 " + bag + " 打开背包（请在设置里确认背包键）。");
+                Fail("未能通过快捷键 " + bag + " 打开背包。");
                 return;
             }
             world.Sleep(3000);
-
-            Rectangle cancel;
-            bool dialog = world.FindNear("cancel_button_hcenter_vcenter", .80, out cancel) ||
-                world.FindNear("cancel_button_highlight_hcenter_vcenter", .80, out cancel);
-            if (!dialog)
+            Rectangle cancel = Rectangle.Empty;
+            if (!world.WaitUntil(() => ReadMergePrompt(out cancel), 3000))
             {
-                EnsureWorld();
-                Fail("需要至少 1000 个弃置声骸才能合成。");
+                if (world.Captured && !world.VerifiedWorld && !world.Vision.IsTerminal(world.Frame) && IsBagPage())
+                {
+                    NeedsMoreDiscarded = true;
+                    Complete("背包未显示满 1000 个弃置声骸的合成入口");
+                }
+                else
+                    Fail("打开背包后未确认弃置声骸合成提示或数量。");
                 return;
             }
-            world.Click(cancel);
+            Record("merge-prompt-before");
+            if (NeedsMoreDiscarded)
+            {
+                Complete("画面确认弃置声骸不足 1000 个");
+                return;
+            }
+            menuRoute = world.InputRouteVersion;
+            if (!world.ClickOnRoute(cancel, menuRoute))
+            {
+                Fail("未能关闭已识别的弃置声骸提示。");
+                return;
+            }
             world.Sleep(2000);
-            world.Click(0.034, 0.293);
-            world.Sleep(1000);
-            world.Click(0.580, 0.911);
-            world.Sleep(4000);
+            if (!MenuClick(.034, .293, 1000) || !MenuClick(.580, .911, 4000) || !OpenMergePage())
+            {
+                Fail("未确认已进入合成页面。");
+                return;
+            }
+            while (!token.IsCancellationRequested && !Failed && !CompletionVerified)
+                MergeFullBatch();
+        }
 
-            OpenMergePage();
-            while (!token.IsCancellationRequested && MergeFullBatch())
-                batches++;
-            Report("弃置声骸已全部合成");
-            EnsureWorld();
+        private bool ReadMergePrompt(out Rectangle cancel)
+        {
+            cancel = Rectangle.Empty;
+            if (world.VerifiedWorld)
+                return false;
+            string body = MergeMath.Normalize(string.Join(" ", world.Read(.20, .24, .80, .70)
+                .Where(line => line.Score >= .70f).Select(line => line.Text)));
+            if (MergeMath.ExplicitlyInsufficient(body))
+            {
+                NeedsMoreDiscarded = true;
+                return true;
+            }
+            if (!MergeMath.MentionsDiscarded(body) || (!body.Contains("1000") && !body.Contains("合成") &&
+                body.IndexOf("synthesis", StringComparison.OrdinalIgnoreCase) < 0))
+                return false;
+            return world.FindNear("cancel_button_hcenter_vcenter", .80, out cancel) ||
+                world.FindNear("cancel_button_highlight_hcenter_vcenter", .80, out cancel);
+        }
+
+        private void Complete(string state)
+        {
+            Record("after-merge-verified");
+            RunLog.Info("合并声骸", string.Format("{0} · 已确认合成批数={1}", state, batches));
+            if (!EnsureWorld())
+            {
+                if (!token.IsCancellationRequested)
+                    Fail("已核对合成结果，但未确认返回游戏世界。");
+                return;
+            }
+            CompletionVerified = true;
             progress.Report(new MergeReport
             {
-                State = "弃置声骸已全部合成", Batches = batches, Finished = true,
+                State = state, Batches = batches, Finished = true,
+                Notice = NeedsMoreDiscarded && notifyIfInsufficient ? "弃置声骸不足 1000 个" : null,
                 Size = world.Captured ? new Size(world.Frame.Width, world.Frame.Height) : Size.Empty
             });
         }
 
-        private void OpenMergePage()
+        private bool OpenMergePage()
         {
             Report("打开合成页");
-            world.Click(0.602, 0.124);
-            world.Sleep(500);
-            world.Click(0.520, 0.904);
-            world.Sleep(2000);
-            world.Click(0.041, 0.918);
-            world.Sleep(1000);
-            world.Click(0.826, 0.840);
-            world.Sleep(500);
-            world.Click(0.717, 0.204);
-            world.Sleep(500);
-            world.Click(0.041, 0.918);
-            world.Sleep(500);
+            return MenuClick(.602, .124, 500, centered: true) &&
+                MenuClick(.520, .904, 2000, centered: true) &&
+                MenuClick(.041, .918, 1000) &&
+                MenuClick(.826, .840, 500) && MenuClick(.717, .204, 500) &&
+                MenuClick(.041, .918, 500);
         }
 
-        private bool MergeFullBatch()
+        private bool MenuClick(double x, double y, int wait, bool centered = false)
+        {
+            if (!world.Tick() || world.VerifiedWorld || world.Terminal) return false;
+            if (centered)
+            {
+                double contentWidth = Math.Min(world.Frame.Width, world.Frame.Height * (16.0 / 9));
+                x = .5 + (x - .5) * contentWidth / world.Frame.Width;
+            }
+            var button = new Point((int)(x * world.Frame.Width), (int)(y * world.Frame.Height));
+            if (!world.ClickOnRoute(button, menuRoute))
+                return false;
+            world.Sleep(wait);
+            return !token.IsCancellationRequested;
+        }
+
+        private bool IsBagPage()
+        {
+            return world.Read(.02, .035, .34, .24).Where(line => line.Score >= .72f)
+                .Select(line => MergeMath.Normalize(line.Text))
+                .Any(text => text == "背包" || text == "道具背包" ||
+                    string.Equals(text, "Backpack", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(text, "Inventory", StringComparison.OrdinalIgnoreCase));
+        }
+
+        private void MergeFullBatch()
         {
             Report("合成第 " + (batches + 1) + " 批");
-            world.Click(0.310, 0.915);
-            world.Sleep(500);
-            if (!world.WaitClick("echo_select_all", 3000))
-                return false;
+            Rectangle all = Rectangle.Empty;
+            if (!world.FindNear("echo_select_all", .81, out all) &&
+                (!MenuClick(.310, .915, 500) ||
+                    !world.WaitUntil(() => world.FindNear("echo_select_all", .81, out all), 3500)))
+            {
+                Fail("未识别到声骸选择页面和全选按钮。");
+                return;
+            }
+            if (!world.ClickOnRoute(all, menuRoute))
+            {
+                Fail("未能点击已识别的声骸全选按钮。");
+                return;
+            }
             world.Sleep(1000);
-
-            var lines = world.Read(0.670, 0.660, 0.895, 0.958);
-            bool full = false;
-            foreach (OcrLine line in lines)
-                if (MergeMath.IsFullBatch(line.Text))
-                {
-                    full = true;
-                    break;
-                }
-            if (!full)
-                return false;
-
-            world.Click(0.782, 0.910);
-            world.Sleep(300);
-            SkipDialog();
+            int count = -1;
+            if (!world.WaitUntil(() => ReadBatchCount(out count), 3500))
+            {
+                token.ThrowIfCancellationRequested();
+                Complete("未识别到 100/100，满批合成结束");
+                return;
+            }
+            if (count < 100)
+            {
+                Complete("已确认剩余 " + count + "/100，暂无满批声骸可合成");
+                return;
+            }
+            Record("merge-batch-before");
+            if (!MenuClick(.782, .910, 450))
+            {
+                Fail("未能提交已确认的 100/100 合成批次。");
+                return;
+            }
+            world.WaitForOptionalDialog(menuRoute);
             world.Sleep(3000);
-            world.Click(0.496, 0.972);
-            world.Sleep(1000);
-            return true;
+            if (!world.WaitUntil(() => world.InputRouteVersion != menuRoute || HasMergeRewardReceipt(), 6500) ||
+                world.InputRouteVersion != menuRoute)
+            {
+                Fail("已提交合成批次，但未识别到获得奖励或合成成功画面。");
+                return;
+            }
+            batches++;
+            Record("merge-batch-confirmed");
+            if (!MenuClick(.496, .972, 1000, centered: true) || !world.WaitUntil(() => !HasMergeRewardReceipt(), 4500))
+                Fail("已确认合成奖励，但未能返回合成页面核对剩余批量。");
         }
 
-        private void SkipDialog()
+        private bool ReadBatchCount(out int count)
         {
-            Rectangle box;
-            if (world.FindNear("skip_dialog_check", .80, out box))
+            count = -1;
+            foreach (OcrLine line in world.Read(.670, .660, .895, .958))
             {
-                world.Click(box);
-                world.Sleep(400);
+                int candidate;
+                if (line.Score < .72f || !MergeMath.TryReadBatch(line.Text, out candidate))
+                    continue;
+                if (count >= 0 && count != candidate)
+                    return false;
+                count = candidate;
             }
-            if (world.FindNear("skip_dialog_confirm", .80, out box))
-            {
-                world.Click(box);
-                world.Sleep(600);
-            }
+            return count >= 0;
         }
+
+        private bool HasMergeRewardReceipt()
+        {
+            return world.Read(.21, .12, .79, .38).Where(line => line.Score >= .72f)
+                .Select(line => MergeMath.Normalize(line.Text))
+                .Any(text => text == "获得道具" || text == "獲得道具" || text == "获得声骸" ||
+                    text == "獲得聲骸" || text == "合成成功" ||
+                    string.Equals(text, "ItemsObtained", StringComparison.OrdinalIgnoreCase));
+        }
+
 
         private bool EnsureWorld()
         {
@@ -157,9 +288,9 @@ namespace TideCombat
             {
                 if (!world.Tick())
                     break;
-                if (world.TeamHud)
+                if (world.VerifiedWorld && !world.InRealm)
                     return true;
-                if (world.Ui != null && world.Ui.InRealm)
+                if (world.InRealm)
                 {
                     world.Key((char)0x1B);
                     world.Sleep(800);
@@ -174,11 +305,12 @@ namespace TideCombat
                 world.Key((char)0x1B);
                 world.Sleep(800);
             }
-            return world.TeamHud;
+            return world.VerifiedWorld && !world.InRealm;
         }
 
         private void Report(string state)
         {
+            RunLog.Info("合并声骸", string.Format("{0} · 已合成批数={1}", state, batches));
             progress.Report(new MergeReport
             {
                 State = state, Batches = batches,
@@ -188,6 +320,10 @@ namespace TideCombat
 
         private void Fail(string message)
         {
+            if (token.IsCancellationRequested)
+                return;
+            RunLog.Warn("合并声骸", "任务停止 · " + message);
+            Record("after-merge-unverified");
             Failed = true;
             Failure = message;
             progress.Report(new MergeReport
@@ -195,6 +331,12 @@ namespace TideCombat
                 State = message, Failure = message, Finished = true, Batches = batches,
                 Size = world.Captured ? new Size(world.Frame.Width, world.Frame.Height) : Size.Empty
             });
+        }
+
+        private void Record(string stage)
+        {
+            if (recordEvidence != null && world.Captured)
+                recordEvidence(stage, world.Frame);
         }
 
         public void Dispose()

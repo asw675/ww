@@ -19,6 +19,7 @@ namespace TideCombat
         [DllImport("user32.dll")] private static extern bool EnumChildWindows(IntPtr parent, EnumProc callback, IntPtr data);
         [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetClassName(IntPtr window, StringBuilder text, int capacity);
         [DllImport("user32.dll")] private static extern bool IsWindowVisible(IntPtr window);
+        [DllImport("user32.dll")] private static extern bool IsWindow(IntPtr window);
         [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr window, out uint process);
         [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern IntPtr SendMessage(IntPtr window, uint message, IntPtr wparam, IntPtr lparam);
         [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern IntPtr SendMessage(IntPtr window, uint message, IntPtr wparam, StringBuilder lparam);
@@ -29,7 +30,8 @@ namespace TideCombat
 
         internal static LoginCombo Find(IntPtr gameWindow, uint gameProcess)
         {
-            if (gameWindow == IntPtr.Zero || !IsWindow(gameWindow))
+            uint processId;
+            if (!IsWindow(gameWindow) || GetWindowThreadProcessId(gameWindow, out processId) == 0 || processId != gameProcess)
                 return null;
             IntPtr found = IntPtr.Zero;
             EnumWindows(delegate (IntPtr window, IntPtr data)
@@ -52,11 +54,6 @@ namespace TideCombat
                 return found == IntPtr.Zero;
             }, IntPtr.Zero);
             return found == IntPtr.Zero ? null : new LoginCombo { Handle = found };
-        }
-
-        private static bool IsWindow(IntPtr window)
-        {
-            return IsWindowVisible(window) || GetClassNameOf(window) == "#32770";
         }
 
         private static string GetClassNameOf(IntPtr window)

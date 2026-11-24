@@ -9,12 +9,14 @@ namespace TideCombat
     // return the clockwise turn angle in degrees.
     internal sealed class MinimapNavigator
     {
-        private const int Rotations = 72, AngleStep = 5, ArrowSide = 47;
+        private const int Rotations = 360, LegacyRotations = 72, ArrowSide = 47, Area = ArrowSide * ArrowSide;
         private static readonly Rectangle Minimap = new Rectangle(30, 24, 155, 154);
         private static readonly Rectangle ArrowBox = new Rectangle(83, 78, ArrowSide, ArrowSide);
 
-        private readonly byte[][] arrow = new byte[Rotations][];
-        private readonly int[] patch = new int[ArrowSide * ArrowSide];
+        private readonly byte[][] arrows;
+        private readonly int[] templateSums;
+        private readonly double[] templateNorms;
+        private readonly int[] patch = new int[Area];
         private readonly FarmVision vision = new FarmVision();
 
         internal static string ArrowPath
@@ -38,12 +40,25 @@ namespace TideCombat
         internal MinimapNavigator(string path)
         {
             byte[] data = File.ReadAllBytes(path);
-            if (data.Length < Rotations * ArrowSide * ArrowSide)
+            int count = data.Length / Area;
+            if (data.Length % Area != 0 || (count != Rotations && count != LegacyRotations))
                 throw new InvalidDataException("方向模板数据不完整。");
-            for (int index = 0; index < Rotations; index++)
+            arrows = new byte[count][];
+            templateSums = new int[count];
+            templateNorms = new double[count];
+            for (int index = 0; index < count; index++)
             {
-                arrow[index] = new byte[ArrowSide * ArrowSide];
-                Buffer.BlockCopy(data, index * ArrowSide * ArrowSide, arrow[index], 0, ArrowSide * ArrowSide);
+                byte[] template = new byte[Area];
+                Buffer.BlockCopy(data, index * Area, template, 0, Area);
+                arrows[index] = template;
+                int sum = 0, squares = 0;
+                foreach (int light in template)
+                {
+                    sum += light;
+                    squares += light * light;
+                }
+                templateSums[index] = sum;
+                templateNorms[index] = Math.Sqrt((long)squares * Area - (long)sum * sum);
             }
         }
 
@@ -55,56 +70,52 @@ namespace TideCombat
                 return false;
             int centerX = Minimap.X + Minimap.Width / 2;
             int centerY = Minimap.Y + Minimap.Height / 2;
-            double targetX = marker.X + marker.Width / 2.0 - marker.Width / 2.0;
-            double targetY = marker.Y + marker.Height / 2.0 + marker.Height / 2.0;
+            double targetX = marker.Left;
+            double targetY = marker.Bottom;
             double direction = Math.Atan2(targetY - centerY, targetX - centerX) * 180 / Math.PI;
             if (direction < 0) direction += 360;
-            double heading = MatchArrow(frame);
+            double heading;
+            if (!TryHeading(frame, out heading)) return false;
             turn = direction - heading;
             if (turn > 180) turn -= 360;
             else if (turn < -180) turn += 360;
             return true;
         }
 
-        private double MatchArrow(PixelFrame frame)
+        internal bool TryHeading(PixelFrame frame, out double heading)
         {
+            heading = 0;
+            if (frame.Width < ArrowBox.Right || frame.Height < ArrowBox.Bottom)
+                return false;
+            int sum = 0, squares = 0;
             for (int y = 0; y < ArrowSide; y++)
             {
                 for (int x = 0; x < ArrowSide; x++)
-                    patch[y * ArrowSide + x] = frame.Light(ArrowBox.X + x, ArrowBox.Y + y);
+                {
+                    int light = frame.Light(ArrowBox.X + x, ArrowBox.Y + y);
+                    patch[y * ArrowSide + x] = light;
+                    sum += light;
+                    squares += light * light;
+                }
             }
-            double best = double.MinValue;
-            int bestAngle = 0;
-            for (int index = 0; index < Rotations; index++)
+            if ((long)squares * Area == (long)sum * sum)
+                return false;
+            // The live crop's variance is identical for all angles.
+            double best = 0;
+            for (int index = 0; index < arrows.Length; index++)
             {
-                double score = Similarity(patch, arrow[index]);
+                if (templateNorms[index] == 0) continue;
+                byte[] template = arrows[index];
+                int dot = 0;
+                for (int position = 0; position < Area; position++)
+                    dot += patch[position] * template[position];
+                long covariance = (long)dot * Area - (long)sum * templateSums[index];
+                double score = covariance / templateNorms[index];
                 if (score <= best) continue;
                 best = score;
-                bestAngle = index * AngleStep;
+                heading = index * (Rotations / arrows.Length);
             }
-            return bestAngle;
-        }
-
-        private static double Similarity(int[] values, byte[] template)
-        {
-            double sumA = 0, sumB = 0;
-            for (int index = 0; index < values.Length; index++)
-            {
-                sumA += values[index];
-                sumB += template[index];
-            }
-            double meanA = sumA / values.Length, meanB = sumB / values.Length;
-            double covariance = 0, varianceA = 0, varianceB = 0;
-            for (int index = 0; index < values.Length; index++)
-            {
-                double a = values[index] - meanA;
-                double b = template[index] - meanB;
-                covariance += a * b;
-                varianceA += a * a;
-                varianceB += b * b;
-            }
-            double denominator = Math.Sqrt(varianceA * varianceB);
-            return denominator <= 1e-6 ? 0 : covariance / denominator;
+            return best > 0;
         }
     }
 }

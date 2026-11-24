@@ -20,22 +20,28 @@ namespace TideCombat
                 area = Rectangle.Intersect(area, new Rectangle(0, 0, frame.Width, frame.Height));
                 if (area.Width < 4 || area.Height < 4)
                     return;
-                var bytes = new byte[area.Width * area.Height * 4];
-                frame.CopyBgra(area, bytes);
-                using (var bitmap = new Bitmap(area.Width, area.Height, PixelFormat.Format32bppRgb))
-                {
-                    BitmapData data = bitmap.LockBits(new Rectangle(0, 0, area.Width, area.Height),
-                        ImageLockMode.WriteOnly, PixelFormat.Format32bppRgb);
-                    try { Marshal.Copy(bytes, 0, data.Scan0, bytes.Length); }
-                    finally { bitmap.UnlockBits(data); }
-                    string folder = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "screenshots", kind);
-                    Directory.CreateDirectory(folder);
-                    string name = DateTime.Now.ToString("HHmmss_fff") +
-                        (string.IsNullOrEmpty(reason) ? string.Empty : "_" + Sanitize(reason));
-                    bitmap.Save(Path.Combine(folder, name + ".png"), ImageFormat.Png);
-                }
+                string folder = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "screenshots", kind);
+                Directory.CreateDirectory(folder);
+                string name = DateTime.Now.ToString("HHmmss_fff") +
+                    (string.IsNullOrEmpty(reason) ? string.Empty : "_" + Sanitize(reason));
+                WritePng(frame, area, Path.Combine(folder, name + ".png"));
             }
             catch (Exception) { }
+        }
+
+        internal static void WritePng(PixelFrame frame, Rectangle area, string path)
+        {
+            var bytes = new byte[checked(area.Width * area.Height * 4)];
+            frame.CopyBgra(area, bytes);
+            using (var bitmap = new Bitmap(area.Width, area.Height, PixelFormat.Format32bppRgb))
+            {
+                BitmapData data = bitmap.LockBits(new Rectangle(0, 0, area.Width, area.Height),
+                    ImageLockMode.WriteOnly, PixelFormat.Format32bppRgb);
+                try { Marshal.Copy(bytes, 0, data.Scan0, bytes.Length); }
+                finally { bitmap.UnlockBits(data); }
+                using (var output = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.None))
+                    bitmap.Save(output, ImageFormat.Png);
+            }
         }
 
         private static string Sanitize(string value)

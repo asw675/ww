@@ -5,6 +5,7 @@ using System.Drawing;
 using System.Drawing.Imaging;
 using System.IO;
 using System.Linq;
+using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
@@ -24,6 +25,8 @@ namespace TideCombat
             foreach (string argument in args)
                 if (argument.StartsWith("--skip=", StringComparison.Ordinal))
                     skip.Add(argument.Substring(7));
+            if (args.Length == 1 && args[0] == "--local-window-fixture")
+                return LocalTaskWindowChecks.RunFixture();
             if (args.Length == 2 && args[0] == "--render")
             {
                 RenderWindows(args[1]);
@@ -42,33 +45,112 @@ namespace TideCombat
             }
             Check("two-frame lock confirmation and stop on HUD loss", LockConfirmation);
             Check("auto-target is gated by repeated enemy evidence", AutoTarget);
+            Check("automated combat opens with an attack and keeps fighting visible enemies without a lock", AttackWithoutLock);
+            Check("combat clearance needs sustained valid frames and resets when enemies return", CombatClearance);
             Check("active fights retry targets at the reference cadence and stop when the health bar disappears", ActiveRetarget);
             Check("cooldowns, disabled liberation, and detected skill key", SkillSelection);
             Check("an unrecognized character uses the source default echo-to-liberation sequence", SourceFallback);
             Check("world liberation preference follows the confirmed battle through marker flicker", WorldLiberationPreference);
             Check("rotation waits for concerto and verifies switches", RotationAndSwitch);
+            Check("switching honors party size and living teammates below eight percent", SmallPartyRotation);
+            Check("challenge interaction distinguishes F and marker transitions", ChallengeTransitions);
             Check("failed switch backs off and resumes safely", FailedSwitch);
             Check("low-health support follows the learned character", LowHealthSupport);
             Check("fight cleanup runs the character's own handoff before its healer switch", FightEndHandoff);
             Check("configuration round-trip and validation", SettingsRoundTrip);
+            Check("automatic local mode follows focus without changing fixed modes", GameSourceChecks.AutomaticMode);
+            Check("automatic local mode serializes without renumbering saved modes", GameSourceChecks.SavedSource);
+            Check("diagnostic logs preserve severity, UTF-8, concurrent writes and bounded retention", RunLogChecks.WritesAndRotates);
             Check("4C farm signatures load from the embedded table", FarmChecks.Signatures);
             Check("4C farm walks approach, challenge, combat and pickup", FarmChecks.StateMachine);
+            Check("4C guide from terminal and alternate world entrance", FarmChecks.GuideEntrance);
             Check("4C farm teleport opens the guidebook and picks a boss", FarmChecks.TeleportFlow);
-            Check("4C farm revive clicks the death prompt", FarmChecks.ReviveFlow);
+            Check("4C overworld recovery dismisses the death prompt", FarmChecks.ReviveFlow);
+            Check("4C searches the known boss and confirms the map transition", FarmChecks.NamedBossSearch);
+            Check("4C weekly guide row selects level before solo and team start", FarmChecks.WeeklyLevelAfterBookRow);
+            Check("4C walk-in entry selects the level and confirms low stamina before starting", FarmChecks.WalkInBossLevel);
+            Check("4C realm and open-world death routes honor the entry setting", FarmChecks.RealmRecoveryRoutes);
+            Check("4C limits completed recoveries and clears the heal point on walk-in routes", FarmChecks.RealmRecoveryLimit);
+            Check("4C re-enters once after a death and counts only the two cleared rounds", FarmChecks.DeathThenSuccessfulRounds);
+            Check("4C farm retries map opening and travels only by the confirmed healing waypoint", FarmChecks.HealWaypointRecovery);
             Check("4C farm closes claim popups and restarts the challenge", FarmChecks.ClaimRestart);
             Check("4C farm teleport clicks the configured boss row", FarmChecks.TeleportBossRow);
-            Check("4C farm ends combat as soon as an echo is visible", FarmChecks.EchoEndsCombat);
+            Check("4C farm keeps fighting a visible enemy even when an echo is detected", FarmChecks.EchoEndsCombat);
+            Check("4C farm probes from a standstill without a reliable route", FarmChecks.StationaryTargetSearch);
+            Check("4C farm releases movement when guidance disappears or the start prompt appears", FarmChecks.ApproachStopsOnLostEvidence);
+            Check("4C farm caps unguided forward movement after a confirmed teleport", FarmChecks.TravelWalkIsBounded);
+            Check("4C farm can start on the team screen without an exploration HUD", FarmChecks.ManualStartAcceptsTeamScreen);
+            Check("4C farm starts a verified interaction while skill HUD is incomplete", FarmChecks.ManualStartRecognizesVerifiedPartialHud);
+            Check("4C farm approaches briefly when manually started inside a confirmed instance", FarmChecks.ManualRealmStartupWalkIsBounded);
+            Check("4C farm stops loot movement and resumes the same fight when the target returns", FarmChecks.TargetReturnsDuringLoot);
+            Check("4C farm starts at the settlement marker and selects rechallenge without claiming", FarmChecks.RechallengeFromSettlement);
+            Check("4C farm distinguishes selected and stacked rechallenge text from the reward objective", FarmChecks.RechallengeChoiceUsesSelectedRow);
+            Check("4C farm opens the instance restart dialog when the only interaction is claim reward", FarmChecks.RechallengeFromRewardOnly);
+            Check("4C farm keeps the confirmed instance when the treasure and realm markers disappear", FarmChecks.RechallengeKeepsConfirmedSettlement);
+            Check("4C farm waits in place when the settlement interaction is intermittent", FarmChecks.RechallengeWaitsAtIntermittentPrompt);
+            Check("4C farm waits for the absorb receipt before opening the restart dialog", FarmChecks.RechallengeWaitsForAbsorbReceipt);
             Check("4C farm clicks the OCR-matched boss level", FarmChecks.LevelOcr);
             Check("4C farm runs the Fenrico and Fallacy special flows", FarmChecks.BossScripts);
+            Check("4C farm requires a pickup receipt and stops at its repeat limit", FarmChecks.PickupAndRepeatLimit);
+            Check("4C farm retries pickup input and rechallenges after unconfirmed pickup", FarmChecks.UnconfirmedDrop);
+            Check("4C farm steers toward a detected echo and tolerates short YOLO interruptions", FarmChecks.YoloPickupRecovery);
+            Check("monthly card waits after each accepted click before confirming the team", WorldAssistChecks.MonthlyCardTiming);
+            Check("4C dismisses blocking claim popups at most three times per task", FarmChecks.PopupRetryBudget);
+            Check("4C echo rate updates on receipts and preserves its start across retries with drops", FarmChecks.EchoRateAfterRetry);
+            Check("echo model preprocessing matches independent RGB tensors and preserves source crop", FarmChecks.EchoInputPixels);
+            Check("4C searches one world view or four timed realm views for a detected echo", FarmChecks.YoloViews);
+            Check("4C checks a direct drop before the timed walk and two-circle pickup paths", FarmChecks.WalkAndCirclePickup);
+            Check("4C farm waits before dispatching any combat action", FarmChecks.WaitBeforeCombat);
+            Check("4C farm skips the five nests and confirms the real challenge menu", FarmChecks.SpecialNightmareAndEntry);
             Check("echo enhancement rules match the reference", EnhanceChecks.Rules);
+            Check("OCR matches detector and recognizer input pixels", OcrChecks.Inputs);
+            Check("OCR excludes the slanted decoration above the activity counter", OcrChecks.DetectionScore);
+            Check("OCR filters narrow rotated components with tied bounding-box areas", OcrChecks.NarrowRotatedBox);
+            Check("login rechecks the current button and phone form after four seconds", WorldAssistChecks.LoginSettle);
+            Check("login privacy, quadrant, switch-account and disconnect controls", WorldAssistChecks.LoginControls);
+            Check("client update confirmation waits, relaunch and cancellation", WorldAssistChecks.UpdateRestart);
+            Check("game update recovery finds the attached, recent or registered launcher in order", WorldAssistChecks.LauncherFallback);
+            Check("client update reads the current installation's launcher package", WorldAssistChecks.UpdatePackage);
             Check("echo enhancement parses OCR stats", EnhanceChecks.Parsing);
+            Check("echo enhancement removes stray marks from complete stat values", EnhanceChecks.NumberNoise);
             Check("echo enhancement first-crit uses the first valid crit type", EnhanceChecks.FirstCheckedCrit);
             Check("echo enhancement state machine starts from the bag", EnhanceChecks.Flow);
+            Check("echo enhancement confirms the selected card and its actual level", EnhanceChecks.CandidateSelectionFeedback);
+            Check("echo enhancement verifies ascending order and records why the list ends", EnhanceChecks.CandidateExhaustion);
+            Check("echo enhancement confirms cultivation and retries once with another input path", EnhanceChecks.CultivateConfirmation);
+            Check("echo enhancement preserves player settings and per-account overrides", EnhanceChecks.SettingsRoundTrip);
+            Check("echo enhancement UI distinguishes only-save, defaults, start and per-account editing", EnhanceChecks.SettingsUi);
+            Check("echo enhancement UI shows substat values, rejection reason and its screenshot link", EnhanceChecks.ProgressUi);
+            Check("echo enhancement verifies insertion, dialog actions, marks and long pause recovery", EnhanceChecks.TimingAndMarks);
+            Check("echo enhancement confirms materials and waits for the combined tuning button", EnhanceChecks.MaterialAndTuneRecognition);
+            Check("echo enhancement waits for material selection and bounds retries after it clears", EnhanceChecks.MaterialPreparationRetries);
+            Check("echo enhancement confirms the game accepted submission before counting a stage", EnhanceChecks.SubmissionConfirmation);
+            Check("echo enhancement dismisses a result with both a heading and a return instruction", EnhanceChecks.ResultDismissal);
+            Check("echo enhancement waits for captured feedback before repeating a result click", EnhanceChecks.ResultCloseConfirmation);
+            Check("echo enhancement safely retries once if the result stays visible", EnhanceChecks.ResultCloseRetry);
+            Check("echo enhancement waits for late tuning results before starting the next stage", EnhanceChecks.DelayedResultAfterVisibleStats);
+            Check("echo enhancement requires a new substat before spending on another stage", EnhanceChecks.StageProgress);
             Check("domain stamina and scroll math", DomainChecks.Arithmetic);
+            Check("domain rechallenge text and nearest-waypoint order", DomainChecks.NavigationAndRechallenge);
+            Check("waveplate over-cap balance and daily counter isolation", DomainChecks.HeaderBounds);
+            Check("guidebook scrollbar ignores bright artifacts and follows wide-screen anchors", DomainChecks.GuideScrollbar);
             Check("domain options validate", DomainChecks.Options);
+            Check("Rahai solver clears intersecting lines and plans across pieces", RahaiChecks.Solver);
+            Check("cultivation recognizes the target page, quantities and echo rows", CultivationChecks.ReadRows);
+            Check("cultivation verifies reward inventory and the remaining weekly claims", CultivationChecks.Rewards);
+            Check("cultivation verifies partial inventories and waveplate deductions before credit", CultivationChecks.PartialInventory);
+            Check("battle assist respects interaction limits and restores only cursor jumps", WorldAssistChecks.Rules);
+            Check("cursor restoration skips cloud and disabled sessions and throttles native restores", WorldAssistChecks.CursorRestore);
+            Check("Second Sola recognizes the date, event marker and exam answer", SecondSolaChecks.Decisions);
             Check("nightmare nest counts and cache keys", NightmareChecks.Counts);
             Check("nightmare nest cache keys tolerate jitter", NightmareChecks.Keys);
             Check("nightmare options require a selection", NightmareChecks.Options);
+            Check("nightmare skips clipped buttons and tries the next visible nest", NightmareChecks.VisibleVisitButtons);
+            Check("named nightmare nests are identified across scroll positions without merging other nests", NightmareChecks.NamedTargetsAcrossPages);
+            Check("purification associates direct challenge buttons with the correct visible nest", NightmareChecks.PurificationTargets);
+            Check("nightmare retries partial progress and verifies completion on that same named row", NightmareChecks.SameNestProgress);
+            Check("nightmare pickup looks for the absorb interaction", NightmareChecks.AbsorbLabels);
+            Check("nightmare requires a new pickup receipt after F", NightmareChecks.ReceiptMustBeNew);
             Check("garden progress detection", GardenChecks.Progress);
             Check("task indicator signatures load", GardenChecks.Signatures);
             Check("merge full-batch detection", MergeChecks.FullBatch);
@@ -76,19 +158,52 @@ namespace TideCombat
             Check("echo change options validate", ChangeChecks.Options);
             Check("daily plan decisions", DailyChecks.Plan);
             Check("daily options validate", DailyChecks.Options);
+            Check("custom daily choices and ordering survive a settings round-trip", DailyChecks.SavesOrderedPlan);
+            Check("older daily settings preserve the original plan and toggles", DailyChecks.ReadsLegacySettings);
+            Check("daily evidence snapshots frame colors and retains recent runs safely",
+                DailyEvidenceChecks.SavesAndKeepsRecentRuns);
+            Check("battle pass matches the verified page and claim controls",
+                BattlePassChecks.ConfirmAnchorsAndClaimControl);
+            Check("battle pass compares the same claim button pixels",
+                BattlePassChecks.CompareClaimButtonPixels);
+            Check("daily additional task options are validated before any task starts", DailyChecks.AdditionalConfig);
             Check("account key normalisation", AccountChecks.Keys);
+            Check("account dropdown, duplicate list entries and scoped login button", AccountChecks.LoginLabels);
+            Check("account plans reject malformed types and nested account tasks before execution", AccountChecks.InvalidPlans);
+            Check("account editor retains isolated task drafts and unregistered references", AccountChecks.EditorDrafts);
+            Check("account editor displays previous success, failure and cancellation", AccountChecks.EditorHistory);
             Check("account store round-trip and validation", AccountChecks.Store);
             Check("per-account config applies and restores", AccountChecks.Config);
+            Check("account daily plans override and restore the global plan safely", AccountChecks.DailyConfig);
+            Check("configured accounts resolve registered tasks and isolate imported options", AccountChecks.ReferencePlan);
             Check("input cannot run without a verified foreground window", MissingWindow);
             Check("local game window is recognized without a readable title or installation path", LocalWindowIdentity);
+            if (LocalTaskWindowChecks.CanStartFixture())
+                Check("automatic task mode finds and restores an unfocused game window behind its splash",
+                    LocalTaskWindowChecks.DiscoversBackgroundWindow);
+            else
+                Console.WriteLine("SKIP automatic task window fixture (TideCombat or the game is already running)");
             Check("input privilege preflight detects elevated clients and reads native process tokens", InputPrivilegePreflight);
+            Check("administrator restart preserves domain and nightmare tasks", TaskResumeRouting);
             Check("cloud combat uses health evidence and a bounded grace period", CloudGrace);
+            Check("retargeting keeps the long health window and uses the short window without health", HealthRetargetWindows);
             Check("visible cloud health starts combat without sending a needless lock", CloudEntry);
             Check("cloud control accepts only the official endpoint", CloudPageScope);
             Check("challenge start without a visible timer and instance liberation", ChallengeOpening);
             Check("known character switch tolerates hidden HUD and retries without losing intro", SwitchTransition);
             Check("full concerto refreshes the next character before a switch is confirmed", RecheckConcerto);
             Check("execution is ordered around the confirmed change of slot", SwitchExecutionOrder);
+            Check("full concerto locks both known and configured healers for sixteen combat seconds", HealerSwitchLock);
+            Check("rotation priority respects roles, buffs, cooldowns, and character overrides", SwitchSelectionRules);
+            Check("switch priority ranks preserve all integer bands and within-band offsets", SwitchPriorityOffsets);
+            Check("character preferences keep base roles, portrait aliases and variant buff durations", CharacterPreferences);
+            Check("party recognition reports only stable roster changes and clears after leaving world", PartyRecognitionReports);
+            Check("Phrolova and healer handoffs respect execution and switch-lockout boundaries", PhrolovaHandoff);
+            Check("Phrolova defers a non-intro execution to the character that actually arrives", PhrolovaDeferredExecution);
+            Check("explicit execution is separate from Phrolova's automated switch gate", PhrolovaExplicitExecution);
+            Check("Shorekeeper's intro and airborne states survive loss of lock until the guard ends", ShoreKeeperCombatGrace);
+            Check("a rotation waits five seconds for a hidden party HUD before ending the failed switch", SwitchTimeout);
+            Check("task-specific healer settings override global opening and closing switches", ConfiguredHealerSwitch);
             Check("freeze-adjusted buffs and Hecate execution windows mirror the reference", FreezeAdjustedDecisions);
             Check("confirmed hidden-HUD animation records its duration in the shared clock", AnimationFreezeObservation);
             Check("animation clicks and F have independent reference cadence and honor the delay and opt-out", AnimationKeyCadence);
@@ -99,18 +214,50 @@ namespace TideCombat
             Check("resonance retries with normal attack and delays F only inside its animation", ResonanceAnimationFlow);
             Check("a persistently shifted PC target layout gets one timed pair of menu presses", RecoverShiftedTarget);
             Check("a valid Abyss countdown keeps combat active beyond five seconds without a lock", ChallengeTimerCombat);
+            Check("challenge clock rejects health and invalid seconds and accepts both fraction separators", ChallengeClockFormat);
             Check("the countdown parser distinguishes time, zero and invalid punctuation", ChallengeClockRead);
             Check("off-center enemy bars use the source color, width and height rules", EnemyColorStrip);
             Check("Roccia's confirmed intro gives the recipient one toolbox use before handing off", RocciaToolboxHandoff);
             Check("background client crop and key flags", BackgroundCoordinates);
             Check("background capture fallback reads an offline test window", BackgroundFallback);
             Check("background keyboard and mouse releases reach only the verified test window", WindowMessageDelivery);
+            Check("menu clicks use the visible child window and its local coordinates", MenuClickDelivery);
+            Check("pickup F reaches the verified window with both key transitions", PickupKeyDelivery);
+            Check("background menu actions deliver buttons, wheel, Alt and text to the verified window",
+                MenuInputChecks.BackgroundDispatch);
             Check("a direct combat-end handoff chooses a living teammate", CombatEndCleanup);
             Check("Camellya visual charge separates striped fill from interference", VisualCharge);
             Check("concerto measures the connected arc against the last full ring of its element", ConcertoCalibration);
             RotationChecks.Run(Check);
             if (args.Length == 2 && args[0] == "--reference")
             {
+                Check("echo enhancement replays bag, stat rows and the real overflow dialog",
+                    () => EnhanceChecks.ReplayReference(args[1]));
+                Check("4C farm recognizes guidebook rows and distinguishes team, travel and confirmation menus",
+                    () => FarmChecks.ReplayMenus(args[1]));
+                Check("4C farm localizes the settlement marker in the reference frame",
+                    () => FarmChecks.ReplaySettlementMarker(args[1]));
+                Check("4C farm reads left-side rechallenge on the reference exit dialog and excludes reward dialogs",
+                    () => FarmChecks.ReplayRechallengeDialog(args[1]));
+                Check("OCR reads native screenshot pixels and projects click bounds", () => OcrChecks.NativeCrop(args[1]));
+                Check("echo model matches independent detections from raw 1080p and 4K captures", () => FarmChecks.ReplayEchoDetector(args[1]));
+                Check("overlapping echo rows favor the left target after suppression", () => FarmChecks.MultiEchoOrder(args[1]));
+                Check("nightmare recognizes selected and unselected Boss Guidebook tabs from the reference",
+                    () => NightmareChecks.ReplayGuidebook(args[1]));
+                Check("guidebook detects layout shifts and rejects occluded Boss tabs",
+                    () => GuidebookVisionChecks.ReplayShifted(args[1]));
+                Check("terminal recognition locates the guide shortcut and rejects other screens",
+                    () => GuidebookVisionChecks.ReplayTerminal(args[1]));
+                Check("battle pass Terminal entry is read on the upstream screenshot",
+                    () => BattlePassChecks.VerifyTerminalEntryReference(args[1]));
+                Check("nightmare distinguishes the guidebook, team start and travel screens",
+                    () => NightmareChecks.ReplayNestEntry(args[1]));
+                Check("nightmare OCR reads the challenge button and aligns visit buttons to the correct rows",
+                    () => NightmareChecks.ReplayNestButtons(args[1]));
+                Check("nightmare detects displaced and stacked absorb prompts without accepting unrelated interactions",
+                    () => NightmareChecks.ReplayAbsorbPrompt(args[1]));
+                Check("nightmare detects the reference pickup receipt glyphs only in the loot notice",
+                    () => NightmareChecks.ReplayPickupReceipt(args[1]));
                 ReplayReference(args[1]);
                 RotationChecks.Replay(args[1], Check);
             }
@@ -159,6 +306,7 @@ namespace TideCombat
         private static CombatSettings CustomSlotOptions()
         {
             var settings = CombatSettings.Defaults();
+            settings.SupportOpener = false;
             settings.Slots[0].FieldSeconds = 4.1;
             settings.Slots[1].FieldSeconds = 2.8;
             settings.Slots[2].FieldSeconds = 3.0;
@@ -216,6 +364,46 @@ namespace TideCombat
             planner.Observe(hud, 500);
             Require(planner.Observe(hud, 1701).Kind == ActionKind.Wait && !planner.Fighting,
                 "a health-led retry should end after 1.2 seconds with no health bar");
+        }
+
+        private static void AttackWithoutLock()
+        {
+            CombatSettings settings = CustomSlotOptions();
+            settings.RotateParty = false;
+            var planner = new BattlePlanner(settings, targetForTask: true, attackVisibleEnemies: true);
+            HudSnapshot hud = BattleHud();
+            hud.Locked = false;
+            hud.ChallengePrompt = true;
+            Require(planner.Observe(hud, 0).Kind == ActionKind.Wait && !planner.Fighting,
+                "challenge prompts must not start a fight");
+            hud.ChallengePrompt = false;
+            Require(planner.Observe(hud, 100).Kind == ActionKind.Wait && !planner.Fighting, "wait for two observations");
+            BattleAction opening = planner.Observe(hud, 200);
+            Require(opening.Kind == ActionKind.Attack && planner.Fighting, "visible enemies should receive an immediate attack");
+            planner.Sent(opening, 200);
+            BattleAction probe = planner.Observe(hud, 400);
+            Require(probe.Kind == ActionKind.Target, "preserve middle-button targeting during combat");
+            planner.Sent(probe, 400);
+            Require(planner.Observe(hud, 600).Kind == ActionKind.Attack, "a failed lock must not block the next attack");
+            hud.Valid = false;
+            Require(planner.Observe(hud, 850).Kind == ActionKind.Wait, "never attack without a usable HUD");
+        }
+
+        private static void CombatClearance()
+        {
+            var check = new CombatClearCheck();
+            check.Observe(true, true, 0);
+            check.Observe(true, false, 300);
+            check.Observe(true, false, 800);
+            Require(!check.IsQuiet(1000) && check.SawEnemy, "brief target loss is not a cleared fight");
+            check.Observe(false, false, 2300);
+            Require(!check.IsQuiet(4000), "an unavailable game frame cannot prove clearance");
+            check.Observe(true, false, 4500);
+            check.Observe(true, false, 5400);
+            check.Observe(true, false, 6250);
+            Require(check.IsQuiet(6250), "three stable scene observations over the interval confirm quiet");
+            check.Observe(true, true, 6300);
+            Require(!check.IsQuiet(6300), "an enemy appearing after a wave cancels the clearance");
         }
 
         private static void SkillSelection()
@@ -300,6 +488,107 @@ namespace TideCombat
             Require(planner.Observe(hud, 5500).Kind == ActionKind.Attack, "resume after confirming the switch");
         }
 
+        private static void SmallPartyRotation()
+        {
+            for (int size = 1; size <= 3; size++)
+                foreach (double health in new[] { 0, 1 / 65.0, .08, .081, 1 })
+                {
+                    var planner = new BattlePlanner(CustomSlotOptions());
+                    HudSnapshot hud = BattleHud();
+                    hud.ConcertoFull = true;
+                    hud.PartySize = size;
+                    hud.Health[1] = health;
+                    planner.Observe(hud, 0);
+                    planner.Observe(hud, 100);
+                    BattleAction choice = planner.Observe(hud, 4500);
+                    int target = size == 3 ? 2 : size == 2 && health > 0 ? 1 : -1;
+                    Require(target < 0 ? choice.Kind != ActionKind.Switch : choice.Kind == ActionKind.Switch && choice.Slot == target,
+                        "party size " + size + ", teammate HP " + health + ", expected slot " + target);
+                }
+        }
+
+        private static void ChallengeTransitions()
+        {
+            foreach (int branch in new[] { 0, 1, 2, 3, 4, 5, 6, 7, 8 })
+            {
+                var planner = new BattlePlanner(CustomSlotOptions());
+                HudSnapshot hud = BattleHud();
+                hud.OpenWorld = hud.Locked = hud.EnemyHealth = false;
+                hud.ChallengePrompt = hud.ChallengeMarker = hud.ChallengeInteractVisible = true;
+                planner.Observe(hud, 100);
+                hud.ChallengePrompt = false;
+                hud.ChallengeInteractVisible = branch == 2;
+                hud.ChallengeMarker = branch == 0 || branch == 1;
+                if (branch == 3) hud.Valid = false;
+                if (branch == 4) planner.CancelChallengePrompt();
+                if (branch == 6) hud.Current = 1;
+                if (branch == 8) hud.OpenWorld = true;
+                long seen = branch == 5 ? 5100 : branch == 7 ? 5099 : 200;
+                planner.Observe(hud, seen);
+                bool started = hud.InChallenge;
+                if (branch <= 4)
+                {
+                    hud.InChallenge = hud.ChallengeInteractVisible = hud.ChallengeMarker = false;
+                    hud.Valid = true;
+                    planner.Observe(hud, seen + (branch == 1 ? 501 : 500));
+                    started = hud.InChallenge;
+                }
+                Require(started == (branch == 0 || branch == 6 || branch == 7), "challenge transition " + branch);
+            }
+            var settings = CustomSlotOptions();
+            settings.AutoTarget = false;
+            var refreshed = new BattlePlanner(settings);
+            var prompt = BattleHud();
+            prompt.OpenWorld = prompt.Locked = prompt.EnemyHealth = false;
+            prompt.ChallengePrompt = prompt.ChallengeMarker = true;
+            refreshed.Observe(prompt, 100);
+            refreshed.Observe(prompt, 2100);
+            prompt.ChallengePrompt = prompt.ChallengeMarker = false;
+            refreshed.Observe(prompt, 2400);
+            Require(prompt.InChallenge, "the last joint sighting starts combat");
+            prompt.InChallenge = false;
+            refreshed.Observe(prompt, 7099);
+            Require(prompt.InChallenge, "the five-second window comes from the last joint sighting");
+            prompt.InChallenge = false;
+            refreshed.Observe(prompt, 7100);
+            Require(!prompt.InChallenge, "the temporary challenge opening expires exactly at five seconds");
+            prompt.ChallengePrompt = prompt.ChallengeMarker = true;
+            refreshed.Observe(prompt, 9000);
+            refreshed.Invalidate(9100);
+            prompt.ChallengePrompt = prompt.ChallengeMarker = false;
+            refreshed.Observe(prompt, 9200);
+            Require(!prompt.InChallenge, "reset clears a stale challenge prompt");
+
+            var ordinary = BattleHud();
+            ordinary.OpenWorld = ordinary.Locked = ordinary.EnemyHealth = false;
+            var unseen = new BattlePlanner(settings);
+            unseen.Observe(ordinary, 100);
+            unseen.Observe(ordinary, 200);
+            Require(!ordinary.InChallenge && !unseen.Fighting, "no prompt or joint sighting cannot start combat");
+            var nextFrame = new BattlePlanner(settings);
+            prompt.ChallengePrompt = prompt.ChallengeMarker = true;
+            nextFrame.Observe(prompt, 100);
+            nextFrame.Observe(ordinary, 200);
+            Require(ordinary.InChallenge, "replacing only the captured frame preserves a previously verified prompt");
+            ordinary.InChallenge = false;
+            var unreadableTeam = new BattlePlanner(settings);
+            unreadableTeam.Observe(prompt, 100);
+            unreadableTeam.Observe(new HudSnapshot(), 200);
+            unreadableTeam.Observe(ordinary, 300);
+            Require(!ordinary.InChallenge && !unreadableTeam.Fighting, "an unverified team clears the active challenge candidate");
+
+            var shared = new ChallengeStartObservation();
+            shared.Observe(prompt, 5000, consume: false);
+            shared.Observe(ordinary, 5100, consume: false);
+            var nextCombat = new BattlePlanner(settings, challengeObservation: shared, challengeClock: () => 5150);
+            nextCombat.Observe(ordinary, 50);
+            Require(ordinary.InChallenge, "a new task planner can consume the preceding passive sighting in the same window session");
+            ordinary.InChallenge = false;
+            var afterConsumption = new BattlePlanner(settings, challengeObservation: shared, challengeClock: () => 5200);
+            afterConsumption.Observe(ordinary, 100);
+            Require(!ordinary.InChallenge, "a second planner cannot consume the same start twice");
+        }
+
         private static void FailedSwitch()
         {
             var planner = new BattlePlanner(CustomSlotOptions());
@@ -370,11 +659,21 @@ namespace TideCombat
                 var settings = CombatSettings.Defaults();
                 settings.Characters.Add(new CharacterProfile { Name = "治疗角色", Portrait = new byte[PortraitReader.SampleLength],
                     Rotation = Rotation.ForRole(BattleRole.Support) });
+                settings.Domain.Kind = DomainKind.Forgery;
+                settings.Domain.Index = 18;
+                settings.Nightmare.TacetNest = false;
+                settings.Nightmare.CaptureOnce = true;
+                settings.Change.Target = "暴击伤害";
+                settings.Cultivation.Nightmare = false;
                 SettingsFile.Save(path, settings);
                 settings.AutoTarget = false;
                 SettingsFile.Save(path, settings);
                 CombatSettings saved = SettingsFile.Load(path);
                 Require(!saved.AutoTarget && saved.Characters[0].Name == "治疗角色", "independent settings were not persisted");
+                Require(saved.Domain.Kind == DomainKind.Forgery && saved.Domain.Index == 18 &&
+                    !saved.Nightmare.TacetNest && saved.Nightmare.CaptureOnce && saved.Change.Target == "暴击伤害" &&
+                    !saved.Cultivation.Nightmare,
+                    "validation must retain domain selection, nightmare mode, and main-stat target");
                 saved.EchoKey = saved.LiberationKey;
                 bool denied = false;
                 try { SettingsFile.Save(path, saved); }
@@ -412,6 +711,61 @@ namespace TideCombat
                 Require(InputIntegrity.GetProcessLevel((uint)self.Id) > 0, "native self-token could not be read");
                 Require(!InputIntegrity.IsBlocked((uint)self.Id), "equal native tokens should not trigger elevation");
             }
+        }
+
+        private static void TaskResumeRouting()
+        {
+            MainForm.WorkMode mode;
+            Require(Program.TryReadResume(new[] { Program.ResumeTask, "Domain" }, out mode) &&
+                mode == MainForm.WorkMode.Domain, "restart lost the selected domain task");
+            Require(Program.TryReadResume(new[] { Program.ResumeTask, "Nightmare" }, out mode) &&
+                mode == MainForm.WorkMode.Nightmare, "restart lost the selected nightmare task");
+            Require(Program.TryReadResume(new[] { Program.ResumeBattle }, out mode) &&
+                mode == MainForm.WorkMode.Battle, "legacy battle restart no longer works");
+            Require(!Program.TryReadResume(new[] { Program.ResumeTask }, out mode) &&
+                !Program.TryReadResume(new[] { Program.ResumeTask, "Preview" }, out mode) &&
+                !Program.TryReadResume(new[] { Program.ResumeTask, "999" }, out mode),
+                "restart accepted an invalid task");
+        }
+
+        private static void HealthRetargetWindows()
+        {
+            foreach (bool hasHealth in new[] { false, true })
+            {
+                var settings = CombatSettings.Defaults();
+                settings.RotateParty = settings.SupportOpener = false;
+                var planner = new BattlePlanner(settings);
+                var hud = BattleHud();
+                hud.Fighters[0] = "Chixia";
+                hud.Locked = hud.EnemyHealth = false;
+                planner.Observe(hud, 0);
+                Require(SwitchRoster(planner)[0].Id == "Chixia" && !planner.Fighting,
+                    "the party is recognized before the first combat target is available");
+                hud.Locked = hud.EnemyHealth = true;
+                planner.Observe(hud, 100);
+                planner.Observe(hud, 200);
+                Require(planner.Fighting, "two frames establish combat");
+                hud.Locked = false;
+                hud.EnemyHealth = hasHealth;
+                int deadline = 300 + (hasHealth ? 30000 : 3000);
+                BattleAction target = planner.Observe(hud, 300);
+                Require(target.Kind == ActionKind.Target, "start reacquiring when the lock vanishes");
+                planner.Sent(target, 300);
+                Require(planner.Observe(hud, deadline - 1).Kind == ActionKind.Target && planner.Fighting,
+                    "keep trying until the window closes");
+                planner.Observe(hud, deadline);
+                Require(!planner.Fighting, "close at the appropriate health-dependent deadline");
+            }
+
+            var cloudSettings = CombatSettings.Defaults();
+            cloudSettings.AutoTarget = cloudSettings.RotateParty = cloudSettings.SupportOpener = false;
+            var cloud = new BattlePlanner(cloudSettings, cloud: true);
+            var cloudHud = BattleHud();
+            cloudHud.EnemyHealth = false;
+            cloud.Observe(cloudHud, 0);
+            cloud.Observe(cloudHud, 100);
+            Require(cloud.Fighting && cloud.Observe(cloudHud, 35000).Kind != ActionKind.Target && cloud.Fighting,
+                "the cloud lock alone is sufficient to maintain combat");
         }
 
         private static void CloudGrace()
@@ -576,6 +930,34 @@ namespace TideCombat
             swap = first.Observe(hud, 300);
             Require(swap.Kind == ActionKind.Switch && swap.Slot == 2 && swap.FollowWithAttack,
                 "choose Camellya when concerto fills before the swap is confirmed");
+
+            var beforeSend = new BattlePlanner(settings);
+            hud.ConcertoFull = false;
+            hud.BreakPrompt = true;
+            beforeSend.Observe(hud, 0);
+            Require(beforeSend.Observe(hud, 100).Kind == ActionKind.Wait, "no slot key before refreshing near-full concerto");
+            hud.ConcertoFull = true;
+            BattleAction execute = beforeSend.Observe(hud, 155);
+            Require(execute.Kind == ActionKind.Button && execute.Button == BattleButton.Interact, "execute before the first confirmed intro key");
+            beforeSend.Sent(execute, 155);
+            hud.BreakPrompt = false;
+            for (int now = 255; now <= 955; now += 100)
+            {
+                swap = beforeSend.Observe(hud, now);
+                if (swap.Kind == ActionKind.Switch) break;
+                beforeSend.Sent(swap, now);
+            }
+            Require(swap.Kind == ActionKind.Switch && swap.Slot == 2, "the first key must use the refreshed intro priority");
+
+            var blocked = new BattlePlanner(settings);
+            hud.Fighters[1] = "Zani";
+            hud.Health[2] = 0;
+            hud.ConcertoFull = false;
+            blocked.Observe(hud, 0);
+            Require(blocked.Observe(hud, 100).Kind == ActionKind.Wait, "wait before choosing the only teammate");
+            SwitchRoster(blocked)[1].ZaniCrisisAt = 100;
+            hud.ConcertoFull = true;
+            Require(blocked.Observe(hud, 155).Kind == ActionKind.Attack, "do not send a key to a newly blocked target");
         }
 
         private static void SwitchExecutionOrder()
@@ -616,7 +998,490 @@ namespace TideCombat
                     action = planner.Observe(hud, 300);
                     Require(action.Kind == ActionKind.Button && action.Button == BattleButton.Interact,
                         "defer execution until the new slot is confirmed when there was no intro");
+                    FighterMemory leaving = SwitchRoster(planner)[0];
+                    Require(leaving.LastExit < 0, "do not start the swap cooldown before the pending execution");
+                    planner.Sent(action, 300);
+                    for (int now = 400; now <= 1600 && leaving.LastExit < 0; now += 100)
+                        planner.Sent(planner.Observe(hud, now), now);
+                    Require(leaving.LastExit >= 300, "record the swap cooldown after execution has been sent");
                 }
+            }
+        }
+
+        private static FighterMemory[] SwitchRoster(BattlePlanner planner)
+        {
+            return (FighterMemory[])typeof(BattlePlanner).GetField("roster",
+                BindingFlags.Instance | BindingFlags.NonPublic).GetValue(planner);
+        }
+
+        private static void HealerSwitchLock()
+        {
+            foreach (string healerId in new[] { "Verina", "Chisa", null })
+            foreach (bool concertoFull in new[] { true, false })
+            {
+                var settings = CombatSettings.Defaults();
+                settings.RotateParty = false;
+                var planner = new BattlePlanner(settings);
+                var hud = BattleHud();
+                if (healerId != null) hud.Fighters[0] = healerId;
+                else hud.Profiles[0] = new CharacterProfile { Rotation = Rotation.ForRole(BattleRole.Support) };
+                hud.Fighters[1] = "Chixia";
+                hud.ConcertoFull = concertoFull;
+                planner.Observe(hud, 0);
+                planner.Observe(hud, 100);
+                hud.Current = 1;
+                planner.Observe(hud, 200);
+                planner.Observe(hud, 300);
+                FighterMemory healer = SwitchRoster(planner)[0];
+                Require(healer.LastExit >= 200, "the new slot must be confirmed");
+                Require(healer.LastFullHealerSwitch == (concertoFull ? healer.LastExit : -1),
+                    "only a full concerto switch records the healer lockout");
+                var remaining = typeof(BattlePlanner).GetMethod("HealerLockRemaining", BindingFlags.NonPublic | BindingFlags.Instance);
+                if (concertoFull)
+                {
+                    Require(healer.BuffDuration == (healerId == "Chisa" ? 20000 : 28000) &&
+                        healer.BuffStarted == healer.LastExit, "healer outro buff");
+                    Require((long)remaining.Invoke(planner, new object[] { 0, healer.LastExit + 15999 }) == 1 &&
+                        (long)remaining.Invoke(planner, new object[] { 0, healer.LastExit + 16000 }) == 0, "sixteen-second boundary");
+                }
+                else Require(healer.BuffStarted == -1, "a switch without full concerto does not register an outro buff");
+            }
+        }
+
+        private static void SwitchSelectionRules()
+        {
+            const long now = 50000;
+            var planner = new BattlePlanner(CustomSlotOptions());
+            var hud = BattleHud();
+            var roster = SwitchRoster(planner);
+            var next = typeof(BattlePlanner).GetMethod("NextSlot", BindingFlags.NonPublic | BindingFlags.Instance);
+            var active = typeof(BattlePlanner).GetField("activeSlot", BindingFlags.Instance | BindingFlags.NonPublic);
+            Func<int> choose = () => (int)next.Invoke(planner, new object[] { hud, now });
+            Action<int, string> character = (slot, id) => { roster[slot].Id = id; hud.Fighters[slot] = id; };
+            active.SetValue(planner, 0);
+            character(0, "Chixia");
+            character(1, "Danjin");
+            character(2, "Verina");
+            roster[1].BuffDuration = 14000;
+            roster[2].BuffDuration = 28000;
+            roster[1].BuffStarted = now - 1000;
+            roster[2].BuffStarted = now - 15900;
+            Require(choose() == 2, "main DPS chooses the buffer with the shorter remaining buff");
+            roster[2].LastExit = now - 1000;
+            Require(choose() == 1, "an equally eligible candidate in switch cooldown is skipped");
+            roster[2].LastExit = now - 1001;
+            Require(choose() == 2, "a cooldown expires after one second");
+
+            roster[1].BuffStarted = roster[2].BuffStarted = -1;
+            hud.ConcertoFull = true;
+            Require(choose() == 2, "intro selects an unbuffed healer first");
+            roster[2].BuffStarted = now;
+            Require(choose() == 1, "intro selects the unbuffed sub DPS next");
+            character(1, "Jinhsi");
+            Require(choose() == 1, "a required character takes priority");
+            hud.ConcertoFull = false;
+            Require(choose() == 2, "Jinhsi outside an active phase is blocked without intro");
+
+            character(0, "Aemeath");
+            character(1, "Denia");
+            character(2, "Mornye");
+            roster[1].BuffStarted = -1;
+            roster[2].LastFullHealerSwitch = now - 15999;
+            hud.ConcertoFull = true;
+            Require(choose() == 1, "dynamic healer lockout overrides Mornye's required priority");
+            roster[1].BuffStarted = now;
+            Require(choose() == 1, "buffed Denia can accept intro when the healer is locked");
+            roster[2].LastFullHealerSwitch--;
+            Require(choose() == 2, "Mornye regains priority at sixteen seconds");
+            character(0, "Qingxiao");
+            roster[2].LastFullHealerSwitch = now;
+            roster[1].BuffStarted = -1;
+            Require(choose() == 1, "Qingxiao also chooses Denia while the healer is locked");
+
+            character(0, "Danjin");
+            character(1, "Chixia");
+            character(2, "Verina");
+            roster[2].LastFullHealerSwitch = -1;
+            roster[2].BuffStarted = -1;
+            roster[1].LastExit = roster[2].LastExit = -1;
+            Require(choose() == 2, "intro from sub DPS chains to an unbuffed healer");
+            roster[0].LastTurn = now;
+            hud.ConcertoFull = false;
+            Require(choose() == 2, "non-intro sub DPS also chains to an unbuffed healer");
+            roster[2].BuffStarted = now;
+            Require(choose() == 1, "return to main DPS once supports are buffed");
+            roster[2].BuffStarted = -1;
+            roster[2].LastExit = now;
+            Require(choose() == 1, "an unbuffed support in cooldown cannot preempt a ready main DPS");
+            character(0, "Verina");
+            character(1, "ShoreKeeper");
+            character(2, "Chixia");
+            roster[2].LastExit = -1;
+            Require(choose() == 1, "ordinary battle may switch from one unbuffed healer to another");
+            planner.PreferMainAfterHealer = true;
+            Require(choose() == 2, "4C returns to main DPS when the other live slot is a healer");
+            character(1, "Danjin");
+            Require(choose() == 1, "4C still allows an unbuffed sub DPS after its healer");
+            planner.PreferMainAfterHealer = false;
+            hud.ConcertoFull = true;
+            roster[2].LastExit = now;
+            Require(choose() == 1, "intro from a healer selects the unbuffed sub DPS before main DPS");
+            hud.ConcertoFull = false;
+            character(0, "Ciaccona");
+            roster[0].InRecital = true;
+            roster[0].LastLiberation = now;
+            roster[1].LastExit = now;
+            hud.Health[2] = 0;
+            Require(choose() == 1, "Ciaccona can still switch to the only living teammate during its cooldown");
+            roster[0].InRecital = false;
+
+            character(0, "Chixia");
+            character(1, "Suisui");
+            var priority = typeof(BattlePlanner).GetMethod("SwitchingPriority", BindingFlags.NonPublic | BindingFlags.Instance);
+            Func<bool, int> rank = intro => (int)priority.Invoke(planner, new object[] { hud, 1, now, intro });
+            roster[1].LastFullHealerSwitch = now - 15900;
+            Require(rank(true) == 0, "Suisui's forte lockout");
+            roster[1].LastFullHealerSwitch = now - 16000;
+            Require(rank(true) == 400 && rank(false) == 200, "Suisui prioritizes intro from main DPS after her lockout");
+            character(0, "Danjin");
+            Require(rank(true) == 200, "intro from a sub DPS does not force Suisui");
+            roster[1].LastFullHealerSwitch = now - 40000;
+            Require(rank(false) == 200, "idle Suisui at exactly forty seconds");
+            roster[1].LastFullHealerSwitch--;
+            Require(rank(false) == 400, "idle Suisui above forty seconds");
+            typeof(BattlePlanner).GetMethod("FinishBattle", BindingFlags.NonPublic | BindingFlags.Instance)
+                .Invoke(planner, new object[] { now });
+            Require(roster[1].LastFullHealerSwitch == -1, "end of battle resets an off-field Suisui");
+
+            active.SetValue(planner,0);
+            hud.Health[2] = 1;
+            character(0, "Chixia");
+            character(1, "Jinhsi");
+            character(2, "Encore");
+            roster[1].Phase = 1;
+            roster[1].LastExit = now;
+            roster[2].LastHeavy = now - 2000;
+            hud.ConcertoFull = false;
+            Require(choose() == 1, "a mandatory ready character overrides cooldown and an explicit prohibition");
+            var makeRoom = typeof(BattlePlanner).GetMethod("MustMakeRoomForTeammate", BindingFlags.NonPublic | BindingFlags.Instance);
+            Require((bool)makeRoom.Invoke(planner, new object[] { hud, now }),
+                "the current rotation can hand off early when an actual teammate requires the slot");
+            roster[1].Phase = 0;
+            Require(choose() == -1 && !(bool)makeRoom.Invoke(planner, new object[] { hud, now }),
+                "when all candidates prohibit entry, do not switch or shorten the turn");
+            hud.ConcertoFull = true;
+            Require(choose() == 1, "an intro makes Jinhsi mandatory over another blocked target");
+            character(1, "Phrolova");
+            roster[1].LastLiberation = now - 5000;
+            Require(choose() == -1, "the intro does not override Phrolova's active Hecate lock");
+            character(2, "Denia");
+            roster[2].BuffStarted = now;
+            var rank2 = (int)priority.Invoke(planner, new object[] { hud, 2, now, true });
+            Require(rank2 == 1 && choose() == 2, "a one-point deadlock fallback beats a prohibited slot");
+            character(1, "Danjin");
+            Require(choose() == 1, "ordinary priority beats the one-point fallback");
+        }
+
+        private static void CharacterPreferences()
+        {
+            var settings = CombatSettings.Defaults();
+            Require(CharacterRoster.Unrecognized.Role == BattleRole.Main &&
+                CharacterRoster.Unrecognized.BuffMilliseconds == CharacterKit.DefaultBuffDuration(BattleRole.Main) &&
+                CharacterKit.DefaultBuffDuration(BattleRole.Support) == 28000, "default roles and buff lifetimes");
+            foreach (var item in new[] {
+                Tuple.Create("Aalto", BattleRole.Secondary, ConcertoColor.Aero),
+                Tuple.Create("Lingyang", BattleRole.Main, ConcertoColor.Glacio),
+                Tuple.Create("Lumi", BattleRole.Secondary, ConcertoColor.Electro),
+                Tuple.Create("Yangyang", BattleRole.Secondary, ConcertoColor.Aero),
+                Tuple.Create("Mortefi", BattleRole.Secondary, ConcertoColor.Fusion),
+                Tuple.Create("Linnai", BattleRole.Secondary, ConcertoColor.Spectro),
+                Tuple.Create("Lucilla", BattleRole.Secondary, ConcertoColor.Glacio),
+                Tuple.Create("Lucy", BattleRole.Main, ConcertoColor.Spectro),
+                Tuple.Create("Rebecca", BattleRole.Secondary, ConcertoColor.Electro),
+                Tuple.Create("Suisui", BattleRole.Support, ConcertoColor.Unknown),
+                Tuple.Create("YangYangSp", BattleRole.Main, ConcertoColor.Havoc)
+            })
+                Require(CharacterRoster.Find(item.Item1).Role == item.Item2 && CharacterKit.Ring(item.Item1) == item.Item3,
+                    "role or element for " + item.Item1);
+            var chisa = CharacterRoster.Find("Chisa");
+            var iuno = CharacterRoster.Find("Iuno");
+            Require(CharacterRoster.FromPortrait("char_chisa2") == "Chisa" &&
+                CharacterRoster.FromPortrait("char_linnai2") == "Linnai" &&
+                chisa.RoleFor(settings) == BattleRole.Support && chisa.BuffDuration(settings) == 20000 &&
+                iuno.RoleFor(settings) == BattleRole.Secondary &&
+                iuno.BuffDuration(settings) == CharacterKit.DefaultBuffDuration(BattleRole.Secondary), "base variants and portrait aliases");
+            settings.ChisaDps = settings.IunoC6 = true;
+            Require(chisa.RoleFor(settings) == BattleRole.Main && iuno.RoleFor(settings) == BattleRole.Main &&
+                chisa.BuffDuration(settings) == CharacterKit.DefaultBuffDuration(BattleRole.Main) &&
+                iuno.BuffDuration(settings) == CharacterKit.DefaultBuffDuration(BattleRole.Main), "DPS preferences change the effective roles");
+            settings.IunoC6 = false;
+            Require(iuno.RoleFor(settings) == BattleRole.Secondary, "removing C6 restores the normal role");
+        }
+
+        private static void SwitchPriorityOffsets()
+        {
+            int[] priorities = { BattlePlanner.SwitchBlocked, BattlePlanner.SwitchLow, BattlePlanner.SwitchNormal,
+                BattlePlanner.SwitchHigh, BattlePlanner.SwitchRequired };
+            Require(priorities.SequenceEqual(new[] { 0, 100, 200, 300, 400 }), "integer bands");
+            foreach (int boosted in new[] { BattlePlanner.SwitchHigh + 1, BattlePlanner.SwitchBlocked })
+            {
+                var eligible = new List<int>();
+                int top = int.MinValue;
+                BattlePlanner.AddPriorityCandidate(eligible, ref top, 0, BattlePlanner.SwitchHigh);
+                BattlePlanner.AddPriorityCandidate(eligible, ref top, 1, boosted);
+                BattlePlanner.AddPriorityCandidate(eligible, ref top, 2, BattlePlanner.SwitchLow - 1);
+                Require(eligible.SequenceEqual(new[] { boosted > BattlePlanner.SwitchHigh ? 1 : 0 }),
+                    "honor the in-band adjustment and ignore a prohibited candidate");
+            }
+        }
+
+        private static void PartyRecognitionReports()
+        {
+            string directory = Path.Combine(Path.GetTempPath(), "ww-party-" + Guid.NewGuid().ToString("N"));
+            try
+            {
+                Require(RunLog.Start(directory), "capture native roster log");
+                var settings = CombatSettings.Defaults();
+                settings.RotateParty = settings.SupportOpener = false;
+                var planner = new BattlePlanner(settings);
+                var hud = BattleHud();
+                hud.Fighters[0] = "Chixia";
+                hud.Fighters[1] = "Danjin";
+                hud.Fighters[2] = "Verina";
+                planner.Observe(hud, 0);
+                planner.Observe(hud, 100);
+                hud.Fighters[1] = null;
+                planner.Observe(hud, 200);
+                Require(SwitchRoster(planner)[1].Id == "Danjin", "one unreadable portrait does not invalidate a roster");
+                hud.Fighters[1] = "ShoreKeeper";
+                planner.Observe(hud, 300);
+                planner.Observe(hud, 400);
+                planner.Observe(new HudSnapshot(), 2300);
+                Require(!planner.Fighting && SwitchRoster(planner).All(actor => actor.Id == null),
+                    "leaving the world expires battle and invalidates all character slots");
+                RunLog.Stop();
+                string[] parties = Directory.GetFiles(directory,"*.log").SelectMany(File.ReadLines)
+                    .Where(line => line.Contains("队伍识别 · ")).ToArray();
+                Require(parties.Length == 2 && parties[0].Contains("丹瑾") && parties[1].Contains("守岸人"),
+                    "one report per roster, with the new name only on the changed team");
+            }
+            finally
+            {
+                RunLog.Stop();
+                if (Directory.Exists(directory))
+                {
+                    foreach (string file in Directory.GetFiles(directory,"*.log")) File.Delete(file);
+                    Directory.Delete(directory);
+                }
+            }
+        }
+
+        private static void SwitchTimeout()
+        {
+            var settings = CombatSettings.Defaults();
+            settings.SupportOpener = false;
+            foreach (int limit in new[] { 3000, 5000 })
+            {
+                var planner = new BattlePlanner(settings) { SwitchTimeoutMs = limit };
+                var hud = BattleHud();
+                hud.Fighters[0] = "Chixia";
+                hud.Fighters[1] = "Danjin";
+                hud.Health[2] = 0;
+                planner.Observe(hud, 0);
+                BattleAction swap = planner.Observe(hud, 100);
+                Require(swap.Kind == ActionKind.Switch && swap.FollowWithAttack, "begin a known-character rotation switch");
+                planner.Sent(swap, 100);
+                hud.Valid = false;
+                hud.TeamHudHidden = true;
+                Require(planner.Observe(hud, 100 + limit - 1).Kind == ActionKind.Wait && planner.Fighting, "allow the HUD to return until the deadline");
+                Require(planner.Observe(hud, 100 + limit).Kind == ActionKind.Wait && !planner.Fighting, "abort an unconfirmed switch at the deadline");
+            }
+        }
+
+        private static void PhrolovaHandoff()
+        {
+            const long now = 50000;
+            var settings = CustomSlotOptions();
+            var planner = new BattlePlanner(settings);
+            var hud = BattleHud();
+            FighterMemory[] roster = SwitchRoster(planner);
+            Type type = typeof(BattlePlanner);
+            const BindingFlags members = BindingFlags.Instance | BindingFlags.NonPublic;
+            FieldInfo active = type.GetField("activeSlot", members);
+            MethodInfo next = type.GetMethod("NextSlot", members);
+            MethodInfo routine = type.GetMethod("RoutineSwitch", members);
+            var clock = (FreezeClock)type.GetField("clock", members).GetValue(planner);
+            Action<int, string> fighter = (slot, id) => { roster[slot].Id = id; hud.Fighters[slot] = id; };
+            Func<int> choose = () => (int)next.Invoke(planner, new object[] { hud, now });
+            fighter(0, "Phrolova");
+            fighter(1, "Cantarella");
+            fighter(2, "ShoreKeeper");
+            active.SetValue(planner, 0);
+            roster[0].LastLiberation = now - 1000;
+            roster[1].LastFullHealerSwitch = now - 8000;
+            roster[2].LastFullHealerSwitch = now - 10000;
+            hud.ConcertoFull = true;
+            Require(choose() == 2, "when both healers are locked, choose the one closer to release");
+            type.GetField("executionPending", members).SetValue(planner, true);
+            BattleAction action = (BattleAction)routine.Invoke(planner, new object[] { hud, now, 2 });
+            Require(action.Kind == ActionKind.Switch && action.Slot == 2,
+                "Phrolova skips pre-switch execution during liberation");
+            Require(Rotations.AllowsSwitchExecution(CharacterRoster.Find("Phrolova"), roster[0], settings, clock, now, true),
+                "the new fighter may perform the deferred execution");
+            roster[0].LastLiberation = -1;
+            Require(Rotations.AllowsSwitchExecution(CharacterRoster.Find("Phrolova"), roster[0], settings, clock, now, false),
+                "execution is available before the first liberation");
+            roster[0].LastLiberation = now - 1000;
+            foreach (string healer in new[] { "Cantarella", "ShoreKeeper", "Suisui", "Verina" })
+                Require(Rotations.AllowsSwitchExecution(CharacterRoster.Find(healer), roster[1], settings, clock, now, false) ==
+                    (healer == "Cantarella" || healer == "ShoreKeeper"), "healer execution policy " + healer);
+
+            roster[1].LastFullHealerSwitch = now - 15000;
+            roster[2].LastFullHealerSwitch = now - 17000;
+            clock.Record(now - 5000, 3100, now);
+            Require(choose() == 2, "animation freeze extends the lockout for both healers");
+            active.SetValue(planner, 2);
+            Require(choose() == 1, "a full concerto healer may hand off to the other locked healer");
+            hud.ConcertoFull = false;
+            Require(choose() == -1, "the current healer stays until concerto fills while Phrolova is locked");
+            active.SetValue(planner, 0);
+            hud.ConcertoFull = true;
+            roster[1].LastFullHealerSwitch = -1;
+            Require(choose() == 1, "an eligible healer is preferred over the lockout fallback");
+            fighter(1, "Suisui");
+            roster[1].LastFullHealerSwitch = now - 12000;
+            Require(choose() == 2, "a blocked Suisui is excluded even from fallback");
+            hud.Health[2] = 0;
+            Require(choose() == -1, "no fallback overrides a character's explicit prohibition");
+
+            clock.Clear();
+            MethodInfo priority = type.GetMethod("SwitchingPriority", members);
+            Func<int, bool, int> rank = (slot, intro) => (int)priority.Invoke(planner, new object[] { hud, slot, now, intro });
+            fighter(1, "Mornye");
+            fighter(2, "Linnai");
+            hud.Health[2] = 1;
+            roster[1].LastFullHealerSwitch = now - 8000;
+            Require(rank(1, true) == 400 && choose() == 2,
+                "a mandatory healer remains locked when Phrolova can hand off to an eligible teammate");
+            active.SetValue(planner, 1);
+            fighter(1, "Cantarella");
+            fighter(2, "Ciaccona");
+            roster[0].LastLiberation = now - 5000;
+            Require(rank(0, false) == 0 && rank(0, true) == 0, "Phrolova stays off field during early Hecate");
+            roster[0].LastLiberation = now - 15000;
+            Require(rank(0, true) == 400 && rank(0, false) == 0, "Cantarella unlocks the intro-only fourteen-second exception");
+            roster[0].LastLiberation = now - 25000;
+            Require(rank(0, true) == 400 && rank(0, false) == 200, "ordinary Phrolova switch returns after Hecate");
+            fighter(0, "Zani");
+            roster[2].InRecital = true;
+            roster[2].LastLiberation = now - 5000;
+            Require(rank(2, false) == 0, "Ciaccona waits out a recital on Zani's team");
+            roster[2].LastLiberation = now - 20000;
+            Require(rank(2, false) == 200, "a recital stops blocking the slot at twenty seconds");
+        }
+
+        private static void PhrolovaDeferredExecution()
+        {
+            var settings = CombatSettings.Defaults();
+            settings.SupportOpener = false;
+            var planner = new BattlePlanner(settings);
+            var hud = BattleHud();
+            hud.Fighters[0] = "Phrolova";
+            hud.Fighters[1] = "ShoreKeeper";
+            hud.Health[2] = 0;
+            hud.Skills[2] = SkillState.Ready;
+            long castAt = -1, switchAt = -1, executeAt = -1;
+            for (long t = 0; t < 3000 && executeAt < 0; t += 50)
+            {
+                bool hidden = castAt >= 0 && t >= castAt + 50 && t < castAt + 400;
+                BattleAction action = planner.Observe(hidden ? new HudSnapshot { TeamHudHidden = true } : hud, t);
+                if (action.Kind == ActionKind.Wait) continue;
+                planner.Sent(action,t);
+                if (action.Kind == ActionKind.Button && action.Button == BattleButton.Liberation)
+                {
+                    Require(castAt < 0, "start the opening liberation once");
+                    castAt = t;
+                    hud.Skills[2] = SkillState.Cooling;
+                    hud.Indicators.Add("f_break_full");
+                }
+                if (action.Kind == ActionKind.Switch)
+                {
+                    Require(castAt >= 0 && t >= castAt + 400 && action.Slot == 1 && switchAt < 0, "switch after confirming R");
+                    switchAt = t;
+                    hud.Current = 1;
+                }
+                if (action.Kind == ActionKind.Button && action.Button == BattleButton.Interact && !action.DuringAnimation)
+                {
+                    Require(switchAt >= 0 && t > switchAt && hud.Current == 1,
+                        "only the teammate who arrives can perform the pending execution");
+                    executeAt = t;
+                }
+            }
+            Require(executeAt > switchAt && switchAt > castAt && castAt >= 0, "confirmed R -> switch -> execute");
+        }
+
+        private static void ShoreKeeperCombatGrace()
+        {
+            foreach (bool intro in new[] { false, true })
+            {
+                var settings = CombatSettings.Defaults();
+                settings.RotateParty = settings.SupportOpener = false;
+                var planner = new BattlePlanner(settings);
+                var hud = BattleHud();
+                hud.Fighters[0] = "ShoreKeeper";
+                hud.Skills[0] = hud.Skills[1] = hud.Skills[2] = SkillState.Cooling;
+                planner.Observe(hud, 0);
+                planner.Observe(hud, 100);
+                var context = typeof(BattlePlanner).GetField("entryIntro", BindingFlags.Instance | BindingFlags.NonPublic);
+                context.SetValue(planner, intro);
+                hud.Airborne = !intro;
+                hud.Locked = hud.EnemyHealth = false;
+                Require(planner.Observe(hud, 200).Kind != ActionKind.Target && planner.Fighting,
+                    "the intro or air state must keep the turn from retargeting");
+                planner.Invalidate(250);
+                var turn = (CharacterTurn)typeof(BattlePlanner).GetField("turn",
+                    BindingFlags.Instance | BindingFlags.NonPublic).GetValue(planner);
+                Require(turn == null && planner.TakeReleaseRequest(), "invalidation must clear Shorekeeper's turn and its existing input");
+            }
+        }
+
+        private static void PhrolovaExplicitExecution()
+        {
+            var settings = CombatSettings.Defaults();
+            var actor = new FighterMemory { Id = "Phrolova", LastLiberation = 9000 };
+            var clock = new FreezeClock();
+            Require(!Rotations.AllowsSwitchExecution(CharacterRoster.Find(actor.Id), actor, settings, clock, 10000, false),
+                "Phrolova's current liberation blocks only the automatic execution before switching");
+            var context = new TurnContext(actor, new[] { actor }, settings, false, null, 10000,
+                clock: clock, pendingExecution: () => true);
+            using (var explicitAction = new CharacterTurn(Rotations.BreakEnemy(context), context))
+            {
+                BattleAction command = explicitAction.Observe(BattleHud(), 10000);
+                Require(command.Kind == ActionKind.Button && command.Button == BattleButton.Interact &&
+                    !command.DuringAnimation, "the ordinary explicit execution routine can still issue F");
+            }
+        }
+
+        private static void ConfiguredHealerSwitch()
+        {
+            foreach (bool enabled in new[] { false, true })
+            foreach (bool hasHealer in new[] { false, true })
+            {
+                var settings = CombatSettings.Defaults();
+                settings.SupportOpener = !enabled;
+                settings.Slots[0].FieldSeconds += .1;
+                var planner = new BattlePlanner(settings, supportOpener: enabled);
+                var hud = BattleHud();
+                hud.Fighters[1] = "Danjin";
+                hud.Fighters[2] = hasHealer ? "Verina" : "Jiyan";
+                planner.Observe(hud, 0);
+                BattleAction start = planner.Observe(hud, 100);
+                bool expectHealer = enabled && hasHealer;
+                Require((start.Kind == ActionKind.Switch && start.Slot == 2) == expectHealer, "task-specific opener uses a living healer");
+                hud.Locked = hud.EnemyHealth = false;
+                planner.Observe(hud, 200);
+                BattleAction finish = planner.Observe(hud, 3300);
+                Require((finish.Kind == ActionKind.Switch && finish.Slot == 2) == expectHealer, "task-specific cleanup uses the same healer setting");
             }
         }
 
@@ -684,7 +1549,7 @@ namespace TideCombat
             var actor = new FighterMemory { Id = "Aalto" };
             var hud = BattleHud();
             hud.Skills[(int)Skill.Liberation] = SkillState.Ready;
-            foreach (AnimationInput flags in new[] { AnimationInput.InteractAndAttack, AnimationInput.None })
+            foreach (AnimationInput flags in new[] { AnimationInput.InteractAndAttack, AnimationInput.Interact, AnimationInput.None })
             {
                 var options = CombatSettings.Defaults();
                 var context = new TurnContext(actor, new[] { actor }, options, false, null, 1000);
@@ -698,10 +1563,13 @@ namespace TideCombat
                     turn.ObserveAvailable(hud, 1050);
                     Require(turn.ObserveUnavailable(1075, false).Kind == ActionKind.Wait, "a capture failure is not an animation");
                     BattleAction first = turn.ObserveUnavailable(1100, true);
-                    if (flags == AnimationInput.None)
+                    if (flags != AnimationInput.InteractAndAttack)
                     {
-                        Require(first.Kind == ActionKind.Wait && turn.ObserveUnavailable(1350, true).Kind == ActionKind.Wait,
-                            "suppressed character must not click or send F");
+                        Require(first.Kind == ActionKind.Wait, "the no-click variant cannot attack while waiting for animation");
+                        BattleAction afterDelay = turn.ObserveUnavailable(1350, true);
+                        Require(flags == AnimationInput.None ? afterDelay.Kind == ActionKind.Wait :
+                            afterDelay.DuringAnimation && afterDelay.Button == BattleButton.Interact && !afterDelay.AttackBefore,
+                            "suppressing clicks does not change the independent F option");
                         continue;
                     }
                     Require(first.DuringAnimation && first.Button == BattleButton.Attack && !first.AttackBefore,
@@ -848,10 +1716,18 @@ namespace TideCombat
                     BattleAction pulse = turn.ObserveUnavailable(1850, true);
                     Require(clickF ? pulse.Button == BattleButton.Interact && !pulse.AttackBefore : pulse.Kind == ActionKind.Wait,
                         "animated resonance sends F only when requested, without an attack");
-                    turn.Observe(hud, 1900);
+                    if (clickF)
+                    {
+                        turn.AnimationInputSent(pulse, 1850);
+                        Require(turn.ObserveUnavailable(1949, true).Kind == ActionKind.Wait, "F observes its interval");
+                        pulse = turn.ObserveUnavailable(1950, true);
+                        Require(pulse.DuringAnimation && pulse.Button == BattleButton.Interact && !pulse.AttackBefore,
+                            "repeat F no faster than every 100 ms during animated E");
+                    }
+                    turn.Observe(hud, 2000);
                     Require(turn.Finished && context.Succeeded && context.AnimationSeen && actor.LastSkill[0] == 1000,
                         "the first cast is recorded, and the turn finishes on the return of the HUD");
-                    Require(context.Clock.Elapsed(900, 1900) == 550, "record the 550 ms animation minus the 100 ms allowance");
+                    Require(context.Clock.Elapsed(900, 2000) == 550, "record the 650 ms animation minus the 100 ms allowance");
                 }
             }
         }
@@ -902,6 +1778,16 @@ namespace TideCombat
             Require(planner.Observe(hud, 8300).Kind == ActionKind.Target, "zero ends the timer's combat allowance");
             planner.Observe(hud, 11400);
             Require(!planner.Fighting, "unresolved targeting then follows normal exit behavior");
+        }
+
+        private static void ChallengeClockFormat()
+        {
+            Require(Math.Abs(HudGlyphs.ParseChallengeClock("04:53:49") - 293.49) < 1e-8, "colon-delimited hundredths");
+            Require(Math.Abs(HudGlyphs.ParseChallengeClock("04:53.4") - 293.4) < 1e-8, "dot-delimited tenths");
+            Require(HudGlyphs.ParseChallengeClock("03:12") == 192, "minutes and seconds");
+            Require(HudGlyphs.ParseChallengeClock("00:00:00") == 0, "expired timer");
+            foreach (string invalid in new[] { "18476/18476", "12:99", "04.53.49", "4:05:", "123:12", "4:7" })
+                Require(double.IsNaN(HudGlyphs.ParseChallengeClock(invalid)), "invalid timer " + invalid);
         }
 
         private static void ChallengeClockRead()
@@ -1033,6 +1919,96 @@ namespace TideCombat
             }
         }
 
+        private sealed class MenuMessageSink : NativeWindow, IDisposable
+        {
+            internal readonly List<Message> Received = new List<Message>();
+
+            internal MenuMessageSink(IntPtr parent, Rectangle bounds, bool enabled = true)
+            {
+                bool child = parent != IntPtr.Zero;
+                CreateHandle(new CreateParams
+                {
+                    Parent = parent,
+                    X = bounds.X, Y = bounds.Y, Width = bounds.Width, Height = bounds.Height,
+                    Style = (child ? 0x50000000 : unchecked((int)0x90000000)) | (enabled ? 0 : 0x08000000),
+                    ExStyle = child ? 0 : 0x08000080
+                });
+            }
+
+            protected override void WndProc(ref Message message)
+            {
+                if (message.Msg == 0x0006 || message.Msg == 0x0100 || message.Msg == 0x0101 ||
+                    message.Msg >= 0x0200 && message.Msg <= 0x0202)
+                {
+                    Received.Add(message);
+                    return;
+                }
+                base.WndProc(ref message);
+            }
+
+            public void Dispose() { DestroyHandle(); }
+        }
+
+        private static void MenuClickDelivery()
+        {
+            using (var root = new MenuMessageSink(IntPtr.Zero, new Rectangle(-22000, -22000, 1920, 1080)))
+            using (var container = new MenuMessageSink(root.Handle, new Rectangle(1400, 330, 450, 190)))
+            using (var button = new MenuMessageSink(container.Handle, new Rectangle(220, 8, 200, 100)))
+            using (var disabled = new MenuMessageSink(root.Handle, new Rectangle(1650, 340, 180, 60), false))
+            {
+                uint pid;
+                Native.GetWindowThreadProcessId(root.Handle, out pid);
+                Point spot = FarmCursor.ToClient(new Point(1433, 297), new Size(1600, 900), new Size(1920, 1080));
+                Require(spot == new Point(1720, 356), "normalized frame should map to the 1080p client point");
+                Require(!WindowMessages.ClickMenu(root.Handle, pid + 1, spot, FarmMouse.Left, 1, 0,
+                    CancellationToken.None, () => true), "the wrong process cannot receive a menu click");
+                Require(WindowMessages.ClickMenu(root.Handle, pid, spot, FarmMouse.Left, 1, 0,
+                    CancellationToken.None, () => true), "could not deliver a menu click");
+                Application.DoEvents();
+
+                Require(!root.Received.Any(m => m.Msg >= 0x0200) && !container.Received.Any(m => m.Msg >= 0x0200) &&
+                    !disabled.Received.Any(m => m.Msg >= 0x0200), "a parent or disabled overlay received the child's click");
+                List<Message> clicks = button.Received.Where(m => m.Msg >= 0x0200).ToList();
+                int position = 100 | 18 << 16;
+                Require(clicks.Select(m => m.Msg).SequenceEqual(new[] { 0x0200, 0x0201, 0x0202 }) &&
+                    clicks.All(m => m.LParam.ToInt32() == position) && clicks[1].WParam.ToInt32() == 1 &&
+                    root.Received.Any(m => m.Msg == 0x0006) && button.Received.Any(m => m.Msg == 0x0006),
+                    "expected activation and move/down/up addressed to the same child-client point");
+
+                button.Received.Clear();
+                Require(!WindowMessages.ClickMenu(root.Handle, pid, spot, FarmMouse.Left, 1, 0,
+                    CancellationToken.None, () => false), "the click should stop after input loses its original window");
+                Application.DoEvents();
+                Require(button.Received.Any(m => m.Msg == 0x0200) && !button.Received.Any(m => m.Msg >= 0x0201),
+                    "a mouse press escaped the window check");
+
+                root.Received.Clear();
+                Require(WindowMessages.ClickMenu(root.Handle, pid, new Point(200, 300), FarmMouse.Left, 1, 0,
+                    CancellationToken.None, () => true), "root-only menu click was rejected");
+                Application.DoEvents();
+                Require(root.Received.Any(m => m.Msg == 0x0201 && m.LParam.ToInt32() == (200 | 300 << 16)),
+                    "the root received incorrect client coordinates outside its children");
+            }
+        }
+
+        private static void PickupKeyDelivery()
+        {
+            using (var sink = new MenuMessageSink(IntPtr.Zero, new Rectangle(-22000, -22000, 100, 100)))
+            {
+                uint pid;
+                Native.GetWindowThreadProcessId(sink.Handle, out pid);
+                Require(!WindowMessages.TapKey(sink.Handle, pid + 1, 'F', 1, CancellationToken.None),
+                    "wrong process should not receive an interaction key");
+                Require(WindowMessages.TapKey(sink.Handle, pid, 'F', 1, CancellationToken.None),
+                    "interaction key was not delivered");
+                Application.DoEvents();
+                var keys = sink.Received.Where(m => m.Msg == 0x0100 || m.Msg == 0x0101).ToArray();
+                Require(keys.Select(m => m.Msg).SequenceEqual(new[] { 0x0100, 0x0101 }) &&
+                    keys.All(m => m.WParam.ToInt32() == 'F') && (keys[1].LParam.ToInt64() & 0xc0000000L) == 0xc0000000L,
+                    "expected one F down and one F up for the same window");
+            }
+        }
+
         private static void CombatEndCleanup()
         {
             var settings = CombatSettings.Defaults();
@@ -1111,6 +2087,31 @@ namespace TideCombat
         private static void ReplayReference(string root)
         {
             string images = Path.Combine(root, "tests", "images");
+            if (File.Exists(Path.Combine(root, "ok_templates", "43.png")))
+                Check("recovery map locates both waypoint sizes in distance order", () => DomainChecks.RecoveryMap(root));
+                Check("domain reward amount and reserve popup match the reference captures", () => DomainChecks.ReplayRewardControls(root));
+            if (File.Exists(Path.Combine(root, "ok_templates", "monthly_card.png")))
+            {
+                Check("monthly card recognition locates the prompt and its bottom-center control", () => GameSourceChecks.MonthlyCard(root));
+                Check("monthly card recognition honors both search margins on wide screens", () => GameSourceChecks.MonthlyCardGeometry(root));
+            }
+            if (File.Exists(Path.Combine(images, "cloud_disconnect_4012.png")))
+                Check("cloud assist reconnects after both original disconnect dialogs", () => WorldAssistChecks.CloudReconnect(root));
+                Check("login detects the original notice and switch-account icons", () => WorldAssistChecks.LoginIcons(root));
+            if (File.Exists(Path.Combine(images, "xinyao_interaction_different_prompt.png")))
+                Check("world assist blocks both original Astrite prompts", () => WorldAssistChecks.ExcludesAstrite(root));
+                Check("automatic pickup preserves the selected prompt across resolutions and key presses", () => WorldAssistChecks.PickupReplay(root));
+            if (File.Exists(Path.Combine(images, "21-9_quest_skip.png")))
+                Check("delayed story summaries and optional checkboxes follow the actual click sequence",
+                    () => WorldAssistChecks.DialogActions(root));
+                Check("travel from the map confirms both controls in the compact entry dialog",
+                    () => WorldAssistChecks.TravelConfirmation(root));
+                Check("challenge markers track displaced HUD icons and ignore unrelated quest icons",
+                    () => WorldAssistChecks.ChallengeMarkers(root));
+                Check("world assist recognizes the original story skip and widescreen confirmations", () => WorldAssistChecks.SkipDialog(root));
+                Check("tinted skip clicks follow the left anchor and ignore flat backgrounds", () => WorldAssistChecks.WideSkip(root));
+            if (File.Exists(Path.Combine(images, "rahai_score.jpg")))
+                Check("Rahai board and placement matches the reference captures", () => RahaiChecks.Replay(images));
             Check("reference hotkey reading updates echo and liberation while retaining configured resonance and tool", delegate
             {
                 var options = CombatSettings.Defaults();
@@ -1166,6 +2167,50 @@ namespace TideCombat
                     var vision = new CombatVision(CombatSettings.Defaults());
                     Require(EnemyHud.LockOffset(frame, 847) == 0 && vision.HasShortTarget(frame),
                         "the short-action fixture must not activate ordinary lock detection");
+                    var options = CombatSettings.Defaults();
+                    options.EchoKey = options.LiberationKey = "A";
+                    for (int slot = 0; slot < 3; slot++) options.PartyCharacters[slot] = "Chixia";
+                    HudSnapshot ordinary = new HudVision(options).Read(frame, allowShortEnemyBar: true);
+                    Require(ordinary.Valid && !ordinary.Locked && ordinary.Keys[1] == 'A' && ordinary.Keys[2] == 'A',
+                        "ordinary character keeps its configured hotkeys and ignores a short target");
+                    options.PartyCharacters[ordinary.Current] = "Lucilla";
+                    HudSnapshot lucilla = new HudVision(options).Read(frame, allowShortEnemyBar: true);
+                    Require(lucilla.Locked && lucilla.LockOffset == 329 && lucilla.Fighters[lucilla.Current] == "Lucilla" &&
+                        lucilla.Keys[1] == 'A' && lucilla.Keys[2] == 'A',
+                        "only the resolved Lucilla role may enter combat from this short target");
+                }
+            });
+            Check("Linnai recognizes acceleration from the archived long target layout", delegate
+            {
+                var options = CombatSettings.Defaults();
+                for (int slot = 0; slot < 3; slot++) options.PartyCharacters[slot] = "Linnai";
+                HudSnapshot longTarget = ReadReplay(Path.Combine(images, "cloud_combat_long_action.png"), 1600,
+                    frame => new HudVision(options).Read(frame, true, true), true);
+                Require(longTarget.Valid && longTarget.EnemyHealth && longTarget.LongActionLayout != 0 && longTarget.LinnaiAccelerating,
+                    "a confirmed long target layout must still signal Linnai's acceleration: HUD=" + longTarget.Valid +
+                    " health=" + longTarget.EnemyHealth + " layout=" + longTarget.LongActionLayout + " accelerating=" + longTarget.LinnaiAccelerating);
+                var alternative = new HudSnapshot { Current = 0, LongActionLayout = 1 };
+                alternative.Fighters[0] = "Linnai";
+                new CombatVision(options).Read(new PixelFrame(new byte[1600 * 900 * 4], 1600, 900), alternative, true);
+                Require(alternative.LinnaiAccelerating, "the optional second long-target layout also indicates acceleration");
+            });
+            Check("attack entry uses the current desktop lock across the three reference captures", delegate
+            {
+                var paths = new[] { "tests/images/in_combat.png", "tests/images/in_combat3.png",
+                    "ok_templates/57d8d801-BitBlt_True_3840x2160_1759986393607.1733_original.png" };
+                for (int index = 0; index < paths.Length; index++)
+                {
+                    var options = CombatSettings.Defaults();
+                    options.AutoTarget = false;
+                    var planner = new BattlePlanner(options);
+                    using (var image = new Bitmap(Path.Combine(root, paths[index])))
+                    using (var reader = new FrameReader())
+                    {
+                        HudSnapshot hud = new HudVision(options).Read(reader.Read(image));
+                        planner.Observe(hud, 0);
+                        planner.Observe(hud, 200);
+                        Require(hud.Valid && hud.Locked == (index != 1) && planner.Fighting == (index != 1), paths[index]);
+                    }
                 }
             });
             Check("the source captures for ordinary and full execution prompts are distinguished", delegate
@@ -1261,6 +2306,8 @@ namespace TideCombat
                 using (var source = new Bitmap(Path.Combine(path, name)))
                     Require(vision.HasBossMarker(reader.Read(source)), "boss marker was missed in " + name);
             });
+            Check("boss map icon, minimap heading, highlighted confirmation, and world HUD match their source captures", () => ArchivedTaskControls(root));
+            Check("visual matching rejects search areas that cannot contain the template", SmallTemplateSearch);
             Check("concerto fullness agrees with all six source captures", delegate
             {
                 var files = new[] { "con_full.png", "in_combat.png", "all_cd_1080p.png", "con_full2.png", "absorb.png", "angle_130.png" };
@@ -1333,6 +2380,46 @@ namespace TideCombat
                     Require(after.Valid && after.Profiles[0] == settings.Characters[0], "portrait did not follow to the new slot");
                 }
             });
+        }
+
+        private static void ArchivedTaskControls(string root)
+        {
+            string images = Path.Combine(root, "tests", "images");
+            var vision = new FarmVision();
+            using (var reader = new FrameReader())
+            using (var boss = new Bitmap(Path.Combine(images, "teleport_boss.png")))
+            using (var heading = new Bitmap(Path.Combine(images, "angle_130.png")))
+            using (var confirm = new Bitmap(Path.Combine(images, "confirm_highlight.png")))
+            using (var world = new Bitmap(Path.Combine(images, "all_cd_1080p.png")))
+            {
+                PixelFrame map = reader.Read(boss);
+                var markerFinder = new BossMarkerFinder(BossMarkerFinder.DataPath);
+                Rectangle marker;
+                Require(vision.Read(map, true).HasMapMarker || markerFinder.TryFind(map, out marker),
+                    "recognize the checked or rotated boss marker on the map");
+                var navigator = new MinimapNavigator(MinimapNavigator.ArrowPath);
+                double angle;
+                Require(navigator.TryHeading(reader.Read(heading), out angle) && angle >= 100 && angle <= 200,
+                    "recognize the player's minimap heading, got " + angle);
+                Require(!navigator.TryHeading(new PixelFrame(new byte[1600 * 900 * 4], 1600, 900), out angle),
+                    "a blank minimap cannot yield a heading");
+                Rectangle button;
+                Require(vision.FindOptionalButton(reader.Read(confirm), .70, out button), "recognize an enabled confirmation button");
+                HudSnapshot hud = new HudVision(CombatSettings.Defaults()).Read(reader.Read(world));
+                Require(hud.Valid && !hud.InRealm, "recognize the party HUD without classifying its scene as a realm");
+            }
+        }
+
+        private static void SmallTemplateSearch()
+        {
+            var vision = new FarmVision();
+            var blank = new PixelFrame(new byte[1600 * 900 * 4], 1600, 900);
+            foreach (VisualPattern pattern in PatternBank.For("boss_check_mark"))
+            {
+                var shortArea = new Rectangle(200, 200, pattern.Area.Width, pattern.Area.Height - 1);
+                Require(vision.FindAll(blank, pattern.Label, shortArea, 1, .8, .7).Count == 0,
+                    "the shorter search area must produce zero matches");
+            }
         }
 
         private static HudSnapshot Replay(string path, int width, bool cloud = false)
@@ -1408,10 +2495,12 @@ namespace TideCombat
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
             Directory.CreateDirectory(directory);
-            using (var main = new MainForm(Path.Combine(directory, "NoSettings.json")))
+            using (var main = new MainForm(Path.Combine(directory, "NoSettings.json"), enableGlobalHotkey: false))
                 Draw(main, Path.Combine(directory, "main.png"));
             using (var profiles = new ProfileForm(new List<CharacterProfile>()))
                 Draw(profiles, Path.Combine(directory, "profiles.png"));
+            using (var daily = new DailyForm(DailyOptions.Defaults()))
+                Draw(daily, Path.Combine(directory, "daily.png"));
         }
 
         private static void Draw(Form form, string destination)

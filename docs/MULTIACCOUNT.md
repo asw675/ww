@@ -14,7 +14,7 @@
 1. ESC 打开设置 → 点左下退出 → 确认退出到登录界面。
 2. 优先使用原生登录 ComboBox（国际服 KRSDK 对话框）读取账号列表并选择；这解决后台模式点击下拉项被撤销的问题。
 3. 找不到 ComboBox 时回退到 OCR：识别带 `***` 的账号条目并点击。
-4. 账号归一化：小写、`0→o`、`.con→.com`，避免 OCR 差异导致重复执行。
+4. 优先匹配账号原文。原文不匹配时才使用小写、`0→o`、`.con→.com` 归一化，结果必须唯一。选择账号后重新读取确认。
 5. 登录按钮：OCR 匹配「登录/登入/Log/Click to Connect/点击连接」，找不到时点屏幕中下 (0.5,0.568)。
 
 ## 配置文件
@@ -42,7 +42,9 @@
 
 ## 可执行任务映射
 
-`DailyTask`、`FarmEchoTask`、`EnhanceEchoTask`、`TacetTask`、`ForgeryTask`、`SimulationTask`、`NightmareNestTask`、`GardenTask`、`MergeEchoTask`、`ChangeEchoTask`。
+`DailyTask`、`FarmEchoTask`、`EnhanceEchoTask`、`TacetTask`、`ForgeryTask`、`SimulationTask`、`NightmareNestTask`、`GardenTask`、`MergeEchoTask`、`ChangeEchoTask`、`CultivationTask`、`RahaiBlocksTask`、`GalGameTask`。
+
+在切换账号前，程序会核对全部已启用任务引用。接受 `TideCombat` 和对应的原版 `src.task.<类名>` 模块。拉海洛方块和第二索拉登录后会暂停，打开对应活动页后点击「继续」，再切回游戏。
 
 ## 按账号覆盖配置
 
@@ -51,14 +53,32 @@
 | 分组 | 可覆盖字段 |
 |---|---|
 | `Farm` | Teleport、TeleportMode、BossIndex、BossLevel、RepeatCount、WaitSeconds、SwitchHealer、Pickup、Boss |
-| `Daily` | Farm、TacetIndex、ForgeryIndex、Material、FarmNightmareEcho、AutoNightmare、CheckGarden、MergeIfNeeded、Farm4C |
+| `Daily` | Tasks、NightmareMode、Farm、TacetIndex、ForgeryIndex、Material、FarmNightmareEcho、AutoNightmare、CheckGarden、MergeIfNeeded、Farm4C |
 | `Enhance` | RequireBothCrit、RequireValidBeforeCrit、CritTotalMinimum、FirstCritMinimum、ValidCountMinimum、FirstMustBeValid、ValidStats、PauseAfterSuccess |
 | `Domain` | Kind、Index、Material、MaxStamina |
 | `Nightmare` | TacetNest、Purification、CaptureOnce |
 | `Change` | Target |
+| `Cultivation` | Ascension、Skills、Tacet、Nightmare |
 | `Combat` | AutoTarget、AutoRevive、UseLiberation、RotateParty、PreferConcerto、SwitchAtLowHealth、SupportOpener、DetectSkillKeys、CheckLevitator、Source、各技能键 |
 
 枚举可用数字或名称；`ValidStats` 为字符串数组。
+
+也支持原版一条龙、副本、梦魇、培养目标和强化的对应字段。本地分组配置可覆盖同名选项，每个账号结束后恢复全局配置。
+
+任务为 `EnhanceEchoTask` 时，选中该账号并点「强化条件」可单独配置。登录后先在背包筛选声骸并按等级升序，再点击主界面的「继续」。开启成功暂停时，在同一账号继续执行。整批结束并返回大世界后才记录该账号成功。
+
+`Daily.Tasks` 是非空任务数组，顺序就是执行顺序，可选 `Nightmare`、`Stamina`、`DailyRewards`、`Mail`、`BattlePass`、`Garden`、`Merge`、`Farm4C`。`Daily.NightmareMode` 可选 `AsNeeded`、`CaptureOnce` 或 `All`。
+
+省略这两个字段时继承全局设置。显式设为 `null` 可按当前账号的旧版选项推导该字段。全局或账号有明确的任务数组时，旧版勾选项由该数组里的任务选择替代。
+
+```json
+{
+  "Daily": {
+    "Tasks": ["Mail", "Nightmare", "DailyRewards"],
+    "NightmareMode": "CaptureOnce"
+  }
+}
+```
 
 ## 失败判定
 

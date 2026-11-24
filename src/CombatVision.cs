@@ -24,6 +24,9 @@ namespace TideCombat
         private readonly ConcertoMeter concerto;
         private int frames;
         private bool toolWasVisible;
+        private Rectangle lastChallengeMarker;
+        private readonly FrameIndex challengeIndex = new FrameIndex();
+        private static readonly string[] ChallengeMarkers = { "abyss_start_marker", "abyss_tower_start_marker" };
 
         internal CombatVision(CombatSettings settings, ConcertoMeter concerto = null)
         {
@@ -306,7 +309,6 @@ namespace TideCombat
 
         internal void ReadScene(PixelFrame frame, HudSnapshot hud)
         {
-            int center = frame.Width / 2;
             var corner = new AreaPixels(frame, new Rectangle(0, 10, 74, 75));
             bool realm = Find(frame, corner, "illusive_realm_exit", .91);
             bool world = Find(frame, corner, "world_earth_icon", .86);
@@ -314,14 +316,60 @@ namespace TideCombat
             hud.OpenWorld = world && !realm;
             hud.InChallenge = hud.Countdown || hud.InRealm;
             if (hud.OpenWorld || hud.Locked)
+            {
+                ClearChallengeMarker();
                 return;
-            var centerPrompt = new AreaPixels(frame, new Rectangle(center - 62, 385, 125, 101));
-            if (!Find(frame, centerPrompt, "abyss_start_marker", .87) &&
-                !Find(frame, centerPrompt, "abyss_tower_start_marker", .87))
+            }
+            hud.ChallengeInteractVisible = HasRegionSignal(frame, "pick_up_f_hcenter_vcenter", .88, 15);
+            Rectangle marker;
+            if (hud.ChallengeInteractVisible)
+            {
+                Rectangle middle = Rectangle.FromLTRB(frame.Width * 15 / 100, frame.Height * 15 / 100,
+                    frame.Width * 85 / 100, frame.Height * 85 / 100);
+                // Most prompts are near the crosshair. Extend the search when the marker has moved.
+                var central = new Rectangle(frame.Width / 2 - 64, 385, 128, 104);
+                if (!FindChallengeMarker(frame, central, out marker) && !FindChallengeMarker(frame, middle, out marker))
+                {
+                    ClearChallengeMarker();
+                    return;
+                }
+                lastChallengeMarker = Rectangle.Inflate(marker, (marker.Width + 2) / 4, (marker.Height + 2) / 4);
+                hud.ChallengePrompt = true;
+            }
+            else if (lastChallengeMarker.IsEmpty || !FindChallengeMarker(frame, lastChallengeMarker, out marker))
+            {
+                ClearChallengeMarker();
                 return;
-            hud.InChallenge = true;
-            hud.ChallengeMarker = true;
-            hud.ChallengePrompt = HasRegionSignal(frame, "pick_up_f_hcenter_vcenter", .88, 15);
+            }
+            hud.ChallengeMarker = hud.InChallenge = true;
+        }
+
+        internal void ClearChallengeMarker() { lastChallengeMarker = Rectangle.Empty; }
+
+        private bool FindChallengeMarker(PixelFrame frame, Rectangle area, out Rectangle marker)
+        {
+            challengeIndex.Load(frame);
+            marker = Rectangle.Empty;
+            foreach (string label in ChallengeMarkers)
+            {
+                double best = .75;
+                foreach (VisualPattern pattern in PatternBank.For(label))
+                {
+                    var box = new Rectangle(area.Location, pattern.Area.Size);
+                    for (box.Y = area.Top; box.Bottom <= area.Bottom; box.Y++)
+                        for (box.X = area.Left; box.Right <= area.Right; box.X++)
+                        {
+                            if (!pattern.HasLightEdge(frame, box)) continue;
+                            if (pattern.Signature.Similarity(challengeIndex.Sample(box)) < .72) continue;
+                            double similarity = pattern.LightSimilarity(frame, box);
+                            if (similarity <= best) continue;
+                            best = similarity;
+                            marker = box;
+                        }
+                }
+                if (!marker.IsEmpty) return true;
+            }
+            return false;
         }
 
         internal bool HasDeathPrompt(PixelFrame frame)

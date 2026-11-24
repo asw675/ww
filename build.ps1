@@ -15,9 +15,13 @@ $buildFolder = (New-Item -ItemType Directory -Path $OutputDirectory -Force).Full
 $sources = @(Get-ChildItem -LiteralPath (Join-Path $PSScriptRoot 'src') -Filter '*.cs' -File |
     Sort-Object Name | ForEach-Object FullName)
 $runtime = Join-Path $PSScriptRoot 'lib'
+$netstandard = Join-Path $env:WINDIR 'Microsoft.NET\assembly\GAC_MSIL\netstandard\v4.0_2.0.0.0__cc7b13ffcd2ddd51\netstandard.dll'
+if (-not (Test-Path -LiteralPath $netstandard -PathType Leaf)) {
+    throw 'The .NET Standard 2.0 facade was not found. Install .NET Framework 4.8 or later.'
+}
 $common = @('/nologo', '/warn:4', '/warnaserror+', '/utf8output', '/codepage:65001', '/optimize+', '/platform:x64',
     '/r:System.Drawing.dll', '/r:System.Windows.Forms.dll', '/r:System.Runtime.Serialization.dll', '/r:System.Web.Extensions.dll',
-    ('/r:' + (Join-Path $runtime 'Microsoft.ML.OnnxRuntime.dll')), ('/r:' + (Join-Path $runtime 'netstandard.dll')),
+    ('/r:' + (Join-Path $runtime 'Microsoft.ML.OnnxRuntime.dll')), ('/r:' + $netstandard),
     ('/r:' + (Join-Path $runtime 'System.Memory.dll')), ('/r:' + (Join-Path $runtime 'System.Buffers.dll')),
     ('/r:' + (Join-Path $runtime 'System.Runtime.CompilerServices.Unsafe.dll')))
 $signatures = Join-Path $PSScriptRoot 'data\Signatures.tsv'
@@ -31,21 +35,19 @@ if ($RebuildSignatures) {
     if ($LASTEXITCODE -ne 0) { throw "Signature generation failed ($LASTEXITCODE)." }
 }
 $resource = "/resource:$signatures,TideCombat.Signatures.tsv"
+$appConfig = Join-Path $PSScriptRoot 'TideCombat.exe.config'
+$appManifest = Join-Path $PSScriptRoot 'TideCombat.manifest'
 
 $application = Join-Path $buildFolder 'TideCombat.exe'
-& $compiler @common '/target:winexe' "/out:$application" $resource @sources
+& $compiler @common '/target:winexe' "/out:$application" "/win32manifest:$appManifest" $resource @sources
 if ($LASTEXITCODE -ne 0) { throw "Application compilation failed ($LASTEXITCODE)." }
-Copy-Item (Join-Path $runtime 'onnxruntime.dll') $buildFolder -Force
-Copy-Item (Join-Path $runtime 'System.Memory.dll') $buildFolder -Force
-Copy-Item (Join-Path $runtime 'System.Buffers.dll') $buildFolder -Force
-Copy-Item (Join-Path $runtime 'System.Runtime.CompilerServices.Unsafe.dll') $buildFolder -Force
-foreach ($asset in @('echo_model', 'ocr', 'minimap'))
+Copy-Item -LiteralPath $appConfig -Destination "$application.config" -Force
+foreach ($dependency in @('onnxruntime.dll', 'Microsoft.ML.OnnxRuntime.dll', 'System.Memory.dll',
+    'System.Buffers.dll', 'System.Runtime.CompilerServices.Unsafe.dll'))
 {
-    $source = Join-Path $PSScriptRoot ('assets\' + $asset)
-    $target = Join-Path $buildFolder ('assets\' + $asset)
-    New-Item -ItemType Directory -Path $target -Force | Out-Null
-    Copy-Item (Join-Path $source '*') $target -Force -Recurse
+    Copy-Item -LiteralPath (Join-Path $runtime $dependency) -Destination $buildFolder -Force
 }
+Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'assets') -Destination $buildFolder -Force -Recurse
 Write-Output $application
 
 if ($Test -or $ReferenceDirectory) {
@@ -54,6 +56,7 @@ if ($Test -or $ReferenceDirectory) {
         Sort-Object Name | ForEach-Object FullName)
     & $compiler @common '/target:exe' '/main:TideCombat.SelfTest' "/out:$testRunner" $resource @sources @testFiles
     if ($LASTEXITCODE -ne 0) { throw "Test compilation failed ($LASTEXITCODE)." }
+    Copy-Item -LiteralPath $appConfig -Destination "$testRunner.config" -Force
     if ($ReferenceDirectory) {
         & $testRunner '--reference' $ReferenceDirectory
     } else {

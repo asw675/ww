@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
 using System.Drawing;
+using System.Linq;
+using System.Text.RegularExpressions;
 using System.Threading;
 
 namespace TideCombat
@@ -29,6 +31,8 @@ namespace TideCombat
 
     internal static class ChangeMath
     {
+        private static readonly Regex Stat = new Regex(
+            @"^(?:主(?:音)?属性:?)?([\u4e00-\u9fff]+)(?:\+?\d+(?:\.\d+)?%?)?$");
         private static readonly string[][] Fixes =
         {
             new[] { "凝夜自霜", "凝夜白霜" },
@@ -51,7 +55,48 @@ namespace TideCombat
 
         internal static bool IsTarget(string target, string current)
         {
-            return !string.IsNullOrEmpty(current) && current.Contains(target);
+            return !string.IsNullOrEmpty(target) && ReadStat(current) == target;
+        }
+
+        internal static string ReadStat(string value)
+        {
+            Match match = Stat.Match(Fix(OcrText.Compact(value)));
+            string name = match.Success ? match.Groups[1].Value : string.Empty;
+            switch (name)
+            {
+                case "攻击力":
+                case "攻击力百分比":
+                case "攻击百分比":
+                    return "攻击";
+                case "生命值":
+                case "生命值百分比":
+                case "生命百分比":
+                    return "生命";
+                case "防御力":
+                case "防御力百分比":
+                case "防御百分比":
+                    return "防御";
+                case "暴击率":
+                    return "暴击";
+                case "治疗效果加成":
+                    return name;
+                default:
+                    return Array.IndexOf(ChangeOptions.Targets, name) >= 0 ? name : null;
+            }
+        }
+
+        internal static OcrLine FindTarget(IEnumerable<OcrLine> lines, string target)
+        {
+            OcrLine result = null;
+            foreach (OcrLine line in lines)
+            {
+                if (line.Score < .65f || line.Box.IsEmpty || !IsTarget(target, line.Text))
+                    continue;
+                if (result != null && !result.Box.IntersectsWith(line.Box))
+                    return null;
+                result = line;
+            }
+            return result;
         }
     }
 
@@ -88,6 +133,7 @@ namespace TideCombat
 
         internal void Run()
         {
+            RunLog.Info("改主属性", "开始");
             Rectangle cultivate;
             if (!FindCultivate(out cultivate))
             {
@@ -98,6 +144,7 @@ namespace TideCombat
             {
                 if (!IsLevelZero())
                 {
+                    RunLog.Info("改主属性", "没有可修改的声骸，任务结束 · 已修改=" + changed);
                     progress.Report(new ChangeReport
                     {
                         State = "没有可修改的声骸，任务结束", Changed = changed, Finished = true,
@@ -118,8 +165,13 @@ namespace TideCombat
                     return;
                 }
                 if (!FindCultivate(out cultivate))
-                    break;
+                {
+                    Fail("返回背包后未识别到培养按钮。");
+                    return;
+                }
             }
+            if (token.IsCancellationRequested)
+                RunLog.Info("改主属性", "任务取消 · 已修改=" + changed);
         }
 
         private bool ChangeOne(Rectangle cultivate)
@@ -140,13 +192,13 @@ namespace TideCombat
             }
             world.Sleep(500);
 
-            OcrLine current = ReadText(new RectangleF(.09f, .20f, .06f, .06f));
+            string current = ReadCurrentStat();
             if (current == null)
             {
                 Fail("无法读取当前主属性。");
                 return false;
             }
-            if (ChangeMath.IsTarget(options.Target, ChangeMath.Fix(current.Text)))
+            if (current.Contains(options.Target))
             {
                 Fail("目标属性与当前主属性一致，请修改背包筛选条件。");
                 return false;
@@ -160,13 +212,12 @@ namespace TideCombat
             }
             world.Sleep(800);
             world.Click(0.52, 0.71);
-            OcrLine target = WaitText(null, options.Target, 5000);
-            if (target == null)
+            OcrLine target = WaitText(null, options.Target, 5000, mainStat: true);
+            if (target == null || !world.Click(target.Box))
             {
-                Fail("未找到目标属性选项。");
+                Fail(target == null ? "未找到唯一的目标属性选项。" : "未成功点击目标属性选项。");
                 return false;
             }
-            world.Click(target.Box);
             world.Sleep(500);
             if (!ClickText(null, "确认", 5000))
             {
@@ -185,7 +236,7 @@ namespace TideCombat
                 Fail("未出现获得声骸提示。");
                 return false;
             }
-            return ReturnToBag();
+            return true;
         }
 
         private bool ReturnToBag()
@@ -228,13 +279,17 @@ namespace TideCombat
             return false;
         }
 
-        private OcrLine ReadText(RectangleF area)
+        private string ReadCurrentStat()
         {
-            var lines = world.Read(area.X, area.Y, area.Right, area.Bottom);
-            return lines.Count > 0 ? lines[0] : null;
+            OcrLine first = null;
+            return world.WaitUntil(() =>
+            {
+                first = world.Read(.09, .20, .15, .26).FirstOrDefault();
+                return first != null && !string.IsNullOrWhiteSpace(first.Text);
+            }, 5000) ? first.Text : null;
         }
 
-        private OcrLine WaitText(RectangleF? area, string text, int timeoutMs)
+        private OcrLine WaitText(RectangleF? area, string text, int timeoutMs, bool mainStat = false)
         {
             var watch = System.Diagnostics.Stopwatch.StartNew();
             while (watch.ElapsedMilliseconds < timeoutMs && !token.IsCancellationRequested)
@@ -242,12 +297,16 @@ namespace TideCombat
                 var lines = area.HasValue
                     ? world.Read(area.Value.X, area.Value.Y, area.Value.Right, area.Value.Bottom)
                     : world.Read(0, 0, 1, 1);
-                foreach (OcrLine line in lines)
+                if (mainStat)
                 {
-                    string value = ChangeMath.Fix(line.Text);
-                    if (value.Contains(text))
-                        return line;
+                    OcrLine target = ChangeMath.FindTarget(lines, text);
+                    if (target != null)
+                        return target;
                 }
+                else
+                    foreach (OcrLine line in lines)
+                        if (ChangeMath.Fix(line.Text).Contains(text))
+                            return line;
                 world.Sleep(400);
             }
             return null;
@@ -256,14 +315,12 @@ namespace TideCombat
         private bool ClickText(RectangleF? area, string text, int timeoutMs)
         {
             OcrLine line = WaitText(area, text, timeoutMs);
-            if (line == null)
-                return false;
-            world.Click(line.Box);
-            return true;
+            return line != null && world.Click(line.Box);
         }
 
         private void Report(string state)
         {
+            RunLog.Info("改主属性", state);
             progress.Report(new ChangeReport
             {
                 State = state, Changed = changed,
@@ -273,6 +330,11 @@ namespace TideCombat
 
         private void Fail(string message)
         {
+            if (token.IsCancellationRequested)
+                return;
+            Failed = true;
+            Failure = message;
+            RunLog.Warn("改主属性", string.Format("任务停止 · {0} · 已修改={1}", message, changed));
             if (world.Tick())
                 Screenshots.Save(world.Frame, "failed", message, new Rectangle(144, 81, 448, 414));
             progress.Report(new ChangeReport

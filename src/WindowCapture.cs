@@ -9,7 +9,7 @@ namespace TideCombat
         private readonly FrameReader reader = new FrameReader();
         private Bitmap bitmap;
 
-        internal bool TryRead(IntPtr window, Size size, out PixelFrame frame)
+        internal bool TryRead(IntPtr window, Size size, out PixelFrame frame, bool retainEcho = false)
         {
             frame = default(PixelFrame);
             if (size.IsEmpty || Native.IsIconic(window) || Native.IsHungAppWindow(window)) return false;
@@ -18,8 +18,8 @@ namespace TideCombat
                 if (bitmap != null) bitmap.Dispose();
                 bitmap = new Bitmap(size.Width, size.Height, PixelFormat.Format32bppRgb);
             }
-            if (Print(window, 3) && ReadVisible(out frame)) return true;
-            return Print(window, 1) && ReadVisible(out frame);
+            if (Print(window, 3) && ReadVisible(out frame, retainEcho)) return true;
+            return Print(window, 1) && ReadVisible(out frame, retainEcho);
         }
 
         private bool Print(IntPtr window, uint flags)
@@ -33,9 +33,9 @@ namespace TideCombat
             }
         }
 
-        private bool ReadVisible(out PixelFrame frame)
+        private bool ReadVisible(out PixelFrame frame, bool retainEcho)
         {
-            frame = reader.Read(bitmap);
+            frame = reader.Read(bitmap, retainEcho);
             for (int y = 16; y < frame.Height; y += 64)
                 for (int x = 16; x < frame.Width; x += 64)
                     if (frame.Light(x, y) > 8) return true;

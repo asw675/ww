@@ -21,12 +21,14 @@ namespace TideCombat
         private readonly Button remove = Theme.Button("删除档案");
         private readonly Label message = Theme.Text("录入后可在不同槽位识别角色。", Theme.Muted);
         private readonly List<CharacterProfile> characters;
+        private readonly GameSource source;
         private byte[] sample;
         private CancellationTokenSource enrollment;
 
-        internal ProfileForm(List<CharacterProfile> characters)
+        internal ProfileForm(List<CharacterProfile> characters, GameSource source = GameSource.AutoLocal)
         {
             this.characters = characters.ToList();
+            this.source = source;
             Text = "角色档案";
             StartPosition = FormStartPosition.CenterParent;
             FormBorderStyle = FormBorderStyle.FixedDialog;
@@ -128,10 +130,11 @@ namespace TideCombat
             var cancellation = new CancellationTokenSource();
             enrollment = cancellation;
             existing.Enabled = slot.Enabled = train.Enabled = save.Enabled = remove.Enabled = false;
-            SetMessage("请在 15 秒内切回游戏，保持该槽位的队伍头像可见。");
+            SetMessage(source == GameSource.Foreground || source == GameSource.Cloud ?
+                "请在 15 秒内切到游戏并显示该槽位的队伍头像。" : "正在查找游戏画面，请显示该槽位的队伍头像。");
             try
             {
-                byte[] portrait = await Task.Run(() => BattleLoop.EnrollPortrait(currentSlot, cancellation.Token));
+                byte[] portrait = await Task.Run(() => BattleLoop.EnrollPortrait(currentSlot, source, cancellation.Token));
                 if (!IsDisposed)
                 {
                     sample = portrait;

@@ -49,7 +49,12 @@ namespace TideCombat
                 }
                 else return double.NaN;
             }
-            string[] values = text.ToString().Split(':', '.');
+            return ParseChallengeClock(text.ToString());
+        }
+
+        internal static double ParseChallengeClock(string text)
+        {
+            string[] values = text.Split(':', '.');
             int minutes, seconds, fraction = 0;
             if (values.Length < 2 || values.Length > 3 || values[0].Length < 1 || values[0].Length > 2 || values[1].Length != 2 ||
                 text[values[0].Length] != ':' ||

@@ -132,7 +132,7 @@ namespace TideCombat
             }
         }
 
-        internal bool TryRead(IntPtr window, Rectangle client, out PixelFrame result)
+        internal bool TryRead(IntPtr window, Rectangle client, out PixelFrame result, bool retainEcho = false)
         {
             result = default(PixelFrame);
             MethodInfo next = poolType.GetMethod("TryGetNextFrame");
@@ -179,7 +179,7 @@ namespace TideCombat
                 {
                     using (var bitmap = new Bitmap(texture.Width, texture.Height, (int)mapped.RowPitch,
                         PixelFormat.Format32bppRgb, mapped.Data))
-                        result = reader.Read(bitmap, crop);
+                        result = reader.Read(bitmap, crop, retainEcho);
                 }
                 finally { Method<UnmapTexture>(context, 15)(context, staging, 0); }
                 return true;

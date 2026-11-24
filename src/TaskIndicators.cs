@@ -4,6 +4,8 @@ namespace TideCombat
     // tools/BuildSignatures.cs regenerates them.
     internal static class TaskIndicators
     {
+        internal static readonly string[] EchoReceiptDigits = { "char_1_text", "char_3_text" };
+        internal static readonly string[] TeamNumbers = { "char_1_text", "char_2_text", "char_3_text" };
         internal static readonly string[] All =
         {
             "a_garden_back", "a_garden_restart", "garden_confirm", "garden_continue_game",
@@ -13,7 +15,7 @@ namespace TideCombat
             "garden_start_game", "garden_tip_close", "garden_unpause", "gray_book_quest",
             "map_way_point", "gray_confirm_exit_button", "gem_add_stamina", "fast_travel_custom",
             "remove_custom", "team_close", "echo_dropped", "echo_not_dropped", "echo_locked",
-            "echo_not_locked", "echo_enhance_btn", "echo_select_all", "esc_setting", "login_account", "login_close"
+            "echo_not_locked", "echo_enhance_btn", "echo_select_all", "esc_setting", "login_account", "login_close", "switch_account"
         };
     }
 }

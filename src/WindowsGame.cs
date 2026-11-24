@@ -51,6 +51,7 @@ namespace TideCombat
         }
 
         [DllImport("user32.dll")] internal static extern IntPtr GetForegroundWindow();
+        [DllImport("user32.dll")] internal static extern bool SetForegroundWindow(IntPtr hwnd);
         internal delegate bool EnumerateWindow(IntPtr window, IntPtr data);
         [DllImport("user32.dll")] internal static extern bool EnumWindows(EnumerateWindow action, IntPtr data);
         [DllImport("user32.dll")] internal static extern bool IsWindowVisible(IntPtr hwnd);
@@ -60,9 +61,13 @@ namespace TideCombat
         internal static extern bool PostMessageW(IntPtr window, uint message, IntPtr flags, IntPtr param);
         [DllImport("dwmapi.dll")] internal static extern int DwmGetWindowAttribute(IntPtr hwnd, uint index, out Rect rect, int bytes);
         [DllImport("user32.dll")] internal static extern bool IsIconic(IntPtr hwnd);
-        [DllImport("user32.dll")] internal static extern bool SetCursorPos(int x, int y);
+        [DllImport("user32.dll", SetLastError = true)] internal static extern bool SetCursorPos(int x, int y);
         [DllImport("user32.dll")] internal static extern bool GetClientRect(IntPtr hwnd, out Rect rect);
         [DllImport("user32.dll")] internal static extern bool ClientToScreen(IntPtr hwnd, ref Point point);
+        [DllImport("user32.dll")] internal static extern bool ScreenToClient(IntPtr hwnd, ref Point point);
+        [DllImport("user32.dll")] internal static extern IntPtr ChildWindowFromPointEx(IntPtr parent, Point point, uint flags);
+        [DllImport("user32.dll")] internal static extern IntPtr WindowFromPoint(Point point);
+        [DllImport("user32.dll")] internal static extern IntPtr GetAncestor(IntPtr window, uint type);
         [DllImport("user32.dll")] internal static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint pid);
         [DllImport("user32.dll", CharSet = CharSet.Unicode)] internal static extern int GetClassName(IntPtr hwnd, StringBuilder text, int capacity);
         [DllImport("user32.dll", CharSet = CharSet.Unicode)] internal static extern int GetWindowText(IntPtr hwnd, StringBuilder text, int capacity);
@@ -86,26 +91,79 @@ namespace TideCombat
         }
     }
 
+    internal enum GameLanguage { Unknown, SimplifiedChinese, TraditionalChinese, English }
+
     internal sealed class GameWindow
     {
         internal const string LocalProcessName = "Client-Win64-Shipping";
-        internal readonly GameSource Mode;
+        private readonly GameSource source;
+        private readonly bool requireRestoredWindow;
         private IntPtr hwnd;
         private uint pid;
         private Rectangle lastBounds;
+        private string lastLocateReason;
+        private GameSource lastLocateMode;
+        private Size lastLocateSize;
         internal IntPtr Handle { get { return hwnd; } }
         internal uint ProcessId { get { return pid; } }
         internal bool InputBlockedByIntegrity { get; private set; }
+        internal GameSource Mode { get; private set; }
 
-        internal GameWindow(GameSource source = GameSource.Foreground) { Mode = source; }
+        internal GameWindow(GameSource source = GameSource.Foreground, bool requireRestoredWindow = false)
+        {
+            this.source = source;
+            this.requireRestoredWindow = requireRestoredWindow || source == GameSource.AutoLocal;
+            Mode = ResolveMode(source, false);
+        }
+
+        internal static GameWindow ForTask(GameSource source)
+        {
+            return new GameWindow(source, requireRestoredWindow: true);
+        }
+
+        internal static GameSource ResolveMode(GameSource source, bool gameForeground)
+        {
+            if (source != GameSource.AutoLocal)
+                return source;
+            return gameForeground ? GameSource.Foreground : GameSource.Background;
+        }
 
         internal bool TryLocate(out Rectangle bounds, out string reason)
+        {
+            IntPtr previousHandle = hwnd;
+            uint previousProcess = pid;
+            bool located = TryLocateCore(out bounds, out reason);
+            if (lastLocateReason != reason || lastLocateMode != Mode || lastLocateSize != bounds.Size ||
+                previousHandle != hwnd || previousProcess != pid)
+            {
+                lastLocateReason = reason;
+                lastLocateMode = Mode;
+                lastLocateSize = bounds.Size;
+                if (located)
+                {
+                    RunLog.Info("Window", string.Format("游戏窗口可用｜来源={0} 模式={1} PID={2} 尺寸={3}×{4} 输入权限受限={5}",
+                        source, Mode, pid, bounds.Width, bounds.Height, InputBlockedByIntegrity));
+                }
+                else
+                {
+                    RunLog.Info("Window", string.Format("游戏窗口暂不可用｜来源={0} 模式={1} 原因={2}", source, Mode, reason));
+                }
+            }
+            return located;
+        }
+
+        private bool TryLocateCore(out Rectangle bounds, out string reason)
         {
             bounds = Rectangle.Empty;
             IntPtr current = Native.GetForegroundWindow();
             uint currentPid;
-            if (Mode == GameSource.Background && (!IsCurrentGame(current) || Native.IsIconic(current)))
-                current = FindBackground();
+            if (source == GameSource.Background || source == GameSource.AutoLocal)
+            {
+                bool gameForeground = IsCurrentGame(current) && !Native.IsIconic(current);
+                Mode = ResolveMode(source, gameForeground);
+                if (!gameForeground)
+                    current = FindBackground();
+            }
             if (current == IntPtr.Zero || Mode != GameSource.Background && Native.IsIconic(current) ||
                 Native.GetWindowThreadProcessId(current, out currentPid) == 0)
             {
@@ -114,7 +172,7 @@ namespace TideCombat
             }
             if (current != hwnd || currentPid != pid)
             {
-                if (!IsGame(current, currentPid, Mode))
+                if (!IsGame(current, currentPid, source))
                 {
                     reason = WaitingText();
                     return false;
@@ -129,13 +187,37 @@ namespace TideCombat
                 reason = WaitingText();
                 return false;
             }
-            if (Mode == GameSource.Background && Native.IsIconic(current) && !lastBounds.IsEmpty)
+            if (Mode == GameSource.Background && Native.IsIconic(current))
             {
-                bounds = lastBounds;
-                reason = string.Empty;
-                return true;
+                if (requireRestoredWindow)
+                {
+                    reason = "游戏窗口已最小化，等待恢复";
+                    return false;
+                }
+                if (!lastBounds.IsEmpty)
+                {
+                    bounds = lastBounds;
+                    reason = string.Empty;
+                    return true;
+                }
             }
+            if (!ReadBounds(current, out bounds, out reason))
+                return false;
+            lastBounds = bounds;
+            return true;
+        }
 
+        internal bool TryGetForegroundBounds(out Rectangle bounds)
+        {
+            bounds = Rectangle.Empty;
+            string reason;
+            return Mode != GameSource.Background && Available() &&
+                ReadBounds(hwnd, out bounds, out reason) && Available();
+        }
+
+        private bool ReadBounds(IntPtr current, out Rectangle bounds, out string reason)
+        {
+            bounds = Rectangle.Empty;
             Native.Rect client;
             var position = new Native.Point();
             if (!Native.GetClientRect(current, out client) || !Native.ClientToScreen(current, ref position))
@@ -144,21 +226,18 @@ namespace TideCombat
                 return false;
             }
 
-            int width = client.Right - client.Left;
-            int height = client.Bottom - client.Top;
-            double aspect = height > 0 ? (double)width / height : 0;
-            if (width < 1280 || height < 720 || aspect < 1.74 || aspect > 2.48)
+            var size = new Size(client.Right - client.Left, client.Bottom - client.Top);
+            if (!SupportedSize(size))
             {
                 reason = "请使用 1280×720 或更高的 16:9／21:9 游戏画面";
                 return false;
             }
-            bounds = new Rectangle(position.X, position.Y, width, height);
+            bounds = new Rectangle(position.X, position.Y, size.Width, size.Height);
             if (Mode != GameSource.Background && !Screen.AllScreens.AnyContains(bounds))
             {
                 reason = "请把整个游戏窗口移到同一块屏幕上";
                 return false;
             }
-            lastBounds = bounds;
             reason = string.Empty;
             return true;
         }
@@ -170,10 +249,35 @@ namespace TideCombat
                 Native.GetWindowThreadProcessId(hwnd, out foregroundPid) != 0 && foregroundPid == pid && !Native.IsIconic(hwnd);
         }
 
+        internal bool TryActivateForAutoTask()
+        {
+            if (source != GameSource.AutoLocal || InputBlockedByIntegrity || !Owns(hwnd, pid) ||
+                !Native.IsWindowVisible(hwnd) || Native.IsIconic(hwnd))
+                return false;
+            if (StillForeground())
+                return true;
+
+            uint ownProcess;
+            using (var self = Process.GetCurrentProcess())
+                ownProcess = (uint)self.Id;
+            if (!Owns(Native.GetForegroundWindow(), ownProcess))
+            {
+                RunLog.Info("Window", "前台重试未切换窗口，TideCombat 当前不拥有焦点");
+                return false;
+            }
+
+            bool activated = Owns(hwnd, pid) && Native.SetForegroundWindow(hwnd);
+            RunLog.Info("Window", "向 Windows 请求切到已识别的游戏窗口｜PID=" + pid + " 受理=" + activated);
+            return activated || StillForeground();
+        }
+
         internal bool Available()
         {
-            return Mode == GameSource.Background ? Owns(hwnd, pid) :
-                StillForeground() && (Mode != GameSource.Cloud || IsCloudTitle(hwnd));
+            if (Mode == GameSource.Background)
+                return Owns(hwnd, pid) &&
+                    (!requireRestoredWindow || Native.IsWindowVisible(hwnd) && !Native.IsIconic(hwnd)) &&
+                    (source != GameSource.AutoLocal || !StillForeground());
+            return StillForeground() && (Mode != GameSource.Cloud || IsCloudTitle(hwnd));
         }
 
         internal static bool Owns(IntPtr window, uint process)
@@ -187,20 +291,44 @@ namespace TideCombat
         {
             uint actual;
             return window != IntPtr.Zero && Native.GetWindowThreadProcessId(window, out actual) != 0 &&
-                (window == hwnd && actual == pid || IsGame(window, actual, Mode));
+                (window == hwnd && actual == pid || IsGame(window, actual, source));
         }
 
         private IntPtr FindBackground()
         {
-            if (Owns(hwnd, pid)) return hwnd;
+            if (Owns(hwnd, pid) && Native.IsWindowVisible(hwnd) && CaptureSize(hwnd) > 0)
+                return hwnd;
             IntPtr selected = IntPtr.Zero;
+            long bestSize = -1;
             Native.EnumWindows((window, data) =>
             {
                 if (!Native.IsWindowVisible(window) || !IsCurrentGame(window)) return true;
-                selected = window;
-                return false;
+                long size = CaptureSize(window);
+                if (size > bestSize)
+                {
+                    selected = window;
+                    bestSize = size;
+                }
+                return true;
             }, IntPtr.Zero);
             return selected;
+        }
+
+        private static long CaptureSize(IntPtr window)
+        {
+            Native.Rect client;
+            if (Native.IsIconic(window) || !Native.GetClientRect(window, out client))
+                return 0;
+            var size = new Size(client.Right - client.Left, client.Bottom - client.Top);
+            return SupportedSize(size) ? (long)size.Width * size.Height : 0;
+        }
+
+        private static bool SupportedSize(Size size)
+        {
+            if (size.Width < 1280 || size.Height < 720)
+                return false;
+            double aspect = (double)size.Width / size.Height;
+            return aspect >= 1.74 && aspect <= 2.48;
         }
 
         private string WaitingText()
@@ -247,11 +375,30 @@ namespace TideCombat
                 value.Contains("鸣潮") || value.Contains("鳴潮");
         }
 
+        internal GameLanguage Language
+        {
+            get { return DetectLanguage(ReadTitle(hwnd), Mode == GameSource.Cloud || Mode == GameSource.ManagedCloud); }
+        }
+
+        internal static GameLanguage DetectLanguage(string title, bool browser)
+        {
+            if (browser || title != null && title.Contains("鸣潮")) return GameLanguage.SimplifiedChinese;
+            if (string.IsNullOrEmpty(title)) return GameLanguage.Unknown;
+            if (title.Contains("Wuthering")) return GameLanguage.English;
+            return title.Contains("鳴潮") ? GameLanguage.TraditionalChinese : GameLanguage.Unknown;
+        }
+
+        private static string ReadTitle(IntPtr window)
+        {
+            if (window == IntPtr.Zero) return string.Empty;
+            var text = new StringBuilder(160);
+            Native.GetWindowText(window, text, text.Capacity);
+            return text.ToString();
+        }
+
         private static bool IsCloudTitle(IntPtr window)
         {
-            var title = new StringBuilder(160);
-            Native.GetWindowText(window, title, title.Capacity);
-            string text = title.ToString();
+            string text = ReadTitle(window);
             return IsGameName(text) && (text.Contains("云") || text.Contains("雲") ||
                 text.IndexOf("cloud", StringComparison.OrdinalIgnoreCase) >= 0 ||
                 text.StartsWith("鸣潮 - ", StringComparison.Ordinal) || text.StartsWith("鳴潮 - ", StringComparison.Ordinal) ||
@@ -278,7 +425,7 @@ namespace TideCombat
 
         internal GameCapture(bool retainCloudColors = false) { reader = new FrameReader(retainCloudColors); }
 
-        internal PixelFrame Read(Rectangle bounds)
+        internal PixelFrame Read(Rectangle bounds, bool retainEcho = false)
         {
             if (source == null || source.Size != bounds.Size)
             {
@@ -288,7 +435,7 @@ namespace TideCombat
             }
             sourceGraphics.CopyFromScreen(bounds.Location, System.Drawing.Point.Empty, bounds.Size,
                 CopyPixelOperation.SourceCopy);
-            return reader.Read(source);
+            return reader.Read(source, retainEcho);
         }
 
         private void ReleaseSource()
@@ -311,10 +458,10 @@ namespace TideCombat
         internal const int StandardHeight = 900;
         private Bitmap scaled;
         private Graphics graphics;
-        private byte[] pixels;
+        private byte[] pixels, echoPixels;
         private readonly CloudTargetColors cloudColors;
         private readonly CamellyaColors camellyaColors = new CamellyaColors();
-        private readonly FramePatch concerto = new FramePatch();
+        private readonly FramePatch concerto = new FramePatch(), monthlyCard = new FramePatch();
 
         internal FrameReader(bool retainCloudColors = false)
         {
@@ -322,12 +469,12 @@ namespace TideCombat
         }
 
         // The frame is valid until this reader is used again.
-        internal PixelFrame Read(Bitmap source)
+        internal PixelFrame Read(Bitmap source, bool retainEcho = false)
         {
-            return Read(source, new Rectangle(Point.Empty, source.Size));
+            return Read(source, new Rectangle(Point.Empty, source.Size), retainEcho);
         }
 
-        internal PixelFrame Read(Bitmap source, Rectangle crop)
+        internal PixelFrame Read(Bitmap source, Rectangle crop, bool retainEcho = false)
         {
             int width = (int)Math.Round((double)crop.Width / crop.Height * StandardHeight);
             if (scaled == null || scaled.Width != width)
@@ -349,7 +496,25 @@ namespace TideCombat
             if (cloudColors != null) cloudColors.Read(source, crop);
             camellyaColors.Read(source, crop);
             concerto.Read(source, FramePatch.ScaleCentered(crop, 3840, 2160, 1431, 1942, 1557, 2068));
-            return new PixelFrame(pixels, width, StandardHeight, cloudColors, crop.Width, camellyaColors, concerto, crop.Height);
+            Rectangle cardArea = MonthlyCardVision.SearchArea(crop.Size);
+            cardArea.Offset(crop.Location);
+            monthlyCard.Read(source, cardArea);
+            if (retainEcho)
+            {
+                int rowBytes = crop.Width * 4, length = rowBytes * crop.Height;
+                if (echoPixels == null || echoPixels.Length != length) echoPixels = new byte[length];
+                BitmapData raw = source.LockBits(crop, ImageLockMode.ReadOnly, PixelFormat.Format32bppRgb);
+                try
+                {
+                    if (raw.Stride == rowBytes) Marshal.Copy(raw.Scan0, echoPixels, 0, length);
+                    else
+                        for (int y = 0; y < crop.Height; y++)
+                            Marshal.Copy(IntPtr.Add(raw.Scan0, raw.Stride * y), echoPixels, rowBytes * y, rowBytes);
+                }
+                finally { source.UnlockBits(raw); }
+            }
+            return new PixelFrame(pixels, width, StandardHeight, cloudColors, crop.Width, camellyaColors, concerto,
+                crop.Height, retainEcho ? echoPixels : null, monthlyCard);
         }
 
         public void Dispose()
@@ -374,21 +539,58 @@ namespace TideCombat
 
         private readonly GameWindow window;
         private readonly Dictionary<BattleButton, Native.Input> held = new Dictionary<BattleButton, Native.Input>();
-        private readonly WindowMessages messages;
+        private WindowMessages messages;
+        private long nextSkippedInput;
 
         internal WindowInput(GameWindow window)
         {
             this.window = window;
-            if (window.Mode == GameSource.Background) messages = new WindowMessages();
         }
 
         internal bool Send(BattleAction action, CancellationToken cancellation)
         {
-            if (action.Kind != ActionKind.Release && window.InputBlockedByIntegrity)
-                throw new InputElevationRequiredException();
-            if (messages != null)
-                return (action.Kind == ActionKind.Release || window.Available()) &&
+            if (action.Kind == ActionKind.Release)
+            {
+                Release(action.Button);
+                if (messages != null)
                     messages.Send(action, window.Handle, window.ProcessId, cancellation);
+                return true;
+            }
+            if (window.InputBlockedByIntegrity)
+                throw new InputElevationRequiredException();
+            if (!window.Available())
+            {
+                if (!cancellation.IsCancellationRequested)
+                    SkipInput("游戏窗口或输入模式已变化");
+                return false;
+            }
+            bool sent;
+            if (window.Mode == GameSource.Background)
+            {
+                if (messages == null) messages = new WindowMessages();
+                sent = messages.Send(action, window.Handle, window.ProcessId, cancellation);
+                if (!sent && action.Kind != ActionKind.Wait && !cancellation.IsCancellationRequested)
+                    SkipInput("游戏窗口未接受后台操作 " + action.Label);
+            }
+            else
+                sent = SendForeground(action, cancellation);
+            if (sent && action.Kind != ActionKind.Hold)
+                LogAction(action, action.Kind.ToString());
+            return sent;
+        }
+
+        private void LogAction(BattleAction action, string operation)
+        {
+            int key = action.Kind == ActionKind.Cast ? action.Key : action.NativeKey;
+            if (action.Kind == ActionKind.Switch)
+                key = '1' + action.Slot;
+            string keyDetail = key == 0 ? string.Empty : " VK=0x" + key.ToString("X2");
+            RunLog.Info("Input", string.Format("已发送战斗操作｜模式={0} PID={1} 操作={2} {3}{4}",
+                window.Mode, window.ProcessId, operation, action.Label, keyDetail));
+        }
+
+        private bool SendForeground(BattleAction action, CancellationToken cancellation)
+        {
             switch (action.Kind)
             {
                 case ActionKind.Attack: return Tap(Mouse(LeftDown), Mouse(LeftUp), 0x01, 32, cancellation);
@@ -400,9 +602,6 @@ namespace TideCombat
                 case ActionKind.Button:
                 case ActionKind.Hold:
                     return SendButton(action, cancellation);
-                case ActionKind.Release:
-                    Release(action.Button);
-                    return true;
                 default: return false;
             }
         }
@@ -439,6 +638,7 @@ namespace TideCombat
                 {
                     if (cancellation.IsCancellationRequested || !window.Available()) return false;
                     InputDown(down);
+                    LogAction(action, "再次按下");
                 }
                 return true;
             }
@@ -446,14 +646,14 @@ namespace TideCombat
                 return false;
             InputDown(down);
             held.Add(action.Button, up);
+            LogAction(action, "开始长按");
             return true;
         }
 
         private bool TapMiddleAtCenter(Native.Input down, Native.Input up, int milliseconds, CancellationToken cancellation)
         {
             Rectangle bounds;
-            string reason;
-            if (!CanPress(0x04, cancellation) || !window.TryLocate(out bounds, out reason)) return false;
+            if (!CanPress(0x04, cancellation) || !window.TryGetForegroundBounds(out bounds)) return false;
             Point original = Cursor.Position;
             Point center = new Point(bounds.Left + bounds.Width / 2, bounds.Top + bounds.Height / 2);
             Cursor.Position = center;
@@ -467,20 +667,25 @@ namespace TideCombat
             if (!held.TryGetValue(button, out up)) return;
             InputUp(up);
             held.Remove(button);
+            RunLog.Info("Input", "已松开前台战斗长按｜操作=" + BattleAction.Release(button).Label);
         }
 
         internal bool ReleaseAll()
         {
-            if (messages != null) return messages.ReleaseAll();
-            if (held.Count == 0) return false;
+            bool released = held.Count > 0;
             Exception failure = null;
             foreach (BattleButton button in new List<BattleButton>(held.Keys))
             {
                 try { Release(button); }
                 catch (Win32Exception error) { failure = error; }
             }
+            if (messages != null)
+            {
+                try { released |= messages.ReleaseAll(); }
+                catch (Win32Exception error) { failure = failure ?? error; }
+            }
             if (failure != null) throw failure;
-            return true;
+            return released;
         }
 
         private bool TapKey(int key, int milliseconds, CancellationToken cancellation)
@@ -510,11 +715,26 @@ namespace TideCombat
 
         private bool CanPress(int key, CancellationToken cancellation)
         {
-            if (cancellation.IsCancellationRequested || !window.Available() || Pressed(key))
+            if (cancellation.IsCancellationRequested)
                 return false;
+            if (!window.Available())
+                return SkipInput("游戏窗口或前台焦点已变化");
+            if (Pressed(key))
+                return SkipInput("目标键已被按住");
             foreach (int modifier in Modifiers)
-                if (Pressed(modifier)) return false;
+                if (Pressed(modifier)) return SkipInput("检测到修饰键仍在按住");
             return !cancellation.IsCancellationRequested && window.Available();
+        }
+
+        private bool SkipInput(string reason)
+        {
+            long now = Stopwatch.GetTimestamp();
+            if (now >= nextSkippedInput)
+            {
+                nextSkippedInput = now + 3 * Stopwatch.Frequency;
+                RunLog.Warn("Input", "战斗输入未发出｜原因=" + reason);
+            }
+            return false;
         }
 
         private static void InputDown(Native.Input input)

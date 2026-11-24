@@ -19,7 +19,7 @@ namespace TideCombat
             Name = name;
             Role = role;
             Play = play;
-            BuffMilliseconds = buffMilliseconds > 0 ? buffMilliseconds : role == BattleRole.Support ? 28000 : 14000;
+            BuffMilliseconds = buffMilliseconds > 0 ? buffMilliseconds : DefaultBuffDuration(role);
             Indicators = indicators;
         }
 
@@ -34,6 +34,11 @@ namespace TideCombat
         internal int BuffDuration(CombatSettings settings)
         {
             return (Id == "Chisa" && settings.ChisaDps || Id == "Suoming" && settings.SuomingDps) ? 14000 : BuffMilliseconds;
+        }
+
+        internal static int DefaultBuffDuration(BattleRole role)
+        {
+            return role == BattleRole.Support ? 28000 : 14000;
         }
 
         internal static int IntroDuration(string id)

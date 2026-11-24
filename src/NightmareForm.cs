@@ -17,7 +17,7 @@ namespace TideCombat
         private readonly Label hint = Theme.Text(
             "需要已解锁 F2 图鉴中的对应页签。工具会逐个处理未完成的巢穴，死亡 3 次的目标本轮跳过。", Theme.Muted);
 
-        internal NightmareForm(NightmareOptions options)
+        internal NightmareForm(NightmareOptions options, bool saveOnly = false)
         {
             Text = "梦魇巢穴";
             StartPosition = FormStartPosition.CenterParent;
@@ -51,7 +51,7 @@ namespace TideCombat
                 Margin = new Padding(0, 8, 0, 0)
             };
             var cancel = Theme.Button("取消");
-            var ok = Theme.Button("开始", true);
+            var ok = Theme.Button(saveOnly ? "保存" : "开始", true);
             cancel.Click += delegate { DialogResult = DialogResult.Cancel; Close(); };
             ok.Click += delegate { DialogResult = DialogResult.OK; Close(); };
             actions.Controls.Add(cancel);

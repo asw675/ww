@@ -1,8 +1,13 @@
 using System;
 using System.Collections.Generic;
 using System.Drawing;
+using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Runtime.InteropServices;
+using System.Runtime.Serialization;
+using System.Text;
+using System.Text.RegularExpressions;
 
 namespace TideCombat
 {
@@ -26,46 +31,70 @@ namespace TideCombat
 
         public static EnhanceOptions Defaults()
         {
-            return new EnhanceOptions
-            {
-                RequireBothCrit = true, RequireValidBeforeCrit = true, CritTotalMinimum = 13.8,
-                FirstCritMinimum = 6.9, ValidCountMinimum = 3, FirstMustBeValid = true,
-                ValidStats = new[] { "暴击", "暴击伤害", "攻击百分比" }, PauseAfterSuccess = true
-            };
+            var options = new EnhanceOptions();
+            options.SetDefaults();
+            return options;
+        }
+
+        [OnDeserializing]
+        private void ReadDefaults(StreamingContext context) { SetDefaults(); }
+
+        private void SetDefaults()
+        {
+            RequireBothCrit = RequireValidBeforeCrit = FirstMustBeValid = PauseAfterSuccess = true;
+            CritTotalMinimum = 13.8;
+            FirstCritMinimum = 6.9;
+            ValidCountMinimum = 3;
+            ValidStats = new[] { "暴击", "暴击伤害", "攻击百分比" };
         }
 
         public void Validate()
         {
-            if (ValidStats == null || ValidStats.Length == 0)
+            if (ValidStats == null)
                 ValidStats = new[] { "暴击", "暴击伤害", "攻击百分比" };
-            if (CritTotalMinimum < 0 || CritTotalMinimum > 60 || FirstCritMinimum < 0 || FirstCritMinimum > 30 ||
-                ValidCountMinimum < 1 || ValidCountMinimum > 5)
+            ValidStats = ValidStats.Where(s => !string.IsNullOrWhiteSpace(s)).Select(EnhanceText.Normalize)
+                .Distinct().ToArray();
+            if (!(CritTotalMinimum >= 0 && CritTotalMinimum <= 60) ||
+                !(FirstCritMinimum >= 0 && FirstCritMinimum <= 30) || ValidCountMinimum < 0 || ValidCountMinimum > 5 ||
+                ValidStats.Any(stat => Array.IndexOf(AllStats, stat) < 0))
                 throw new InvalidDataException("强化条件无效。");
-            ValidStats = ValidStats.Where(s => !string.IsNullOrEmpty(s)).ToArray();
+        }
+    }
+
+    internal static class EnhanceText
+    {
+        private const uint SimplifiedChinese = 0x02000000;
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, ExactSpelling = true)]
+        private static extern int LCMapStringEx(string localeName, uint flags, string source, int sourceLength,
+            StringBuilder destination, int capacity, IntPtr version, IntPtr reserved, IntPtr sortHandle);
+
+        internal static string Normalize(string text)
+        {
+            if (string.IsNullOrWhiteSpace(text))
+                return string.Empty;
+            text = text.Trim().Normalize(NormalizationForm.FormKC);
+            var result = new StringBuilder(text.Length * 2);
+            int length = LCMapStringEx("zh-CN", SimplifiedChinese, text, -1, result, result.Capacity,
+                IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
+            return length > 0 ? result.ToString() : text;
         }
     }
 
     internal sealed class EchoStat
     {
         internal string Name;
+        internal string DisplayValue;
         internal double Value;
         internal int Y;
     }
 
     internal static class EchoRules
     {
-        internal static double ParseNumber(string text)
-        {
-            if (string.IsNullOrEmpty(text))
-                return 0;
-            string normalized = text.Replace('％', '%').Replace(' ', '\0');
-            int percent = normalized.IndexOf('%');
-            if (percent >= 0)
-                normalized = normalized.Substring(0, percent);
-            double value;
-            return double.TryParse(normalized.Trim('\0'), System.Globalization.NumberStyles.Float,
-                System.Globalization.CultureInfo.InvariantCulture, out value) ? value : 0;
-        }
+        private static readonly Regex Property = new Regex(@"[\u4e00-\u9fff]{2,}");
+        // Background sparkles can put a stray dot before a complete decimal or a dash at the end.
+        private static readonly Regex Number = new Regex(
+            @"\A(?:[.·] *(?=[0-9]+\.[0-9]))?([0-9]+(?:\.[0-9]+)?) *(%?)(?: *[-−–—])?\z");
 
         internal static List<EchoStat> Parse(List<OcrLine> lines)
         {
@@ -73,13 +102,26 @@ namespace TideCombat
             var values = new List<OcrLine>();
             foreach (OcrLine line in lines)
             {
-                string text = line.Text ?? string.Empty;
-                if (IsNumber(text))
-                    values.Add(line);
-                else if (CountChinese(text) >= 2 && !text.Contains("辅音"))
-                    properties.Add(line);
+                string text = EnhanceText.Normalize(line.Text);
+                Match number = Number.Match(text);
+                if (number.Success)
+                {
+                    values.Add(new OcrLine
+                    {
+                        Box = line.Box, Text = number.Groups[1].Value + number.Groups[2].Value, Score = line.Score
+                    });
+                }
+                else if (!text.Contains("辅音"))
+                {
+                    Match property = Property.Match(text);
+                    if (property.Success && Array.IndexOf(EnhanceOptions.AllStats, Normalize(property.Value, "")) >= 0)
+                        properties.Add(new OcrLine { Box = line.Box, Text = property.Value, Score = line.Score });
+                }
             }
             var stats = new List<EchoStat>();
+            if (properties.Count > 5)
+                return stats;
+            properties.Sort((left, right) => left.Box.Y.CompareTo(right.Box.Y));
             var remaining = new List<OcrLine>(values);
             foreach (OcrLine property in properties)
             {
@@ -88,43 +130,29 @@ namespace TideCombat
                 foreach (OcrLine value in remaining)
                 {
                     double distance = Math.Abs(property.Box.Y - value.Box.Y);
-                    if (distance >= best) continue;
+                    if (distance > Math.Max(8, (property.Box.Height + value.Box.Height) / 2) || distance >= best)
+                        continue;
                     best = distance;
                     paired = value;
                 }
-                if (paired != null)
-                    remaining.Remove(paired);
+                if (paired == null)
+                    return new List<EchoStat>();
+                remaining.Remove(paired);
+                string name = Normalize(property.Text, paired.Text);
+                double amount;
+                if (!double.TryParse(paired.Text.TrimEnd('%'), NumberStyles.AllowDecimalPoint,
+                    CultureInfo.InvariantCulture, out amount) || amount <= 0 ||
+                    Array.IndexOf(EnhanceOptions.AllStats, name) < 0 || stats.Any(stat => stat.Name == name))
+                    return new List<EchoStat>();
                 stats.Add(new EchoStat
                 {
-                    Name = Normalize(property.Text, paired == null ? string.Empty : paired.Text),
-                    Value = ParseNumber(paired == null ? "0" : paired.Text),
+                    Name = name,
+                    DisplayValue = paired.Text,
+                    Value = amount,
                     Y = property.Box.Y
                 });
             }
             return stats;
-        }
-
-        private static bool IsNumber(string text)
-        {
-            if (string.IsNullOrWhiteSpace(text))
-                return false;
-            int digits = 0;
-            foreach (char character in text)
-            {
-                if (char.IsDigit(character)) { digits++; continue; }
-                if (character == '.' || character == '%' || character == '％' || character == ' ') continue;
-                return false;
-            }
-            return digits > 0;
-        }
-
-        private static int CountChinese(string text)
-        {
-            int count = 0;
-            foreach (char character in text)
-                if (character >= '\u4e00' && character <= '\u9fff')
-                    count++;
-            return count;
         }
 
         private static string Normalize(string property, string value)
@@ -154,9 +182,6 @@ namespace TideCombat
             internal int Remaining;
             internal bool HasRate, HasDamage;
             internal double Rate, Damage;
-            internal bool FirstCritSeen;
-            internal string FirstCritName;
-            internal double FirstCritValue;
             internal bool FirstCheckedSeen;
             internal string FirstCheckedName;
             internal double FirstCheckedValue;
@@ -187,12 +212,6 @@ namespace TideCombat
                     profile.FirstStatValid = isValid;
                 if (!isCrit)
                     continue;
-                if (!profile.FirstCritSeen)
-                {
-                    profile.FirstCritSeen = true;
-                    profile.FirstCritName = stat.Name;
-                    profile.FirstCritValue = stat.Value;
-                }
                 if (!profile.FirstCheckedSeen && isValid)
                 {
                     profile.FirstCheckedSeen = true;
@@ -273,42 +292,107 @@ namespace TideCombat
         };
     }
 
-    internal enum EnhanceScan { None, Cultivate, EchoSkill, StageInsert, EnhanceButtons, Dialog, Stats }
+    internal enum EnhanceScan { None, Cultivate, BagCandidate, StageInsert, EnhanceButtons, Dialog, Stats }
+    internal enum EchoBagOrder { Unknown, Ascending, Descending }
+    internal enum EchoMark { Unknown, Unmarked, Marked }
+
+    internal sealed class EnhanceStatRow
+    {
+        internal readonly string Name, Value;
+        internal readonly bool Valid;
+
+        internal EnhanceStatRow(string name, string value, bool valid)
+        {
+            Name = name;
+            Value = value;
+            Valid = valid;
+        }
+    }
+
+    internal sealed class EnhanceStageReadout
+    {
+        internal readonly int Round, InvalidCount;
+        internal readonly string Verdict, Reason;
+        internal readonly EnhanceStatRow[] Rows;
+
+        internal EnhanceStageReadout(int round, List<EchoStat> stats, EnhanceOptions options, bool passed, string reason)
+        {
+            Round = round;
+            var valid = new HashSet<string>(options.ValidStats ?? new string[0]);
+            Rows = stats.Select(stat => new EnhanceStatRow(stat.Name, stat.DisplayValue,
+                valid.Contains(stat.Name))).ToArray();
+            InvalidCount = Rows.Count(row => !row.Valid);
+            Verdict = passed ? (stats.Count == 5 ? "锁定" : "继续强化") : "弃置";
+            Reason = reason;
+        }
+    }
 
     internal sealed class EnhanceFrame
     {
         internal int Width = 1600, Height = 900;
+        internal int MaterialCount = -1, CurrentLevel = -1, PreviewLevel = -1, TargetStatCount;
+        internal int BagLevel = -1;
+        internal bool HasEchoSkillTitle;
+        internal bool ZeroLevelCandidate
+        {
+            get { return FirstEchoSelected && (BagLevel == 0 || BagLevel < 0 && HasEchoSkillTitle); }
+        }
+        internal EchoBagOrder BagOrder;
         internal List<OcrLine> Lines = new List<OcrLine>();
-        internal bool HasCultivate = false;
-        internal Rectangle CultivateBox = Rectangle.Empty;
-        internal bool LevelZero = false;
-        internal bool HasStageInsert = false;
-        internal Rectangle StageBox = Rectangle.Empty;
-        internal bool HasEnhanceTune = false;
-        internal bool HasPlainEnhance = false;
-        internal Rectangle EnhanceBox = Rectangle.Empty;
-        internal bool Locked = false;
-        internal bool Dropped = false;
-        internal bool LockKnown = false;
-        internal bool DropKnown = false;
+        internal string Preview;
+        internal bool Background, AutoBackground;
+        internal bool HasCultivate, FirstEchoSelected, HasEnhancePanel, HasStageInsert, HasClearMaterials, HasEnhanceTune, HasPlainEnhance;
+        internal Rectangle CultivateBox, StageBox, EnhanceBox, CheckBox, ConfirmBox, DismissBox;
+        internal bool OverflowDialog;
+        internal EchoMark LockMark, DropMark;
+        internal bool MaterialsStaged { get { return HasClearMaterials || HasEnhanceTune || MaterialCount > 0; } }
     }
 
-    internal enum EnhanceAction { None, Click, Key }
+    internal enum EnhanceAction { None, Click, Key, ActivateGame }
 
     internal struct EnhanceDecision
     {
         internal EnhanceAction Action;
         internal Point Point;
         internal char Key;
+        internal string Label;
+        internal int SettleMs;
+        internal bool UseWindowMessage;
+        internal Action<long> Sent;
     }
 
     internal sealed class EchoEnhanceTask
     {
         private enum Step { WaitBag, SelectEcho, Enhancing, AddMaterial, PressEnhance, Dialog, Stats, Trash, Lock, Escaping, Done, Failed }
+        private enum SelectionStep { SelectFirst, CheckFirst, WaitForDescending, WaitForAscending, CheckAfterSort }
+        private const string LogArea = "强化声骸";
+        private const int SelectionTimeoutMs = 15000;
+        private const int SelectionRetryDelayMs = 1600;
+        private const int CultivateRetryDelayMs = 1600;
+        private const int StageRetryDelayMs = 1800;
+        private const int MaxStageClicks = 2;
+        private const int MenuSettleMs = 120;
+        private const int ResultQuietMs = 2000;
+        private const int ResultRetryDelayMs = 1800;
+        private const int BackgroundResultRetryDelayMs = 4500;
+        private const int ResultCloseTimeoutMs = 12000;
         private readonly EnhanceOptions options;
         private Step step = Step.WaitBag;
-        private long stepAt, nextAction;
-        private int sortToggles;
+        private SelectionStep selection;
+        private long stepAt, nextAction, roundAt, cultivateClickAt, stageClickAt, resultReadAt, resultClickAt;
+        private long resultShownAt = -1;
+        private long selectionInputAt;
+        private int lastBagLevel, bagLevelSamples;
+        private bool selectionRetried;
+        private int cultivateClicks, cultivateSamples, resultClicks, resultSamples;
+        private int materialCount, stageClicks, emptyMaterialSamples;
+        private int submissionAttempts, unchangedPreviewSamples, confirmedStatCount;
+        private int submittedLevel = -1;
+        private string submittedPreview;
+        private bool foregroundRequested, dialogSeen, resultClickInBackground;
+        private EchoMark lastMark;
+        private int markerSamples;
+        private bool overflowChecked, overflowConfirmed;
         private string reason = string.Empty;
 
         internal EchoEnhanceTask(EnhanceOptions options)
@@ -320,18 +404,21 @@ namespace TideCombat
         internal string Failure { get; private set; }
         internal bool Finished { get { return step == Step.Done || step == Step.Failed; } }
         internal bool Paused { get; private set; }
-
-        internal void Resume()
-        {
-            Paused = false;
-            step = Step.Escaping;
-            stepAt = 0;
-            nextAction = 0;
-        }
         internal int Enhanced { get; private set; }
         internal int Discarded { get; private set; }
+        internal int ItemNumber { get; private set; }
+        internal int Round { get; private set; }
+        internal EnhanceStageReadout LastStage { get; private set; }
         internal string ScreenshotKind { get; private set; }
         internal string ScreenshotReason { get; private set; }
+
+        internal void Resume(long now)
+        {
+            if (!Paused)
+                return;
+            Paused = false;
+            Move(Step.Escaping, now);
+        }
 
         internal void ClearScreenshot()
         {
@@ -339,7 +426,20 @@ namespace TideCombat
             ScreenshotReason = null;
         }
 
-        internal bool WantsIcons { get { return step == Step.Trash || step == Step.Lock; } }
+        internal bool WantsLock { get { return step == Step.Lock; } }
+        internal bool WantsDiscard { get { return step == Step.Trash; } }
+        internal bool HasUnclosedResult { get { return resultShownAt >= 0; } }
+        internal bool CheckingBagOrder
+        {
+            get { return selection == SelectionStep.WaitForDescending || selection == SelectionStep.WaitForAscending; }
+        }
+        internal int RequiredStatCount { get; private set; }
+
+        internal bool HasPendingUpgrade(EnhanceFrame frame)
+        {
+            return frame.MaterialsStaged || frame.PreviewLevel >= 0 ||
+                (frame.CurrentLevel >= 0 && frame.CurrentLevel < submittedLevel);
+        }
 
         internal EnhanceScan Scan
         {
@@ -352,7 +452,7 @@ namespace TideCombat
                     case Step.Escaping:
                         return EnhanceScan.Cultivate;
                     case Step.SelectEcho:
-                        return EnhanceScan.EchoSkill;
+                        return EnhanceScan.BagCandidate;
                     case Step.AddMaterial:
                         return EnhanceScan.StageInsert;
                     case Step.PressEnhance:
@@ -361,20 +461,29 @@ namespace TideCombat
                         return EnhanceScan.Dialog;
                     case Step.Stats:
                         return EnhanceScan.Stats;
-                    case Step.Trash:
-                    case Step.Lock:
-                        return EnhanceScan.None;
                     default:
                         return EnhanceScan.None;
                 }
             }
         }
 
+        internal bool CheckEnhancePage { get { return step == Step.Enhancing || step == Step.Escaping; } }
+        internal bool CheckCultivateCandidate { get { return step == Step.Enhancing; } }
+
         internal EnhanceDecision Observe(EnhanceFrame frame, long now)
         {
-            Status = Describe();
-            if (Finished || Paused)
+            if (Finished || Paused || now < nextAction)
                 return default(EnhanceDecision);
+            if (frame.DismissBox.IsEmpty)
+                resultSamples = 0;
+            if (step == Step.AddMaterial || step == Step.PressEnhance ||
+                step == Step.Trash || step == Step.Lock || step == Step.Escaping)
+            {
+                if (!frame.DismissBox.IsEmpty)
+                    return HandleLateResult(frame, now);
+                if (HasUnclosedResult && now < resultReadAt)
+                    return default(EnhanceDecision);
+            }
             switch (step)
             {
                 case Step.WaitBag: return WaitBag(frame, now);
@@ -382,10 +491,10 @@ namespace TideCombat
                 case Step.Enhancing: return Enhancing(frame, now);
                 case Step.AddMaterial: return AddMaterial(frame, now);
                 case Step.PressEnhance: return PressEnhance(frame, now);
-                case Step.Dialog: return HandleDialog(frame, now);
-                case Step.Stats: return HandleStats(frame, now);
-                case Step.Trash: return Trash(frame, now);
-                case Step.Lock: return Lock(frame, now);
+                case Step.Dialog:
+                case Step.Stats: return HandleResult(frame, now);
+                case Step.Trash: return MarkEcho(frame.DropMark, false, now);
+                case Step.Lock: return MarkEcho(frame.LockMark, true, now);
                 case Step.Escaping: return Escaping(frame, now);
                 default: return default(EnhanceDecision);
             }
@@ -393,277 +502,539 @@ namespace TideCombat
 
         private EnhanceDecision WaitBag(EnhanceFrame frame, long now)
         {
+            Status = "等待背包声骸界面";
             if (!frame.HasCultivate)
-            {
-                if (now - stepAt > 6000)
-                    return Fail("请先在背包的声骸界面筛选并按等级从 0 排序，再开始任务。");
-                return default(EnhanceDecision);
-            }
-            step = Step.SelectEcho;
-            stepAt = now;
-            nextAction = now;
-            sortToggles = 0;
+                return now - stepAt > 6000 ? Fail("请先在背包声骸页筛选并按等级升序排列。") : default(EnhanceDecision);
+            selection = SelectionStep.SelectFirst;
+            Move(Step.SelectEcho, now);
             return default(EnhanceDecision);
         }
 
         private EnhanceDecision SelectEcho(EnhanceFrame frame, long now)
         {
-            if (now < nextAction)
-                return default(EnhanceDecision);
-            if (frame.LevelZero)
+            Status = CheckingBagOrder ? "确认背包等级排序" : "确认首格声骸等级";
+            if (now - stepAt > SelectionTimeoutMs)
+                return FailSelection(frame);
+            if (!frame.HasCultivate)
             {
-                step = Step.Enhancing;
-                stepAt = now;
-                nextAction = now + 300;
+                bagLevelSamples = 0;
                 return default(EnhanceDecision);
             }
-            switch (sortToggles)
+
+            switch (selection)
             {
-                case 0:
-                    sortToggles = 1;
-                    nextAction = now + 600;
-                    return Click(0.13, 0.21, frame);
-                case 1:
-                case 2:
-                    sortToggles++;
-                    nextAction = now + 500;
-                    return Click(0.35, 0.917, frame);
-                case 3:
-                    sortToggles = 4;
-                    nextAction = now + 600;
-                    return Click(0.13, 0.21, frame);
+                case SelectionStep.SelectFirst:
+                    return ClickFirstEcho(frame, SelectionStep.CheckFirst, now);
+                case SelectionStep.WaitForDescending:
+                    return ConfirmBagOrder(frame, EchoBagOrder.Descending, now);
+                case SelectionStep.WaitForAscending:
+                    return ConfirmBagOrder(frame, EchoBagOrder.Ascending, now);
+                default:
+                    return ConfirmFirstEcho(frame, now);
             }
-            step = Step.Done;
-            Status = "没有可强化的声骸，任务结束";
+        }
+
+        private EnhanceDecision ConfirmFirstEcho(EnhanceFrame frame, long now)
+        {
+            bool afterSort = selection == SelectionStep.CheckAfterSort;
+            if (!frame.FirstEchoSelected || (frame.BagLevel < 0 && (!frame.HasEchoSkillTitle || lastBagLevel > 0)))
+            {
+                bagLevelSamples = 0;
+                if (now - selectionInputAt < SelectionRetryDelayMs)
+                    return default(EnhanceDecision);
+                if (!selectionRetried)
+                    return ClickFirstEcho(frame, selection, now, retry: true);
+                return afterSort ? default(EnhanceDecision) : ResetBagOrder(frame, now);
+            }
+
+            if (frame.ZeroLevelCandidate)
+            {
+                ItemNumber++;
+                Round = 0;
+                LastStage = null;
+                reason = string.Empty;
+                confirmedStatCount = 0;
+                cultivateClicks = cultivateSamples = 0;
+                ResetResultDismissal();
+                RunLog.Info(LogArea, "确认列表第一格等级为 +0");
+                Evidence("before");
+                Move(Step.Enhancing, now);
+                return default(EnhanceDecision);
+            }
+            if (!afterSort)
+                return ResetBagOrder(frame, now);
+            if (frame.BagOrder != EchoBagOrder.Ascending)
+            {
+                bagLevelSamples = 0;
+                return default(EnhanceDecision);
+            }
+
+            if (lastBagLevel != frame.BagLevel)
+                bagLevelSamples = 0;
+            lastBagLevel = frame.BagLevel;
+            if (++bagLevelSamples < 2)
+                return default(EnhanceDecision);
+            string readout = BagReadout(frame);
+            RunLog.Info(LogArea, "确认当前筛选没有 0 级声骸 · " + readout);
+            Evidence("selection", readout);
+            Move(Step.Done, now);
+            Status = "没有可强化的 0 级声骸，首格为 +" + frame.BagLevel + "，任务结束";
             return default(EnhanceDecision);
+        }
+
+        private EnhanceDecision ResetBagOrder(EnhanceFrame frame, long now)
+        {
+            if (frame.BagOrder == EchoBagOrder.Unknown)
+                return default(EnhanceDecision);
+            return ClickBagSort(frame, frame.BagOrder == EchoBagOrder.Ascending
+                ? EchoBagOrder.Descending : EchoBagOrder.Ascending, now);
+        }
+
+        private EnhanceDecision ConfirmBagOrder(EnhanceFrame frame, EchoBagOrder expected, long now)
+        {
+            if (frame.BagOrder == expected)
+                return expected == EchoBagOrder.Ascending ? ClickFirstEcho(frame, SelectionStep.CheckAfterSort, now) :
+                    ClickBagSort(frame, EchoBagOrder.Ascending, now);
+            if (frame.BagOrder != EchoBagOrder.Unknown && !selectionRetried && now - selectionInputAt >= SelectionRetryDelayMs)
+                return ClickBagSort(frame, expected, now, retry: true);
+            return default(EnhanceDecision);
+        }
+
+        private EnhanceDecision ClickFirstEcho(EnhanceFrame frame, SelectionStep next, long now, bool retry = false)
+        {
+            return ClickBagControl(new Point((int)(frame.Width * .13), (int)(frame.Height * .21)),
+                (retry ? "重试" : "") + "选择列表第一格", next, now, retry);
+        }
+
+        private EnhanceDecision ClickBagSort(EnhanceFrame frame, EchoBagOrder expected, long now, bool retry = false)
+        {
+            bool ascending = expected == EchoBagOrder.Ascending;
+            return ClickBagControl(new Point((int)(frame.Width * .35), (int)(frame.Height * .917)),
+                (retry ? "重试" : "") + "切换等级排序为" + (ascending ? "升序" : "降序"),
+                ascending ? SelectionStep.WaitForAscending : SelectionStep.WaitForDescending, now, retry);
+        }
+
+        private EnhanceDecision ClickBagControl(Point point, string label, SelectionStep next, long now, bool retry)
+        {
+            var decision = Click(point, label, now, 550, sent =>
+            {
+                selection = next;
+                selectionRetried = retry;
+                selectionInputAt = sent;
+                lastBagLevel = -1;
+                bagLevelSamples = 0;
+                nextAction = sent + 500;
+            });
+            decision.SettleMs = MenuSettleMs;
+            decision.UseWindowMessage = !retry;
+            return decision;
+        }
+
+        private EnhanceDecision FailSelection(EnhanceFrame frame)
+        {
+            RunLog.Warn(LogArea, "未确认声骸候选 · " + BagReadout(frame));
+            if (CheckingBagOrder)
+                return Fail("未确认背包等级排序已切换。");
+            if (!frame.FirstEchoSelected)
+                return Fail("未确认背包列表第一格已选中。");
+            if (frame.BagLevel < 0)
+                return Fail("未确认首格声骸的等级。");
+            return Fail("未确认背包已按等级升序排列。");
+        }
+
+        private static string BagReadout(EnhanceFrame frame)
+        {
+            string level = frame.BagLevel < 0 ? "未识别" : "+" + frame.BagLevel;
+            string order = frame.BagOrder == EchoBagOrder.Ascending ? "等级升序" :
+                frame.BagOrder == EchoBagOrder.Descending ? "等级降序" : "未确认等级排序";
+            return "首格选中=" + frame.FirstEchoSelected + " · 等级=" + level + " · 排序=" + order +
+                " · OCR=" + Readout(frame.Lines);
         }
 
         private EnhanceDecision Enhancing(EnhanceFrame frame, long now)
         {
-            if (now < nextAction)
-                return default(EnhanceDecision);
-            if (!frame.HasCultivate)
+            Status = "打开培养界面";
+            if (frame.HasEnhancePanel && !frame.HasCultivate)
             {
-                step = Step.AddMaterial;
-                stepAt = now;
-                nextAction = now + 300;
+                BeginMaterial(now);
                 return default(EnhanceDecision);
             }
             if (now - stepAt > 5000)
-                return Fail("找不到「培养」按钮。");
-            nextAction = now + 500;
-            return Click(frame.CultivateBox, now);
+                return Fail("未确认打开声骸强化界面。");
+            if (!frame.HasCultivate)
+            {
+                cultivateSamples = 0;
+                return default(EnhanceDecision);
+            }
+            if (!frame.ZeroLevelCandidate)
+            {
+                Status = "重新核对将要培养的首格声骸";
+                cultivateSamples = 0;
+                return default(EnhanceDecision);
+            }
+            if (cultivateClicks > 0 && (cultivateClicks >= 2 ||
+                now - cultivateClickAt < CultivateRetryDelayMs || ++cultivateSamples < 2))
+                return default(EnhanceDecision);
+
+            EnhanceDecision decision = Click(frame.CultivateBox, cultivateClicks == 0 ? "打开培养" : "重试打开培养",
+                now, 550, sent =>
+                {
+                    cultivateClicks++;
+                    cultivateClickAt = sent;
+                    cultivateSamples = 0;
+                });
+            decision.SettleMs = MenuSettleMs;
+            decision.UseWindowMessage = cultivateClicks == 0;
+            return decision;
+        }
+
+        private void BeginMaterial(long now)
+        {
+            stageClicks = emptyMaterialSamples = 0;
+            materialCount = -1;
+            submissionAttempts = unchangedPreviewSamples = 0;
+            submittedPreview = null;
+            foregroundRequested = dialogSeen = false;
+            Move(Step.AddMaterial, now);
         }
 
         private EnhanceDecision AddMaterial(EnhanceFrame frame, long now)
         {
-            if (now - stepAt > 5000)
-                return Fail("请在强化设置中开启「阶段放入」。");
-            if (frame.HasStageInsert)
+            Status = stageClicks == 0 ? "阶段放入材料" : "等待阶段放入生效";
+            ReadMaterialState(frame, now);
+            if (stageClicks > 0 && frame.MaterialsStaged)
             {
-                nextAction = now + 300;
-                return Click(frame.StageBox, now);
+                Evidence("materials", frame.MaterialCount >= 0
+                    ? "预选材料数量=" + frame.MaterialCount : "已识别材料预选控件");
+                Move(Step.PressEnhance, now);
+                return default(EnhanceDecision);
             }
-            if (now - stepAt > 1200)
+            if (stageClicks == 0 && frame.HasEnhanceTune && frame.MaterialCount > 0 &&
+                frame.CurrentLevel >= 0 && frame.CurrentLevel / 5 == confirmedStatCount &&
+                frame.PreviewLevel > frame.CurrentLevel && frame.TargetStatCount == confirmedStatCount + 1)
             {
-                step = Step.PressEnhance;
-                stepAt = now;
-                nextAction = now + 300;
+                Evidence("materials", "已核对下一档预选材料数量=" + frame.MaterialCount);
+                return SubmitEnhance(frame, now);
             }
-            return default(EnhanceDecision);
+            if (now - stepAt >= 5000)
+            {
+                RunLog.Warn(LogArea, "未确认材料预选 · OCR=" + Readout(frame.Lines));
+                return Fail(materialCount == 0
+                    ? "阶段放入后，投入材料仍为 0/50。游戏没有预选声骸经验材料。"
+                    : "未确认本轮阶段放入。请检查强化设置和材料。");
+            }
+            return ClickStageWhenReady(frame, now);
         }
 
         private EnhanceDecision PressEnhance(EnhanceFrame frame, long now)
         {
-            if (now < nextAction)
-                return default(EnhanceDecision);
+            Status = "等待「强化并调谐」";
+            ReadMaterialState(frame, now);
             if (frame.HasEnhanceTune)
+                return SubmitEnhance(frame, now);
+            if (now - stepAt <= 4500)
+                return ClickStageWhenReady(frame, now);
+            RunLog.Warn(LogArea, "未找到组合按钮 · 上一次读到的预选材料数量=" + materialCount +
+                " · OCR=" + Readout(frame.Lines));
+            if (materialCount == 0 && !frame.MaterialsStaged)
+                return Fail("预选材料已清空，未能继续强化并调谐。");
+            return Fail(frame.HasPlainEnhance
+                ? "游戏仍只显示「强化」。请检查本次预选能否达到下一调谐档。"
+                : "找不到「强化并调谐」按钮。");
+        }
+
+        private void ReadMaterialState(EnhanceFrame frame, long now)
+        {
+            if (stageClicks == 0)
+                return;
+            emptyMaterialSamples = now - stageClickAt >= StageRetryDelayMs &&
+                frame.HasStageInsert && !frame.MaterialsStaged ? emptyMaterialSamples + 1 : 0;
+            if (frame.MaterialCount < 0 || frame.MaterialCount == materialCount)
+                return;
+            materialCount = frame.MaterialCount;
+            RunLog.Info(LogArea, "已读取本档投入材料数量 " + materialCount);
+        }
+
+        private EnhanceDecision ClickStageWhenReady(EnhanceFrame frame, long now)
+        {
+            if (frame.MaterialsStaged || stageClicks >= MaxStageClicks ||
+                (stageClicks > 0 && emptyMaterialSamples < 2))
+                return default(EnhanceDecision);
+            EnhanceDecision decision = Click(frame.StageBox, stageClicks == 0 ? "阶段放入" : "再次阶段放入", now, 350, sent =>
             {
-                step = Step.Dialog;
-                stepAt = now;
-                nextAction = now + 1500;
-                return Click(frame.EnhanceBox, now);
-            }
-            if (frame.HasPlainEnhance)
-                return Fail("请在强化设置中开启「同时调谐」。");
-            if (now - stepAt > 4000)
-                return Fail("找不到「强化并调谐」按钮。");
-            nextAction = now + 400;
+                stageClickAt = sent;
+                stageClicks++;
+                emptyMaterialSamples = 0;
+                materialCount = -1;
+                Move(Step.AddMaterial, sent, 350);
+            });
+            decision.SettleMs = MenuSettleMs;
+            decision.UseWindowMessage = stageClicks == 0;
+            return decision;
+        }
+
+        private EnhanceDecision HandleResult(EnhanceFrame frame, long now)
+        {
+            Status = "等待游戏确认强化并调谐";
+            if (frame.OverflowDialog || !frame.DismissBox.IsEmpty)
+                return HandleDialog(frame, now);
+            EnhanceDecision wait;
+            if (HandleUnchangedPreview(frame, now, out wait))
+                return wait;
+            if (now < resultReadAt)
+                return default(EnhanceDecision);
+            if (step == Step.Stats)
+                return ReadStats(frame, now);
+            Move(Step.Stats, now, 300);
             return default(EnhanceDecision);
         }
 
         private EnhanceDecision HandleDialog(EnhanceFrame frame, long now)
         {
-            if (frame.Lines != null)
+            dialogSeen = true;
+            resultReadAt = now + ResultQuietMs;
+            if (!frame.OverflowDialog)
+                return DismissResult(frame, now);
+            if (now - roundAt > 12000)
+                return Fail("未确认材料溢出弹窗已经关闭。");
+            Status = "处理材料溢出提示";
+            if (frame.ConfirmBox.IsEmpty || overflowConfirmed)
+                return default(EnhanceDecision);
+            if (!overflowChecked && !frame.CheckBox.IsEmpty)
+                return Click(frame.CheckBox, "勾选本次登录不再提示", now, 550, sent => overflowChecked = true);
+            return Click(frame.ConfirmBox, "确认材料溢出提示", now, 1200, sent => overflowConfirmed = true);
+        }
+
+        private EnhanceDecision HandleLateResult(EnhanceFrame frame, long now)
+        {
+            resultReadAt = now + ResultQuietMs;
+            stepAt = resultReadAt;
+            lastMark = EchoMark.Unknown;
+            markerSamples = 0;
+            return DismissResult(frame, now);
+        }
+
+        private EnhanceDecision DismissResult(EnhanceFrame frame, long now)
+        {
+            if (!HasUnclosedResult)
+                resultShownAt = now;
+            if (now - resultShownAt > ResultCloseTimeoutMs)
+                return Fail("未确认调谐结果页已经关闭。");
+
+            Status = resultClicks == 0 ? "关闭调谐结果" : "等待游戏关闭调谐结果";
+            if (resultClicks > 0)
             {
-                foreach (OcrLine line in frame.Lines)
+                int retryDelay = resultClickInBackground ? BackgroundResultRetryDelayMs : ResultRetryDelayMs;
+                if (resultClicks >= 2 || now - resultClickAt < retryDelay || ++resultSamples < 2)
+                    return default(EnhanceDecision);
+                if (frame.AutoBackground && !foregroundRequested)
                 {
-                    string text = line.Text ?? string.Empty;
-                    if (text.Contains("不再提示"))
-                    {
-                        nextAction = now + 500;
-                        return Click(0.49, 0.55, frame);
-                    }
-                    if (text.Contains("调谐成功") || text.Contains("点击任"))
-                    {
-                        nextAction = now + 800;
-                        return Click(line.Box, now);
-                    }
+                    foregroundRequested = true;
+                    resultSamples = 0;
+                    nextAction = now + 800;
+                    return new EnhanceDecision { Action = EnhanceAction.ActivateGame, Label = "申请切到游戏前台关闭调谐结果" };
                 }
             }
-            if (now - stepAt > 2000)
-            {
-                step = Step.Stats;
-                stepAt = now;
-                nextAction = now + 300;
-            }
-            return default(EnhanceDecision);
+
+            EnhanceDecision dismiss = Click(frame.DismissBox, resultClicks == 0 ? "关闭调谐结果" : "重试关闭调谐结果",
+                now, 850, sent =>
+                {
+                    resultClicks++;
+                    resultClickAt = sent;
+                    resultClickInBackground = frame.Background;
+                    resultSamples = 0;
+                });
+            dismiss.SettleMs = MenuSettleMs;
+            dismiss.UseWindowMessage = resultClicks > 0 && !resultClickInBackground;
+            return dismiss;
         }
 
-        private EnhanceDecision HandleStats(EnhanceFrame frame, long now)
+        private void ResetResultDismissal()
         {
-            if (now < nextAction)
-                return default(EnhanceDecision);
-            List<EchoStat> stats = EchoRules.Parse(frame.Lines ?? new List<OcrLine>());
-            if (stats.Count == 0)
+            resultShownAt = -1;
+            resultClicks = resultSamples = 0;
+        }
+
+        private EnhanceDecision SubmitEnhance(EnhanceFrame frame, long now)
+        {
+            EnhanceDecision decision = Click(frame.EnhanceBox, submissionAttempts == 0 ? "强化并调谐" : "重试强化并调谐",
+                now, 500, sent =>
+                {
+                    if (submissionAttempts == 0)
+                    {
+                        submittedPreview = frame.Preview;
+                        submittedLevel = frame.PreviewLevel;
+                        RequiredStatCount = Math.Max(confirmedStatCount + 1, frame.TargetStatCount);
+                    }
+                    submissionAttempts++;
+                    unchangedPreviewSamples = 0;
+                    roundAt = sent;
+                    resultReadAt = sent + 1500 + ResultQuietMs;
+                    overflowChecked = overflowConfirmed = false;
+                    ResetResultDismissal();
+                    Move(Step.Dialog, sent, 1500);
+                });
+            decision.SettleMs = MenuSettleMs;
+            decision.UseWindowMessage = submissionAttempts == 0;
+            return decision;
+        }
+
+        private bool HandleUnchangedPreview(EnhanceFrame frame, long now, out EnhanceDecision decision)
+        {
+            decision = default(EnhanceDecision);
+            if (dialogSeen || !frame.HasEnhanceTune ||
+                submittedPreview == null || frame.Preview != submittedPreview ||
+                EchoRules.Parse(frame.Lines).Count >= RequiredStatCount)
             {
-                if (now - stepAt > 4000)
-                    return Fail("无法读取声骸词条。");
-                nextAction = now + 500;
+                unchangedPreviewSamples = 0;
+                return false;
+            }
+            Status = "等待游戏执行强化并调谐";
+            if (now - roundAt > 13000)
+            {
+                decision = Fail("游戏未执行「强化并调谐」，声骸仍停在强化预览。");
+                return true;
+            }
+            if (++unchangedPreviewSamples < 2 || now - roundAt < 2000 || submissionAttempts >= 2)
+                return true;
+            if (frame.AutoBackground && !foregroundRequested)
+            {
+                foregroundRequested = true;
+                nextAction = now + 800;
+                decision = new EnhanceDecision { Action = EnhanceAction.ActivateGame, Label = "申请切到游戏前台重试" };
+                return true;
+            }
+            RunLog.Info(LogArea, "仍是同一强化预览，重试一次 · " + submittedPreview);
+            decision = SubmitEnhance(frame, now);
+            return true;
+        }
+
+        private EnhanceDecision ReadStats(EnhanceFrame frame, long now)
+        {
+            Status = "读取并核对词条";
+            List<EchoStat> stats = EchoRules.Parse(frame.Lines);
+            bool pendingUpgrade = HasPendingUpgrade(frame);
+            if (pendingUpgrade || stats.Count < RequiredStatCount)
+            {
+                if (now - roundAt > 13000 && now - resultReadAt > ResultQuietMs)
+                {
+                    RunLog.Warn(LogArea, "词条未确认 · OCR=" + Readout(frame.Lines));
+                    return Fail(frame.HasEnhanceTune || pendingUpgrade
+                        ? "游戏仍停在强化预览或结算画面，未确认本轮升级结果。"
+                        : "未确认本轮新增词条，已停止强化。");
+                }
                 return default(EnhanceDecision);
             }
-            bool pass = EchoRules.Evaluate(stats, options, out string why);
-            reason = why ?? string.Empty;
+            confirmedStatCount = stats.Count;
+            ResetResultDismissal();
+            Round++;
+            bool pass = EchoRules.Evaluate(stats, options, out reason);
+            LastStage = new EnhanceStageReadout(Round, stats, options, pass, reason);
+            RunLog.Info(LogArea, string.Format("第 {0} 只第 {1} 档 · OCR={2} · 配对={3} · 判定={4}",
+                ItemNumber, Round, Readout(frame.Lines),
+                string.Join("，", stats.Select(stat => stat.Name + "=" + stat.Value.ToString(CultureInfo.InvariantCulture))),
+                pass ? (stats.Count == 5 ? "锁定" : "继续") : "弃置 · " + reason));
+            Evidence("stages", pass ? null : reason);
             if (!pass)
-            {
-                step = Step.Trash;
-                stepAt = now;
-                nextAction = now;
-                return default(EnhanceDecision);
-            }
-            step = stats.Count >= 5 ? Step.Lock : Step.Enhancing;
-            stepAt = now;
-            nextAction = now + 300;
+                Move(Step.Trash, now);
+            else if (stats.Count == 5)
+                Move(Step.Lock, now);
+            else
+                BeginMaterial(now);
             return default(EnhanceDecision);
         }
 
-        private EnhanceDecision Trash(EnhanceFrame frame, long now)
+        private static string Readout(List<OcrLine> lines)
         {
-            if (now - stepAt > 5000)
-                return Fail("无法确认声骸的弃置状态。");
-            if (frame.Dropped)
-            {
-                Discarded++;
-                ScreenshotKind = "failed";
-                ScreenshotReason = reason;
-                step = Step.Escaping;
-                stepAt = now;
-                nextAction = now;
-                return default(EnhanceDecision);
-            }
-            if (now >= nextAction)
-            {
-                nextAction = now + 1000;
-                return Key('Z');
-            }
-            return default(EnhanceDecision);
+            return string.Join(" | ", lines.Select(line => line.Text + "@" + line.Box.Y));
         }
 
-        private EnhanceDecision Lock(EnhanceFrame frame, long now)
+        private EnhanceDecision MarkEcho(EchoMark mark, bool locking, long now)
         {
-            if (now - stepAt > 5000)
-                return Fail("无法确认声骸的锁定状态。");
-            if (frame.Locked)
+            Status = locking ? "确认声骸锁定状态" : "确认声骸弃置状态";
+            if (mark != lastMark)
+                markerSamples = 0;
+            lastMark = mark;
+            if (mark == EchoMark.Unknown || ++markerSamples < 2)
+                return now - stepAt > 5000
+                    ? Fail(locking ? "无法确认声骸锁定状态。" : "无法确认声骸弃置状态。")
+                    : default(EnhanceDecision);
+            if (mark == EchoMark.Marked)
             {
-                Enhanced++;
-                ScreenshotKind = "success";
-                ScreenshotReason = string.Empty;
-                if (options.PauseAfterSuccess)
+                if (locking)
+                    Enhanced++;
+                else
+                    Discarded++;
+                Evidence(locking ? "success" : "failed", locking ? null : reason);
+                if (locking && options.PauseAfterSuccess)
                 {
                     Paused = true;
-                    Status = "找到符合条件的声骸，任务已暂停";
-                    return default(EnhanceDecision);
+                    Status = "找到符合条件的声骸，已暂停，可点击继续";
                 }
-                step = Step.Escaping;
-                stepAt = now;
-                nextAction = now;
+                else
+                    Move(Step.Escaping, now);
                 return default(EnhanceDecision);
             }
-            if (now >= nextAction)
-            {
-                nextAction = now + 1000;
-                return Key('C');
-            }
-            return default(EnhanceDecision);
+            if (now - stepAt > 5000)
+                return Fail(locking ? "无法确认声骸锁定成功。" : "无法确认声骸弃置成功。");
+            EnhanceDecision decision = Key(locking ? 'C' : 'Z', locking ? "锁定当前声骸" : "弃置当前声骸", now, 1100);
+            decision.Sent = sent => { markerSamples = 0; };
+            return decision;
         }
 
         private EnhanceDecision Escaping(EnhanceFrame frame, long now)
         {
+            Status = "返回背包声骸页";
             if (frame.HasCultivate)
             {
-                step = Step.WaitBag;
-                stepAt = now;
-                nextAction = now;
+                Move(Step.WaitBag, now);
                 return default(EnhanceDecision);
             }
             if (now - stepAt > 10000)
                 return Fail("返回背包超时。");
-            if (now >= nextAction)
-            {
-                nextAction = now + 900;
-                return Key('\u001b');
-            }
-            return default(EnhanceDecision);
+            return frame.HasEnhancePanel
+                ? Key((char)0x1b, "返回背包", now, 1100) : default(EnhanceDecision);
         }
 
-        private EnhanceDecision Fail(string message)
+        private void Move(Step next, long now, int delay = 0)
+        {
+            step = next;
+            stepAt = now;
+            nextAction = now + delay;
+            lastMark = EchoMark.Unknown;
+            markerSamples = 0;
+        }
+
+        internal EnhanceDecision Fail(string message)
         {
             step = Step.Failed;
-            Failure = message;
-            Status = message;
+            Failure = Status = message;
+            Evidence("error", message);
             return default(EnhanceDecision);
         }
 
-        private EnhanceDecision Click(Rectangle box, long now)
+        private void Evidence(string kind, string details = null)
         {
-            return new EnhanceDecision
-            {
-                Action = EnhanceAction.Click,
-                Point = new Point(box.X + box.Width / 2, box.Y + box.Height / 2)
-            };
+            ScreenshotKind = kind;
+            ScreenshotReason = details;
         }
 
-        private EnhanceDecision Click(double x, double y, EnhanceFrame frame)
+        private EnhanceDecision Click(Rectangle box, string label, long now, int delay, Action<long> sent = null)
         {
-            return new EnhanceDecision
-            {
-                Action = EnhanceAction.Click,
-                Point = new Point((int)(x * frame.Width), (int)(y * frame.Height))
-            };
+            return box.IsEmpty ? default(EnhanceDecision) :
+                Click(new Point(box.X + box.Width / 2, box.Y + box.Height / 2), label, now, delay, sent);
         }
 
-        private EnhanceDecision Key(char key)
+        private EnhanceDecision Click(Point point, string label, long now, int delay, Action<long> sent = null)
         {
-            return new EnhanceDecision { Action = EnhanceAction.Key, Key = key };
+            nextAction = now + delay;
+            return new EnhanceDecision { Action = EnhanceAction.Click, Point = point, Label = label, Sent = sent };
         }
 
-        private string Describe()
+        private EnhanceDecision Key(char key, string label, long now, int delay)
         {
-            switch (step)
-            {
-                case Step.WaitBag: return "等待背包声骸界面";
-                case Step.SelectEcho: return "选择 0 级声骸";
-                case Step.Enhancing: return "点击培养";
-                case Step.AddMaterial: return "阶段放入材料";
-                case Step.PressEnhance: return "强化并调谐";
-                case Step.Dialog: return "处理调谐弹窗";
-                case Step.Stats: return "读取词条";
-                case Step.Trash: return "弃置不合格声骸";
-                case Step.Lock: return "锁定合格声骸";
-                case Step.Escaping: return "返回背包";
-                case Step.Done: return "已完成";
-                default: return "已停止";
-            }
+            nextAction = now + delay;
+            return new EnhanceDecision { Action = EnhanceAction.Key, Key = key, Label = label };
         }
     }
 }

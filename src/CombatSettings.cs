@@ -11,7 +11,7 @@ namespace TideCombat
     public enum Skill { Resonance, Echo, Liberation }
     public enum SkillOrder { ResonanceFirst, LiberationFirst, EchoFirst }
     public enum SkillState { Unknown, Unavailable, Cooling, Ready }
-    public enum GameSource { Foreground, Background, Cloud, ManagedCloud }
+    public enum GameSource { Foreground, Background, Cloud, ManagedCloud, AutoLocal }
 
     public sealed class Rotation
     {
@@ -66,16 +66,20 @@ namespace TideCombat
         [OnDeserializing]
         private void ReadDefaults(StreamingContext context)
         {
+            Source = GameSource.AutoLocal;
             CheckLevitator = true;
             AutoRevive = true;
             ToolKey = "T";
             BagKey = "B";
+            GuidebookKey = "F2";
             Farm = FarmOptions.Defaults();
             Enhance = EnhanceOptions.Defaults();
             Domain = DomainOptions.Defaults();
             Nightmare = NightmareOptions.Defaults();
             Change = ChangeOptions.Defaults();
             Daily = DailyOptions.Defaults();
+            Cultivation = CultivationOptions.Defaults();
+            WorldAssist = new WorldAssistOptions();
         }
 
         public bool AutoTarget { get; set; }
@@ -90,6 +94,23 @@ namespace TideCombat
         public string LiberationKey { get; set; }
         public string ToolKey { get; set; }
         public string BagKey { get; set; }
+        public string GuidebookKey { get; set; }
+
+        internal ushort GuidebookVirtualKey()
+        {
+            string key = string.IsNullOrWhiteSpace(GuidebookKey) ? "F2" : GuidebookKey.Trim().ToUpperInvariant();
+            int number;
+            if (key.Length == 1 && FarmInput.VirtualKey(key[0]) != 0)
+                return FarmInput.VirtualKey(key[0]);
+            if (key.StartsWith("F", StringComparison.Ordinal) && int.TryParse(key.Substring(1), out number) &&
+                number >= 1 && number <= 24 && key == "F" + number)
+                return (ushort)(0x6F + number);
+            System.Windows.Forms.Keys named;
+            if (char.IsLetter(key[0]) && !key.Contains(",") && Enum.TryParse(key, true, out named) &&
+                Enum.IsDefined(typeof(System.Windows.Forms.Keys), named) && (int)named >= 8 && (int)named <= 254)
+                return (ushort)named;
+            throw new InvalidDataException("图鉴快捷键须为单个键，例如 F2、G 或 Tab。");
+        }
         public bool SupportOpener { get; set; }
         public bool IunoC6 { get; set; }
         public bool RocciaC6 { get; set; }
@@ -103,6 +124,8 @@ namespace TideCombat
         public NightmareOptions Nightmare { get; set; }
         public ChangeOptions Change { get; set; }
         public DailyOptions Daily { get; set; }
+        public CultivationOptions Cultivation { get; set; }
+        public WorldAssistOptions WorldAssist { get; set; }
         public string[] PartyCharacters { get; set; }
         public Rotation[] Slots { get; set; }
         public List<CharacterProfile> Characters { get; set; }
@@ -111,6 +134,7 @@ namespace TideCombat
         {
             return new CombatSettings
             {
+                Source = GameSource.AutoLocal,
                 AutoTarget = true,
                 AutoRevive = true,
                 UseLiberation = true,
@@ -123,6 +147,7 @@ namespace TideCombat
                 LiberationKey = "R",
                 ToolKey = "T",
                 BagKey = "B",
+                GuidebookKey = "F2",
                 SupportOpener = true,
                 CheckLevitator = true,
                 Farm = FarmOptions.Defaults(),
@@ -131,6 +156,8 @@ namespace TideCombat
                 Nightmare = NightmareOptions.Defaults(),
                 Change = ChangeOptions.Defaults(),
                 Daily = DailyOptions.Defaults(),
+                Cultivation = CultivationOptions.Defaults(),
+                WorldAssist = new WorldAssistOptions(),
                 PartyCharacters = new string[3],
                 Slots = new[] { Rotation.ForRole(BattleRole.Main), Rotation.ForRole(BattleRole.Secondary),
                     Rotation.ForRole(BattleRole.Support) },
@@ -146,6 +173,8 @@ namespace TideCombat
                 throw new InvalidDataException("三个技能键须为不同的英文字母。");
             if (ToolKey == null || ToolKey.Length != 1 || ToolKey[0] < 'A' || ToolKey[0] > 'Z')
                 throw new InvalidDataException("探索工具键须为英文字母。");
+            if (string.IsNullOrWhiteSpace(GuidebookKey)) GuidebookKey = "F2";
+            GuidebookVirtualKey();
             if (BagKey == null || BagKey.Length != 1 || BagKey[0] < 'A' || BagKey[0] > 'Z')
                 BagKey = "B";
             if (PartyCharacters == null)
@@ -156,12 +185,23 @@ namespace TideCombat
             }
             if (Farm == null)
                 Farm = FarmOptions.Defaults();
-            Enhance = EnhanceOptions.Defaults();
-            Domain = DomainOptions.Defaults();
-            Nightmare = NightmareOptions.Defaults();
-            Change = ChangeOptions.Defaults();
-            Daily = DailyOptions.Defaults();
+            if (Enhance == null)
+                Enhance = EnhanceOptions.Defaults();
+            if (Domain == null)
+                Domain = DomainOptions.Defaults();
+            if (Nightmare == null)
+                Nightmare = NightmareOptions.Defaults();
+            if (Change == null)
+                Change = ChangeOptions.Defaults();
+            if (Daily == null)
+                Daily = DailyOptions.Defaults();
+            if (Cultivation == null)
+                Cultivation = CultivationOptions.Defaults();
+            if (WorldAssist == null)
+                WorldAssist = new WorldAssistOptions();
             Farm.Validate();
+            Enhance.Validate();
+            Daily.Validate();
             if (Slots == null || Slots.Length != 3 || PartyCharacters.Length != 3 ||
                 Slots.Any(slot => slot == null) || Characters == null || !Enum.IsDefined(typeof(GameSource), Source))
                 throw new InvalidDataException("配置文件缺少技能布局或队伍设置。");

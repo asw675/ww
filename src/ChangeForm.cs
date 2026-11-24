@@ -11,7 +11,7 @@ namespace TideCombat
             "游戏语言需为简体中文。开始前：打开背包声骸界面，筛选要修改的声骸并按等级从 0 排序；" +
             "目标属性不能与当前主属性相同。", Theme.Muted);
 
-        internal ChangeForm(ChangeOptions options)
+        internal ChangeForm(ChangeOptions options, bool saveOnly = false)
         {
             Text = "批量改主属性";
             StartPosition = FormStartPosition.CenterParent;
@@ -50,7 +50,7 @@ namespace TideCombat
                 Margin = new Padding(0, 8, 0, 0)
             };
             var cancel = Theme.Button("取消");
-            var ok = Theme.Button("开始", true);
+            var ok = Theme.Button(saveOnly ? "保存" : "开始", true);
             cancel.Click += delegate { DialogResult = DialogResult.Cancel; Close(); };
             ok.Click += delegate { DialogResult = DialogResult.OK; Close(); };
             actions.Controls.Add(cancel);

@@ -27,6 +27,7 @@ namespace TideCombat
         private Rectangle viewport;
         private int commandId, mouseButtons;
         private bool pageVerified;
+        internal int RouteVersion { get; private set; }
         private BrowserButton? pendingTap;
 
         private struct BrowserButton
@@ -34,6 +35,7 @@ namespace TideCombat
             internal int Key;
             internal string Mouse;
             internal int MouseMask;
+            internal Point? MousePosition;
         }
 
         internal CloudBrowser() : this(Profile, IsOfficialPage) { }
@@ -82,7 +84,7 @@ namespace TideCombat
                 options + "--user-data-dir=\"" + profile + "\" " + (headless ? "" : "--app=") + "\"" + page + "\"";
         }
 
-        internal bool TryRead(CancellationToken token, out PixelFrame frame, out Size size)
+        internal bool TryRead(CancellationToken token, out PixelFrame frame, out Size size, bool nativePixels = false)
         {
             frame = default(PixelFrame);
             size = Size.Empty;
@@ -99,6 +101,7 @@ namespace TideCombat
                         socket = new ClientWebSocket();
                         socket.Options.Proxy = null;
                         socket.ConnectAsync(endpoint, call.Token).GetAwaiter().GetResult();
+                        RouteVersion++;
                     }
                     if (!RefreshViewport(call.Token)) return false;
                     size = viewport.Size;
@@ -107,7 +110,7 @@ namespace TideCombat
                         captureBeyondViewport = false, clip }, call.Token);
                     byte[] bytes = Convert.FromBase64String((string)result["data"]);
                     using (var stream = new MemoryStream(bytes, false))
-                    using (var bitmap = new Bitmap(stream)) frame = reader.Read(bitmap);
+                    using (var bitmap = new Bitmap(stream)) frame = reader.Read(bitmap, nativePixels);
                     return true;
                 }
                 catch (OperationCanceledException) { Reset(); return false; }
@@ -223,6 +226,39 @@ namespace TideCombat
             }
         }
 
+        internal bool Click(Point framePoint, Size frameSize, CancellationToken token, int hold = 0)
+        {
+            if (!pageVerified || socket == null || token.IsCancellationRequested || frameSize.IsEmpty ||
+                framePoint.X < 0 || framePoint.Y < 0 || framePoint.X >= frameSize.Width || framePoint.Y >= frameSize.Height)
+                return false;
+            var mouse = new BrowserButton
+            {
+                Mouse = "left", MouseMask = 1,
+                MousePosition = new Point(viewport.X + framePoint.X * viewport.Width / frameSize.Width,
+                    viewport.Y + framePoint.Y * viewport.Height / frameSize.Height)
+            };
+            using (var call = CancellationTokenSource.CreateLinkedTokenSource(token))
+            {
+                call.CancelAfter(700);
+                try
+                {
+                    pendingTap = mouse;
+                    SetButton(mouse, true, call.Token);
+                    if (hold > 0 && call.Token.WaitHandle.WaitOne(hold)) call.Token.ThrowIfCancellationRequested();
+                    SetButton(mouse, false, call.Token);
+                    pendingTap = null;
+                    return true;
+                }
+                catch (Exception error)
+                {
+                    if (!(error is WebSocketException || error is InvalidDataException || error is OperationCanceledException)) throw;
+                    ReleaseAll();
+                    Reset();
+                    return false;
+                }
+            }
+        }
+
         private static BrowserButton Translate(BattleAction action)
         {
             if (action.Kind == ActionKind.Target || action.Button == BattleButton.MiddleClick)
@@ -240,8 +276,9 @@ namespace TideCombat
             if (button.Mouse != null)
             {
                 mouseButtons = down ? mouseButtons | button.MouseMask : mouseButtons & ~button.MouseMask;
+                Point position = button.MousePosition ?? new Point(viewport.X + viewport.Width / 2, viewport.Y + viewport.Height / 2);
                 Command("Input.dispatchMouseEvent", new { type = down ? "mousePressed" : "mouseReleased", button = button.Mouse,
-                    buttons = mouseButtons, clickCount = 1, x = viewport.X + viewport.Width / 2, y = viewport.Y + viewport.Height / 2 }, token);
+                    buttons = mouseButtons, clickCount = 1, x = position.X, y = position.Y }, token);
                 return;
             }
             char letter = (char)button.Key;

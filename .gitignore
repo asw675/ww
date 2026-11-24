@@ -1,5 +1,6 @@
 /bin/
 /obj/
+/logs/
 /.vs/
 /CombatSettings.json
 /CombatConcerto.json

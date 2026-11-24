@@ -17,16 +17,17 @@ namespace TideCombat
         internal bool RawLiberation;
         internal bool AttackWhileDimmed, AttackBetweenCasts, RequiresLitResonance;
         internal bool CountHeldLiberationTime;
-        internal bool ConsumesExecution;
+        internal bool ConsumesExecution, SkipSkillRecord;
         internal bool DetectHiddenRelease;
         internal AnimationInput AnimationActions;
-        internal int AnimationDelay, CastTimeout, HeldAnimationTimeout;
+        internal int AnimationDelay, CastTimeout, HeldAnimationTimeout, LockLossProtection;
         internal Func<HudSnapshot, bool> Until;
         internal Func<HudSnapshot, bool> LiberationAvailable;
 
-        internal static Move Tap(BattleButton button, int settle = 100, int downMilliseconds = 0)
+        internal static Move Tap(BattleButton button, int settle = 100, int downMilliseconds = 0, bool recordSkill = true)
         {
-            return new Move { Type = MoveType.Tap, Button = button, Settle = settle, DownMilliseconds = downMilliseconds };
+            return new Move { Type = MoveType.Tap, Button = button, Settle = settle,
+                DownMilliseconds = downMilliseconds, SkipSkillRecord = !recordSkill };
         }
 
         internal static Move ExecutionAttack()
@@ -118,7 +119,7 @@ namespace TideCombat
     internal sealed class FighterMemory
     {
         internal string Id;
-        internal string RoverForm;
+        internal string RoverForm, RoverLastKnownForm;
         internal int Phase;
         internal double Resource;
         internal long FormUntil, LastTurn = -60000, LastHeavy = -60000;
@@ -147,6 +148,10 @@ namespace TideCombat
             LastFullHealerSwitch = -1;
             switch (Id)
             {
+                case "Rover":
+                    RoverLastKnownForm = RoverForm ?? RoverLastKnownForm;
+                    RoverForm = null;
+                    break;
                 case "Denia":
                 case "Jinhsi":
                 case "Changli":
@@ -337,7 +342,7 @@ namespace TideCombat
         internal bool Finished { get; private set; }
         internal bool CanContinueWithoutLock(long now)
         {
-            return Context.ContinueAfterLockLossUntil > 0 && now <= Context.ContinueAfterLockLossUntil ||
+            return now < Context.ContinueAfterLockLossUntil ||
                 activeHold && move != null && move.Type == MoveType.HoldLiberation && move.CountHeldLiberationTime ||
                 move != null && move.Type == MoveType.Incarnation && now - moveStart < move.Duration;
         }
@@ -491,6 +496,7 @@ namespace TideCombat
                     if (!sequence.MoveNext())
                     {
                         Finished = true;
+                        Context.ContinueAfterLockLossUntil = 0;
                         return default(BattleAction);
                     }
                     move = sequence.Current;
@@ -609,9 +615,11 @@ namespace TideCombat
             SkillState state = Context.Hud.Skills[(int)Skill.Resonance];
             bool ready = key != 0 && (state == SkillState.Ready || state == SkillState.Unavailable);
             long elapsed = now - moveStart;
-            if (Context.AnimationSeen || !ready && (!move.VerifyCast || elapsed >= move.AnimationDelay) || elapsed >= move.Duration)
+            bool timedOut = move.Duration > 0 && elapsed >= move.Duration;
+            if (Context.AnimationSeen || !ready && (!move.VerifyCast || elapsed >= move.AnimationDelay) ||
+                timedOut || move.Duration == 0 && sent)
             {
-                Context.CastTimedOut = elapsed >= move.Duration && ready && !Context.AnimationSeen;
+                Context.CastTimedOut = timedOut && ready && !Context.AnimationSeen;
                 if (sent) next = now + move.Settle;
                 FinishMove(sent);
                 return default(BattleAction);
@@ -728,7 +736,8 @@ namespace TideCombat
             sent = true;
             if (action.Button == BattleButton.Dodge && action.Kind != ActionKind.Release) Context.Memory.LastDodge = now;
             int skill = TurnContext.SkillIndex(move.Button);
-            if (skill >= 0 && action.Kind != ActionKind.Release && (first || move.Type != MoveType.CastResonance))
+            if (skill >= 0 && !move.SkipSkillRecord && action.Kind != ActionKind.Release &&
+                (first || move.Type != MoveType.CastResonance))
                 Context.Memory.LastSkill[skill] = now;
             if (action.Kind == ActionKind.Button && (skill == (int)Skill.Liberation ||
                 skill == (int)Skill.Resonance && (move.VerifyCast || move.AnimationActions != AnimationInput.None)) ||
@@ -810,6 +819,8 @@ namespace TideCombat
                 activeHold = true;
                 holdKey = action.NativeKey;
                 if (holdDeadline < 0) holdDeadline = now + move.Duration;
+                if (move.LockLossProtection > 0)
+                    Context.ContinueAfterLockLossUntil = now + move.LockLossProtection;
                 return;
             }
             if (move.Type == MoveType.Press)
@@ -831,6 +842,10 @@ namespace TideCombat
             move = null;
         }
 
-        public void Dispose() { sequence.Dispose(); }
+        public void Dispose()
+        {
+            Context.ContinueAfterLockLossUntil = 0;
+            sequence.Dispose();
+        }
     }
 }

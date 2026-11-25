@@ -391,32 +391,102 @@ namespace TideCombat
             Rectangle original = button;
             Sleep(500);
             if (Token.IsCancellationRequested || !Captured || !Vision.FindOptionalButton(Frame, .78, out button) ||
-                !original.IntersectsWith(button) || !Vision.FindOptionalCheckbox(Frame, out check) || !ClickOnRoute(check, route)) return;
+                !original.IntersectsWith(button) || !Vision.FindOptionalCheckbox(Frame, out check) ||
+                !ClickMenuButton(check, route)) return;
             Sleep(500);
             if (!Token.IsCancellationRequested && Captured && Vision.FindOptionalButton(Frame, .78, out button) &&
-                original.IntersectsWith(button) && ClickOnRoute(button, route)) Sleep(200);
+                original.IntersectsWith(button) && ClickMenuButton(button, route)) Sleep(200);
         }
 
-        internal bool ClickOnRoute(Rectangle control, int route, int hold = MenuClickHoldMilliseconds)
+        internal bool ClickOnRoute(Rectangle control, int route, int hold = MenuClickHoldMilliseconds, int settleMs = 0)
         {
             return !control.IsEmpty && ClickOnRoute(new Point(control.Left + control.Width / 2,
-                control.Top + control.Height / 2), route, hold);
+                control.Top + control.Height / 2), route, hold, settleMs);
         }
 
-        internal bool ClickOnRoute(Point point, int route, int hold = MenuClickHoldMilliseconds)
+        internal bool ClickOnRoute(Point point, int route, int hold = MenuClickHoldMilliseconds, int settleMs = 0)
         {
-            return Tick() && InputRouteVersion == route && SendClick(point, hold);
+            return Tick() && InputRouteVersion == route && SendClick(point, hold, settleMs);
         }
 
-        internal bool ClickMenuButton(Point point, bool retry = false, bool requireForeground = false)
+        internal bool ClickMenuButton(Point point, bool retry = false, bool requireForeground = false, int? route = null)
         {
             return Tick() && (!requireForeground || Window.Mode == GameSource.Foreground) &&
+                (!route.HasValue || route.Value == InputRouteVersion) &&
                 SendClick(point, MenuClickHoldMilliseconds, settleMs: 150, useWindowMessage: !retry);
         }
 
-        internal bool ClickMenuButton(Rectangle box)
+        internal bool ClickMenuButton(Rectangle box, int? route = null)
         {
-            return !box.IsEmpty && ClickMenuButton(new Point(box.X + box.Width / 2, box.Y + box.Height / 2));
+            return !box.IsEmpty && ClickMenuButton(new Point(box.X + box.Width / 2, box.Y + box.Height / 2), route: route);
+        }
+
+        internal bool ClickMenuTransition(int route, Func<Rectangle> findControl, Func<bool> destination,
+            int timeoutMs, int settleMs = 0, Func<Rectangle, Point> firstPoint = null)
+        {
+            return RunMenuTransition(() => Tick(), () => Captured,
+                () => !Token.IsCancellationRequested && InputRouteVersion == route,
+                () => clock.ElapsedMilliseconds, milliseconds => Token.WaitHandle.WaitOne(milliseconds), Sleep,
+                findControl, destination, (button, retry) =>
+                {
+                    Point point = !retry && firstPoint != null ? firstPoint(button) :
+                        new Point(button.Left + button.Width / 2, button.Top + button.Height / 2);
+                    if (retry) RunLog.Info("任务输入", "连续画面确认同一菜单控件，重试点击｜位置=" + point);
+                    return ClickMenuButton(point, retry: retry, route: route);
+                }, timeoutMs, settleMs);
+        }
+
+        internal static bool RunMenuTransition(Func<bool> capture, Func<bool> hasFrame, Func<bool> routeIsCurrent,
+            Func<long> now, Action<int> pause, Action<int> settle, Func<Rectangle> findControl,
+            Func<bool> destination, Func<Rectangle, bool, bool> dispatch, int timeoutMs, int settleMs)
+        {
+            const int pollMilliseconds = 60;
+            Rectangle original = Rectangle.Empty;
+            for (int attempt = 0; attempt < 2 && routeIsCurrent(); attempt++)
+            {
+                bool retry = attempt != 0;
+                long acquireBy = now() + Math.Min(retry ? 1500 : 900, Math.Max(250, timeoutMs));
+                Rectangle button = Rectangle.Empty, preceding = Rectangle.Empty;
+                do
+                {
+                    Rectangle observed = Rectangle.Empty;
+                    if (capture() && routeIsCurrent() && hasFrame())
+                    {
+                        if (destination() && routeIsCurrent() && hasFrame())
+                            return true;
+                        if (routeIsCurrent() && hasFrame())
+                            observed = findControl();
+                    }
+                    if (!routeIsCurrent()) return false;
+                    if (!hasFrame() || retry && !original.IntersectsWith(observed))
+                        observed = Rectangle.Empty;
+                    if (!observed.IsEmpty && (!retry || !preceding.IsEmpty && preceding.IntersectsWith(observed)))
+                    {
+                        button = observed;
+                        break;
+                    }
+                    preceding = observed;
+                    pause(pollMilliseconds);
+                }
+                while (routeIsCurrent() && now() < acquireBy);
+                if (button.IsEmpty || !routeIsCurrent() || !hasFrame()) return false;
+
+                if (!retry) original = button;
+                bool sent = dispatch(button, retry);
+                if (sent && settleMs > 0 && routeIsCurrent()) settle(settleMs);
+                // Failed input may have been delivered in part. Give the
+                // destination the same chance to appear before replaying.
+                long responseBy = now() + timeoutMs;
+                while (routeIsCurrent() && now() < responseBy)
+                {
+                    if (capture() && routeIsCurrent() && hasFrame() && destination() &&
+                        routeIsCurrent() && hasFrame())
+                        return true;
+                    if (!routeIsCurrent()) return false;
+                    pause(pollMilliseconds);
+                }
+            }
+            return false;
         }
 
         internal bool ClickMenuButton(double x, double y)
@@ -617,27 +687,6 @@ namespace TideCombat
             if (!Token.IsCancellationRequested)
                 RunLog.Info("任务识别", found ? "已识别标记 " + label : "等待标记 " + label + " 超时，限时 " + timeoutMs + " ms");
             return found;
-        }
-
-        internal bool WaitClick(string label, int timeoutMs, double threshold = .86)
-        {
-            var watch = Stopwatch.StartNew();
-            while (!Token.IsCancellationRequested && watch.ElapsedMilliseconds < timeoutMs)
-            {
-                Rectangle box;
-                if (FindNear(label, threshold, out box))
-                {
-                    Sleep(150);
-                    bool clicked = FindNear(label, threshold, out box) && Click(box);
-                    RunLog.Info("任务识别", "标记 " + label + " 已识别，点击" + (clicked ? "已发送" : "未发送"));
-                    if (clicked)
-                        return true;
-                }
-                Token.WaitHandle.WaitOne(80);
-            }
-            if (!Token.IsCancellationRequested)
-                RunLog.Info("任务识别", "等待可点击标记 " + label + " 超时，限时 " + timeoutMs + " ms");
-            return false;
         }
 
         internal bool InRealm { get { return Captured && Ui != null && Ui.InRealm; } }

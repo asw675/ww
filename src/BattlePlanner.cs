@@ -919,6 +919,15 @@ namespace TideCombat
             if (turn != null) turn.ReleasedByWindow(now);
         }
 
+        internal void CancelBlockedSwitch(long now)
+        {
+            if (requestedSlot < 0) return;
+            blockedSwitch[requestedSlot] = now + 4000;
+            requestedSlot = -1;
+            planningRoutineSwitch = routineSwitchRequested = helperSwitchRequested = false;
+            ClearSwitchExecution(now);
+        }
+
         private void IdentifyTeam(HudSnapshot hud, long now)
         {
             bool partyChanged = !knownParty;

@@ -105,32 +105,25 @@ namespace TideCombat
 
             ChangedPage = true;
             report("切换到" + TabName);
+            int tabRoute = world.InputRouteVersion;
             if (referenceSequence)
             {
-                int route = world.InputRouteVersion;
                 world.Sleep(ReferenceBeforeTabDelayMs);
-                if (!FindBookTab(out tab, out selected) || world.InputRouteVersion != route)
+                if (!FindBookTab(out tab, out selected) || world.InputRouteVersion != tabRoute)
                 {
                     SetFailure("参考页签等待后未确认同一输入路径的目标页签。");
                     return false;
                 }
                 if (!ShouldClickTab(selected)) return true;
-                if (world.ClickOnRoute(tab, route))
-                {
-                    world.Sleep(ReferenceAfterTabDelayMs);
-                    if (world.InputRouteVersion == route && WaitForSelectedBookTab(4500, route)) return true;
-                }
-                if (world.InputRouteVersion != route)
-                {
-                    SetFailure("切换页签期间输入路径已变化。");
-                    return false;
-                }
             }
-            else if (world.ClickMenuButton(tab) && WaitForSelectedBookTab(4500)) return true;
-            if (!requestedForeground && CanRecoverBookInForeground())
-                RecoverBookInForeground();
-            if (!world.Token.IsCancellationRequested && world.Window.Mode != GameSource.Background &&
-                RetryBookTabClick())
+            if (SelectBookTab(tabRoute)) return true;
+            if (world.InputRouteVersion != tabRoute)
+            {
+                SetFailure("切换页签期间输入路径已变化。");
+                return false;
+            }
+            if (!requestedForeground && CanRecoverBookInForeground() && RecoverBookInForeground() &&
+                SelectBookTab(world.InputRouteVersion))
                 return true;
             if (!world.Token.IsCancellationRequested)
                 SetFailure("已找到索拉指南，但未确认切换到" + TabName + "。");
@@ -149,33 +142,20 @@ namespace TideCombat
             return world.TryRecoverForegroundCapture();
         }
 
-        private bool RetryBookTabClick()
+        private bool SelectBookTab(int route)
         {
-            Rectangle tab;
-            bool selected;
-            if (!FindBookTab(out tab, out selected))
-                return false;
-            if (!ShouldClickTab(selected))
-                return true;
-            if (referenceSequence)
+            bool confirmed = world.ClickMenuTransition(route, () =>
             {
-                int route = world.InputRouteVersion;
-                if (!world.ClickOnRoute(tab, route)) return false;
-                world.Sleep(ReferenceAfterTabDelayMs);
-                return world.InputRouteVersion == route && WaitForSelectedBookTab(4500, route);
-            }
-            var center = new Point(tab.X + tab.Width / 2, tab.Y + tab.Height / 2);
-            return world.ClickMenuButton(center, retry: true) && WaitForSelectedBookTab(4500);
-        }
-
-        private bool WaitForSelectedBookTab(int timeoutMs, int? route = null)
-        {
-            bool confirmed = world.WaitUntil(delegate
+                Rectangle tab;
+                bool selected;
+                return !world.Terminal && InspectTab(out tab, out selected) && ShouldClickTab(selected) ?
+                    tab : Rectangle.Empty;
+            }, () =>
             {
                 Rectangle ignored;
                 bool active;
-                return (!route.HasValue || world.InputRouteVersion == route.Value) && InspectTab(out ignored, out active) && active;
-            }, timeoutMs);
+                return !world.Terminal && InspectTab(out ignored, out active) && active;
+            }, 4500, settleMs: referenceSequence ? ReferenceAfterTabDelayMs : 0);
             if (confirmed)
                 RunLog.Info(LogArea, "已确认切换到" + TabName);
             return confirmed;
@@ -212,13 +192,24 @@ namespace TideCombat
             {
                 RunLog.Info(LogArea, "已定位终端索拉指南入口，匹配方式=" + (matchedIcon ? "图标" : "文字") + "，位置=" + tile);
                 report("从游戏终端打开索拉指南");
-                var center = new Point(tile.X + tile.Width / 2, tile.Y + tile.Height / 2);
-                bool clicked = world.ClickMenuButton(center, retry: requireForeground, requireForeground: requireForeground);
-                if (clicked)
-                    WaitForBookTab(3200, out tab, out selected, out view);
-                else
-                    ReadBookView(out tab, out selected, out view);
-                LogBookAttempt("终端索拉指南入口", clicked, world.Window.Mode, tab, view);
+                bool opened = world.ClickMenuTransition(route, () =>
+                {
+                    if (!world.Terminal || requireForeground && world.Window.Mode != GameSource.Foreground)
+                        return Rectangle.Empty;
+                    Rectangle entry;
+                    if (world.Vision.FindTerminalGuide(world.Frame, out entry))
+                        return entry;
+                    entry = FindTerminalGuideTile(world.Read(.28, .48, .90, .92));
+                    return world.Terminal ? entry : Rectangle.Empty;
+                }, () =>
+                {
+                    Rectangle openedTab;
+                    bool active;
+                    GuideView openedView;
+                    return InspectBookView(out openedTab, out active, out openedView);
+                }, 3200);
+                ReadBookView(out tab, out selected, out view);
+                RunLog.Info(LogArea, "终端索拉指南入口确认=" + opened + "，结果=" + DescribeGuideView(view));
             }
             else
             {
@@ -226,10 +217,11 @@ namespace TideCombat
             }
 
             if (!tab.IsEmpty || view != GuideView.Terminal || world.Token.IsCancellationRequested ||
+                world.InputRouteVersion != route ||
                 ReadBookView(out tab, out selected, out view) || view != GuideView.Terminal)
                 return;
             report("关闭已识别的游戏终端");
-            bool escaped = world.Key((char)0x1B, requireForeground: requireForeground);
+            bool escaped = world.Key((char)0x1B, requireForeground: requireForeground, route: route);
             if (escaped)
                 WaitForUsableBookView(3200, out tab, out selected, out view,
                     allowTerminal: false, requireForeground: requireForeground);

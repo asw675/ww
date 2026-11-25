@@ -14,6 +14,7 @@ namespace TideCombat
         internal string LastAction;
         internal int Kills;
         internal int Attempts;
+        internal int SettledRounds;
         internal int Echoes;
         internal double Rate;
         internal Size Size;
@@ -27,14 +28,17 @@ namespace TideCombat
         private const string LogArea = "刷4C";
 
         internal static FarmReport Run(CombatSettings settings, FarmOptions options, IProgress<FarmReport> progress,
-            CancellationToken cancellation, ConcertoMeter concerto, Action<string, PixelFrame> recordEvidence = null)
+            CancellationToken cancellation, ConcertoMeter concerto, Action<string, PixelFrame> recordEvidence = null,
+            GameWindow taskWindow = null)
         {
             RunLog.Info(LogArea, string.Format("开始 · 来源={0} · 首领={1} · 目标轮数={2} · 搜寻={3} · 自动传送={4} · 图鉴分类={5} · 序号={6}",
                 settings.Source, options.Boss, options.RepeatCount, options.Pickup, options.Teleport, options.TeleportMode,
                 options.IndexFor(options.TeleportMode)));
             if (options.RepeatCount == 0)
                 return new FarmReport { State = "刷取完成（0 轮）", Finished = true };
-            var window = GameWindow.ForTask(settings.Source);
+            var window = taskWindow ?? GameWindow.ForTask(settings.Source);
+            IntPtr expectedWindow = window.Handle;
+            uint expectedProcess = window.ProcessId;
             var input = new WindowInput(window);
             var farmInput = new FarmInput(window);
             var vision = new HudVision(settings, concerto);
@@ -126,6 +130,9 @@ namespace TideCombat
                         bool captured = false;
                         if (window.TryLocate(out bounds, out state))
                         {
+                            if (taskWindow != null && !TaskContinuation.SameWindow(expectedWindow, expectedProcess,
+                                window.Handle, window.ProcessId))
+                                throw new InvalidOperationException("刷 4C 时未确认原游戏窗口，已停止输入。");
                             if (window.InputBlockedByIntegrity)
                                 throw new InputElevationRequiredException();
                             try
@@ -338,6 +345,14 @@ namespace TideCombat
                                     navTurn = double.NaN;
                                 }
                             }
+                            if (ui != null && farm.WantsBossCategory(now))
+                            {
+                                try { farm.ReadBossCategory(ui, frame, ocr); }
+                                catch (Exception error)
+                                {
+                                    LogScanErrorOnce(loggedScanErrors, "图鉴首领分类 OCR 失败", error);
+                                }
+                            }
                             if (!farm.WantsLevelScan)
                                 levelLines = null;
                             else if (ocr != null && (hud == null || !hud.Valid) && now - lastOcr >= 400)
@@ -461,7 +476,18 @@ namespace TideCombat
                                 new Size(frame.Width, frame.Height), bounds, echoes, navTurn, levelLines, pickupPrompt,
                                 bossName, pickupReceipt: scanPickup && FarmVision.HasEchoReceipt(frame));
                             int echoesBefore = farm.Echoes;
+                            int settledBefore = farm.SettledRounds;
                             FarmDecision decision = farm.Observe(farmFrame, now);
+                            if (progress != null && farm.SettledRounds != settledBefore)
+                            {
+                                progress.Report(new FarmReport
+                                {
+                                    State = farm.Status, LastAction = lastAction, Kills = farm.Kills, Attempts = farm.Attempts,
+                                    SettledRounds = farm.SettledRounds, Echoes = farm.Echoes, Rate = farm.EchoesPerHour,
+                                    Size = bounds.Size, Hud = hud
+                                });
+                                lastReport = elapsed;
+                            }
                             if (recordEvidence != null && farm.Echoes > echoesBefore)
                                 recordEvidence("farm-echo-receipt", frame);
                             state = farm.Status;
@@ -505,7 +531,8 @@ namespace TideCombat
                                     {
                                         RunLog.Info(LogArea, message);
                                         if (progress != null) progress.Report(new FarmReport { State = message,
-                                            Kills = farm.Kills, Attempts = farm.Attempts, Echoes = farm.Echoes, Rate = farm.EchoesPerHour,
+                                            Kills = farm.Kills, Attempts = farm.Attempts, SettledRounds = farm.SettledRounds,
+                                            Echoes = farm.Echoes, Rate = farm.EchoesPerHour,
                                             Size = bounds.Size, Hud = hud });
                                     });
                                     cancellation.ThrowIfCancellationRequested();
@@ -574,7 +601,8 @@ namespace TideCombat
                                 return new FarmReport
                                 {
                                     State = farm.Failure ?? farm.CompletionMessage ?? "刷取完成", Failure = farm.Failure, Finished = true,
-                                    Kills = farm.Kills, Attempts = farm.Attempts, Echoes = farm.Echoes,
+                                    Kills = farm.Kills, Attempts = farm.Attempts, SettledRounds = farm.SettledRounds,
+                                    Echoes = farm.Echoes,
                                     Rate = farm.EchoesPerHour,
                                     Size = bounds.Size, Hud = hud, LastAction = lastAction
                                 };
@@ -596,7 +624,7 @@ namespace TideCombat
                             progress.Report(new FarmReport
                             {
                                 State = state, LastAction = lastAction, Kills = farm.Kills, Attempts = farm.Attempts,
-                                Echoes = farm.Echoes,
+                                SettledRounds = farm.SettledRounds, Echoes = farm.Echoes,
                                 Rate = farm.EchoesPerHour,
                                 Size = bounds.Size, Hud = hud
                             });

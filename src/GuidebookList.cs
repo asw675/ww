@@ -50,6 +50,24 @@ namespace TideCombat
             return row < 0 ? DefaultTop : (area.Y + row) / (double)frame.Height;
         }
 
+        internal static Rectangle FindVerticalThumb(PixelFrame frame, Rectangle area,
+            int minimumLength, int minimumLight, int saturation)
+        {
+            Rectangle thumb = Rectangle.Empty;
+            for (int x = area.Left; x < area.Right; x++)
+            {
+                int top = area.Top;
+                for (int y = area.Top; y <= area.Bottom; y++)
+                {
+                    if (y < area.Bottom && frame.Pale(x, y, minimumLight, saturation)) continue;
+                    if (y - top >= minimumLength && y - top > thumb.Height)
+                        thumb = new Rectangle(x, top, 1, y - top);
+                    top = y + 1;
+                }
+            }
+            return thumb;
+        }
+
         // The game can draw several pale regions in this narrow strip. Follow contour
         // discovery order, with foreground connected diagonally and enclosed holes by edges.
         internal static int FindBar(bool[] mask, int width, int height, int minWidth, int minHeight)

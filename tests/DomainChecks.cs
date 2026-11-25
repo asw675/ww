@@ -1,6 +1,7 @@
 using System;
 using System.Drawing;
 using System.IO;
+using System.Linq;
 
 namespace TideCombat
 {
@@ -73,6 +74,155 @@ namespace TideCombat
             }
         }
 
+        internal static void SpendControlUsesFullButton()
+        {
+            var doublePrice = new OcrLine { Text = "120", Box = new Rectangle(954, 555, 42, 22), Score = .99f };
+            var doubleLabel = new OcrLine { Text = "双倍领取", Box = new Rectangle(1045, 552, 98, 26), Score = .99f };
+            var singlePrice = new OcrLine { Text = "60", Box = new Rectangle(439, 555, 32, 22), Score = .99f };
+            var singleLabel = new OcrLine { Text = "单倍领取", Box = new Rectangle(531, 552, 98, 26), Score = .99f };
+            var doubleButton = DomainMath.SpendControl(new[] { doubleLabel, doublePrice }, true, 120);
+            Require(doubleButton == Rectangle.Union(doublePrice.Box, doubleLabel.Box) &&
+                new Rectangle(902, 540, 294, 49).Contains(
+                    new Point(doubleButton.Left + doubleButton.Width / 2, doubleButton.Top + doubleButton.Height / 2)),
+                "双倍领取使用同一行的费用与按钮文字，共同定位实际可点击按钮");
+            Require(DomainMath.SpendControl(new[] { singleLabel, singlePrice }, false, 60) ==
+                Rectangle.Union(singlePrice.Box, singleLabel.Box),
+                "单倍领取也需要核对同一按钮内的费用与文字");
+
+            Require(DomainMath.SpendControl(new[] { doubleLabel, doublePrice }, true, 80).IsEmpty &&
+                DomainMath.SpendControl(new[] { doubleLabel, doublePrice }, false, 120).IsEmpty,
+                "费用和领取消耗类型都必须匹配");
+            doublePrice.Box = new Rectangle(1154, 555, 42, 22);
+            Require(DomainMath.SpendControl(new[] { doubleLabel, doublePrice }, true, 120).IsEmpty,
+                "按钮右侧的相同数字不能作为费用");
+            doublePrice.Box = new Rectangle(954, 495, 42, 22);
+            Require(DomainMath.SpendControl(new[] { doubleLabel, doublePrice }, true, 120).IsEmpty,
+                "其他行的相同数字不能作为费用");
+
+            var combined = new OcrLine
+            {
+                Text = "120 | 双倍领取", Box = new Rectangle(954, 552, 189, 26), Score = .99f
+            };
+            Require(DomainMath.SpendControl(new[] { combined }, true, 120) == combined.Box,
+                "费用和领取文字被 OCR 合并时仍使用同一按钮");
+        }
+
+        internal static void TacetSettlementConfirmsSpend()
+        {
+            var heading = new OcrLine { Text = "挑战成功", Box = new Rectangle(706, 239, 184, 53), Score = .99f };
+            var exit = new OcrLine { Text = "退出副本", Box = new Rectangle(535, 749, 108, 37), Score = .99f };
+            var restart = new OcrLine { Text = "重新挑战", Box = new Rectangle(955, 752, 106, 33), Score = .99f };
+            var remaining = new OcrLine { Text = "剩余106", Box = new Rectangle(941, 813, 85, 27), Score = .99f };
+            TacetSettlement settlement;
+            Require(TacetSettlement.HasSuccessHeading(new[] { heading }) &&
+                TacetSettlement.TryParseActions(new[] { exit, restart, remaining }, out settlement) &&
+                settlement.Exit == exit.Box && settlement.Restart == restart.Box && settlement.Remaining == 106 &&
+                settlement.ConfirmsSpend(226, 120) && !settlement.ConfirmsSpend(226, 60),
+                "无音区结果必须区分退出和重试，并读取同一区域中的结算余额");
+            Require(TacetSettlement.TryParseActions(new[] { exit, restart, remaining }, out settlement),
+                "后续模拟需要已定位的无音区结算控件");
+            var check = new TacetDebitCheck();
+            Require(!check.Observe(settlement, 226, 120), "一次读数不能直接确认扣减");
+            check.Reset();
+            Require(!check.Observe(settlement, 226, 120) && check.Observe(settlement, 226, 120) &&
+                DomainMath.CanContinue(226, 360, 120, 180, 60) && DomainMath.RewardCost(106, 60, 60, 360) == 60,
+                "两帧结算确认扣除 120 后，下一轮按剩下的 60 计划消费");
+            TacetSettlement incomplete, conflicting;
+            var other = new OcrLine { Text = "剩余166", Box = new Rectangle(942, 845, 85, 27), Score = .96f };
+            Require(!TacetSettlement.TryParseActions(new[] { restart, remaining }, out incomplete) &&
+                TacetSettlement.TryParseActions(new[] { exit, restart, remaining, other }, out conflicting) &&
+                !conflicting.ConfirmsSpend(226, 120),
+                "缺少退出控件或余额有冲突时保留未核实状态");
+        }
+
+        internal static void SpendRetryRequiresUnchangedBalanceAndControl()
+        {
+            var before = new DomainRunner.StaminaReadout
+            {
+                Current = 200, Backup = 360, Limit = 240, BackupKnown = true,
+                Position = new Rectangle(1178, 44, 103, 21)
+            };
+            var button = new Rectangle(954, 552, 189, 26);
+            Require(DomainRunner.CanRetrySpend(before, before, button, button),
+                "只有仍显示同一领奖按钮且确认两项余额和计数位置未变化才可以重试");
+
+            var observed = before;
+            observed.Current = 80;
+            Require(!DomainRunner.CanRetrySpend(before, observed, button, button), "已扣体力时不能再点");
+            observed.Current = 201;
+            Require(!DomainRunner.CanRetrySpend(before, observed, button, button), "当前余额变化时不重试");
+            observed = before;
+            observed.Backup = 359;
+            Require(!DomainRunner.CanRetrySpend(before, observed, button, button), "备用余额变化时不能再点");
+            observed = before;
+            observed.BackupKnown = false;
+            Require(!DomainRunner.CanRetrySpend(before, observed, button, button) &&
+                !DomainRunner.CanRetrySpend(observed, before, button, button), "前后均需要可确认的备用余额");
+            observed = before;
+            observed.Limit = 360;
+            Require(!DomainRunner.CanRetrySpend(before, observed, button, button), "体力上限变化时不能再点");
+            observed = before;
+            observed.Position = new Rectangle(340, 420, 103, 21);
+            Require(!DomainRunner.CanRetrySpend(before, observed, button, button),
+                "不同位置的体力计数不能证明原界面未变");
+            Require(!DomainRunner.CanRetrySpend(before, before, button, new Rectangle(439, 552, 190, 26)) &&
+                !DomainRunner.CanRetrySpend(before, before, button, new Rectangle(1145, 662, 227, 31)) &&
+                !DomainRunner.CanRetrySpend(before, before, button, Rectangle.Empty) &&
+                !DomainRunner.CanRetrySpend(before, before, Rectangle.Empty, button),
+                "不同按钮、画面几何变化或按钮消失时不能重复点击");
+        }
+
+        internal static void RewardInteractionRequiresSelectedRow()
+        {
+            var key = new Rectangle(821, 445, 20, 20);
+            var reward = new OcrLine { Text = "领取奖励", Box = new Rectangle(855, 444, 91, 22), Score = .99f };
+            var other = new OcrLine { Text = "重新挑战", Box = new Rectangle(855, 479, 91, 22), Score = .99f };
+            Require(DomainMath.IsSelectedRewardPrompt(new[] { other, reward }, key),
+                "领奖文字和 F 同行时才可以交互");
+
+            reward.Box = new Rectangle(855, 479, 91, 22);
+            other.Box = new Rectangle(855, 444, 91, 22);
+            Require(!DomainMath.IsSelectedRewardPrompt(new[] { reward, other }, key),
+                "另一行可以领奖，但当前 F 选中重新挑战时不能按 F 领奖");
+
+            reward.Box = new Rectangle(855, 444, 91, 22);
+            reward.Score = .2f;
+            Require(!DomainMath.IsSelectedRewardPrompt(new[] { reward }, key),
+                "低置信度的领奖文字不能作为交互依据");
+            reward.Score = .99f;
+            reward.Text = "领取奖励预览";
+            Require(!DomainMath.IsSelectedRewardPrompt(new[] { reward }, key),
+                "含领奖字样的其他说明文字不是领奖入口");
+        }
+
+        internal static void LeaveDialogSeparatesRestartAndExit()
+        {
+            var size = new Size(1600, 900);
+            var title = new OcrLine { Text = "确认离开", Box = new Rectangle(738, 413, 109, 38), Score = .99f };
+            var left = new OcrLine { Text = "重新挑战", Box = new Rectangle(485, 549, 105, 32), Score = .99f };
+            var right = new OcrLine { Text = "确认", Box = new Rectangle(1020, 548, 60, 34), Score = .99f };
+            var recognized = FarmVision.ParseLeaveDialog(new[] { left, right, title }, size);
+            Require(recognized.Recognized && recognized.Restart == left.Box && recognized.Exit == right.Box,
+                "确认离开弹窗的左侧重新挑战与右侧确认必须定位到各自的文字");
+
+            title.Text = "领取奖励";
+            var reward = FarmVision.ParseLeaveDialog(new[] { left, right, title }, size);
+            Require(!reward.Recognized && reward.Restart.IsEmpty && reward.Exit.IsEmpty,
+                "领奖弹窗不能复用离开或重开按钮");
+            title.Text = "跳过剧情";
+            var skip = FarmVision.ParseLeaveDialog(new[] { left, right, title }, size);
+            Require(!skip.Recognized && skip.Restart.IsEmpty && skip.Exit.IsEmpty,
+                "跳过弹窗的确认按钮不能当成离开副本");
+
+            title.Text = "确认离开";
+            Rectangle leftBox = left.Box;
+            left.Box = right.Box;
+            right.Box = leftBox;
+            var swapped = FarmVision.ParseLeaveDialog(new[] { left, right, title }, size);
+            Require(swapped.Restart.IsEmpty && swapped.Exit.IsEmpty,
+                "标签跑到另一侧后，不能再作为该操作的点击坐标");
+        }
+
         internal static void GuideScrollbar()
         {
             var size = new Size(2100, 900);
@@ -90,6 +240,49 @@ namespace TideCombat
                 for (int x = 5; x < 10; x++) mask[y * width + x] = true;
             Require(GuidebookList.FindBar(mask, width, height, 3, 6) == 15,
                 "读取符合尺寸和颜色的滚动条顶部");
+        }
+
+        internal static void TacetGuideButtons()
+        {
+            Rectangle area = GuidebookList.Area(new Size(1600, 900), .80, .213, .964, .859);
+            var go = new Rectangle(1409, 243, 49, 32);
+            var second = new Rectangle(1414, 372, 87, 29);
+            var third = new Rectangle(1413, 555, 89, 31);
+            var sixth = new Rectangle(1414, 684, 87, 28);
+            var buttons = DomainMath.TacetEntryButtons(new[]
+            {
+                new OcrLine { Text = "直接挑战", Box = sixth, Score = .99f },
+                new OcrLine { Text = "前往", Box = go, Score = .99f },
+                new OcrLine { Text = "直接挑战", Box = second, Score = .99f },
+                new OcrLine { Text = "直接挑战", Box = new Rectangle(1415, 685, 86, 27), Score = .97f },
+                new OcrLine { Text = "直接 挑战", Box = third, Score = .99f },
+                new OcrLine { Text = "…", Box = new Rectangle(1504, 628, 28, 22), Score = .99f },
+                new OcrLine { Text = "直接挑战次数", Box = new Rectangle(1400, 450, 110, 29), Score = .99f },
+                new OcrLine { Text = "直接挑战", Box = new Rectangle(1414, 757, 87, 28), Score = .99f },
+                new OcrLine { Text = "直接挑战", Box = new Rectangle(1414, 638, 87, 28), Score = .50f },
+                null
+            }, area);
+
+            Require(buttons.SequenceEqual(new[] { go, second, third, sixth }),
+                "无音区应按垂直顺序保留完整且可信的入口，排除行间误识别、重复项及被列表裁切的下一行");
+            Point click = DomainMath.VerifiedReferencePoint(buttons[3], Point.Empty);
+            Require(click == new Point(1457, 698), "第 6 项应点击冰原运输港的直接挑战文字中心");
+        }
+
+        internal static void StableTacetGuideButtons()
+        {
+            var first = new Rectangle(1410, 240, 50, 32);
+            var second = new Rectangle(1414, 684, 87, 28);
+            var rows = new[] { first, second };
+            Require(DomainMath.SameBookRows(rows, new[]
+            {
+                new Rectangle(1412, 241, 47, 31), new Rectangle(1410, 682, 90, 29)
+            }, 900), "同一列表允许 OCR 框的少量变化");
+            Require(!DomainMath.SameBookRows(rows, new[] { first, new Rectangle(1414, 556, 87, 28) }, 900) &&
+                !DomainMath.SameBookRows(rows, new[] { second, first }, 900) &&
+                !DomainMath.SameBookRows(rows, new[] { first }, 900) &&
+                !DomainMath.SameBookRows(new Rectangle[0], new Rectangle[0], 900),
+                "滚动、重排、遮挡或空画面均不能作为同一组选项的依据");
         }
 
         internal static void Options()

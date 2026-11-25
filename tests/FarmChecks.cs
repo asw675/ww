@@ -248,6 +248,27 @@ namespace TideCombat
             }
             Require(category, "应点击左侧 Boss 图鉴页签");
             Require(kind, "应点击二级分类页签");
+
+            var verifiedFarm = new Farm4C(CombatSettings.Defaults(), options);
+            Step(verifiedFarm, Hud(false), Ui(), ref now, 100);
+            Step(verifiedFarm, Hud(false), Ui(), ref now, 100);
+            var verifiedBook = new FarmUi { Book = true, BookSelected = true, BossCategoryObserved = true,
+                BossCategoryBox = new Rectangle(239, 429, 90, 26) };
+            verifiedBook.BossRows.Add(new Rectangle(1480, 300, 30, 50));
+            Step(verifiedFarm, null, verifiedBook, ref now, 500);
+            FarmDecision firstKind = Step(verifiedFarm, null, verifiedBook, ref now, 500);
+            Require(firstKind.Request == FarmRequest.Click && verifiedBook.BossCategoryBox.Contains(firstKind.Point) &&
+                !firstKind.RetryInput, "先点击已识别的分类文字");
+            FarmDecision retryKind = Step(verifiedFarm, null, verifiedBook, ref now, 2100);
+            Require(retryKind.Request == FarmRequest.Click && verifiedBook.BossCategoryBox.Contains(retryKind.Point) &&
+                retryKind.RetryInput, "分类未切换时重试同一分类，不能点击已有的首领行");
+            Require(Step(verifiedFarm, null, verifiedBook, ref now, 2100).Request == FarmRequest.None,
+                "分类一直未切换时停在原步骤");
+            verifiedBook.BossCategorySelected = true;
+            Step(verifiedFarm, null, verifiedBook, ref now, 500);
+            FarmDecision verifiedRow = Step(verifiedFarm, null, verifiedBook, ref now, 500);
+            Require(verifiedRow.Request == FarmRequest.Click && verifiedBook.BossRows[0].Contains(verifiedRow.Point),
+                "分类确认选中后才能点击相应首领列表");
         }
 
         internal static void ClaimRestart()
@@ -305,6 +326,15 @@ namespace TideCombat
                     second = true;
             }
             Require(second, "应按序号点击第二个 Boss 行");
+
+            var map = new FarmUi { Teleport = true, TeleportBox = new Rectangle(1390, 794, 117, 54) };
+            FarmDecision travel = Step(farm, null, map, ref now, 1400);
+            Require(travel.Request == FarmRequest.Click && !travel.RetryInput, "首次传送使用菜单点击");
+            Require(Step(farm, null, map, ref now, 1000).Request == FarmRequest.None, "仍在传送入口时先等待画面变化");
+            FarmDecision retry = Step(farm, null, map, ref now, 1100);
+            Require(retry.Request == FarmRequest.Click && retry.RetryInput && map.TeleportBox.Contains(retry.Point),
+                "仅在相同传送按钮仍在时换用备用点击");
+            Require(Step(farm, null, map, ref now, 2200).Request == FarmRequest.None, "同一传送入口只重试一次");
         }
 
         internal static void EchoEndsCombat()
@@ -370,6 +400,7 @@ namespace TideCombat
             var prompt = Ui();
             prompt.FPrompt = true;
             FarmDecision stale = Step(farm, Hud(false), prompt, ref now, absorb: true, receipt: true);
+            Require(farm.SettledRounds == 0, "a confirmed kill with pickup still pending is not a settled round");
             Require(stale.Request == FarmRequest.None, "前一条拾取通知还在时应等待");
             FarmDecision attempt = Step(farm, Hud(false), prompt, ref now, absorb: true);
             Require(attempt.PickupKey && farm.Echoes == 0, "发出 F 后仍需等待新通知");
@@ -384,6 +415,7 @@ namespace TideCombat
             FarmDecision waitFinal = Step(farm, null, team, ref now, 4999);
             Require(!farm.Finished && waitFinal.Request == FarmRequest.None, "最后一轮确认掉落且无宝箱也等待五秒，不点击后续入口");
             FarmDecision finish = Step(farm, null, team, ref now, 1);
+            Require(farm.SettledRounds == 1, "successful loot and claim transitions settle exactly one round");
             Require(farm.Finished && farm.Failure == null && finish.Request == FarmRequest.None,
                 "达到次数上限时不得点击下一轮组队按钮");
         }
@@ -525,9 +557,12 @@ namespace TideCombat
             ConfirmDrop(farm, ref now);
             Require(farm.Echoes == 1 && farm.EchoesPerHour == 3600, "首轮用时少于一秒时按一秒计算");
             clock = clock.AddMilliseconds(3599900);
+            Step(farm, Hud(false), Ui(), ref now);
+            Require(farm.SettledRounds == 1, "finishing loot settles the confirmed round before a later popup");
             Require(farm.EchoesPerHour == 3600, "两次吸收之间保留上次显示的速率");
             farm.Stop("已获得声骸时遇到弹窗");
             farm = farm.RestartAfterPopup(() => true);
+            Require(farm.SettledRounds == 1, "popup recovery retains confirmed settled rounds");
             Require(farm.Echoes == 1 && farm.Kills == 1 && farm.EchoesPerHour == 3600, "重试时保留累计战果");
             ReadyToPickUp(options, ref now, farm);
             ConfirmDrop(farm, ref now);
@@ -844,6 +879,7 @@ namespace TideCombat
             Step(farm, Hud(false), idle, ref now, 1000);
             Require(farm.MovementKey == 'W', "应进入战后直走搜寻");
             Step(farm, Hud(true), idle, ref now);
+            Require(farm.SettledRounds == 0, "a target returning during loot must not settle its round");
             Require(farm.MovementKey == '\0' && farm.Kills == 0, "敌人仍在场时停止拾取走位并撤回击杀计数");
             for (int i = 0; i < 4; i++)
                 Step(farm, Hud(true), idle, ref now, 400);
@@ -1172,6 +1208,11 @@ namespace TideCombat
             Step(neverStarts, Hud(false), Ui(), ref now, 5001);
             Require(neverStarts.Phase == "Loot" && neverStarts.Attempts == 1 && neverStarts.Kills == 0,
                 "未检测到战斗进入掉落检查但不产生虚假击杀");
+            var nextChallenge = Ui();
+            nextChallenge.Challenge = true;
+            Step(neverStarts, Hud(false), nextChallenge, ref now);
+            Require(neverStarts.Phase == "Claim" && neverStarts.SettledRounds == 0,
+                "passing through loot after a no-combat timeout must not settle the attempted round");
 
             var profile = new Farm4C(CombatSettings.Defaults(), FarmOptions.Defaults());
             Step(profile, Hud(false), new FarmUi { InRealm = true }, ref now);

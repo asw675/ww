@@ -51,6 +51,11 @@ namespace TideCombat
             "点击空白处关闭", "點擊空白處關閉", "点击任意处关闭", "點擊任意處關閉", "点击任意位置关闭",
             "點擊任意位置關閉", "点击空白区域关闭", "點擊空白區域關閉", "Click anywhere to close"
         };
+        private static readonly string[] ObtainedReceiptTitle = { "获得", "獲得", "Obtained" };
+        private static readonly string[] ContinueReceiptButtons =
+        {
+            "点击空白处继续", "點擊空白處繼續", "Click a blank area to continue", "Click anywhere to continue"
+        };
 
         internal static bool Contains(IEnumerable<OcrLine> lines, params string[] accepted)
         {
@@ -58,6 +63,22 @@ namespace TideCombat
                 if (Matches(line, accepted))
                     return true;
             return false;
+        }
+
+        internal static Rectangle ReadObtainedReceiptDismissal(PixelFrame frame, OcrReader ocr)
+        {
+            if (frame.Width <= 0 || frame.Height <= 0 || ocr == null)
+                return Rectangle.Empty;
+            var heading = ocr.ReadRelative(frame, .39, .19, .61, .34, centered: true);
+            if (UniqueButton(heading, ObtainedReceiptTitle).IsEmpty)
+                return Rectangle.Empty;
+            return ObtainedReceiptDismissal(heading, ocr.ReadRelative(frame, .36, .83, .64, .95, centered: true));
+        }
+
+        internal static Rectangle ObtainedReceiptDismissal(IEnumerable<OcrLine> heading, IEnumerable<OcrLine> footer)
+        {
+            return UniqueButton(heading, ObtainedReceiptTitle).IsEmpty ? Rectangle.Empty :
+                UniqueButton(footer, ContinueReceiptButtons);
         }
 
         private static Rectangle MailNoticeArea(PixelFrame frame)
@@ -77,7 +98,11 @@ namespace TideCombat
         internal static bool HasMailClaimedNotice(PixelFrame frame, PixelFrame before, OcrReader ocr)
         {
             Rectangle area = MailNoticeArea(frame);
-            if (area.IsEmpty || area.Width != before.Width || area.Height != before.Height)
+            if (area.IsEmpty || ocr == null)
+                return false;
+            if (Contains(ocr.Read(frame, area), MailClaimedNotices))
+                return true;
+            if (area.Width != before.Width || area.Height != before.Height)
                 return false;
 
             // The translucent notice fades over the mail list, which otherwise remains visible.

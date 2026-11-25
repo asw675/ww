@@ -1,11 +1,37 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
 using System.Threading;
 
 namespace TideCombat
 {
-    internal enum CombatOutcome { Finished, NoCombat, Dead, Timeout, Unverified, Captured }
+    internal enum CombatOutcome { Finished, NoCombat, Dead, Timeout, Unverified, Captured, RevivePrompt }
+    internal enum CombatDeathDialog { Unknown, ReviveItems, Defeat }
+
+    internal sealed class UnresolvedCombatException : InvalidOperationException
+    {
+        internal UnresolvedCombatException(string message) : base(message) { }
+    }
+
+    internal sealed class CombatDeathCheck
+    {
+        private long first = -1;
+        private int samples;
+        internal bool Pending { get { return samples != 0; } }
+
+        internal bool Observe(bool candidate, long now)
+        {
+            if (!candidate)
+            {
+                first = -1;
+                samples = 0;
+                return false;
+            }
+            if (first < 0) first = now;
+            return ++samples >= 3 && now - first >= 450;
+        }
+    }
 
     internal sealed class CombatClearCheck
     {
@@ -71,13 +97,15 @@ namespace TideCombat
         internal static CombatOutcome Engage(WorldSession world, CombatSettings settings, CancellationToken token,
             int timeoutMs = 120000, int waitForCombatMs = 0, bool seekTargets = false, int approachMs = 0,
             Action onCombatStarted = null, bool timeoutFromEntry = false, Func<long, bool> captureDuringCombat = null,
-            bool? openWorldAutoCombat = null)
+            bool? openWorldAutoCombat = null, bool returnRevivePrompt = false,
+            Action<string, PixelFrame> recordEvidence = null)
         {
             bool cloud = settings.Source == GameSource.Cloud || settings.Source == GameSource.ManagedCloud;
             var planner = CreateTaskPlanner(settings, cloud, world.ChallengeObservation, () => world.Now, openWorldAutoCombat);
             var watch = Stopwatch.StartNew();
             var clearCheck = new CombatClearCheck();
             var postFight = new CombatPostFightCheck();
+            var deathCheck = new CombatDeathCheck();
             bool noOverallTimeout = timeoutMs == 0 && waitForCombatMs > 0 && !timeoutFromEntry;
             int searchMs = waitForCombatMs > 0 ? waitForCombatMs : timeoutMs;
             RunLog.Info("任务战斗", string.Format("准备战斗，主动锁敌={0}，接近={1} ms，等待锁敌={2} ms，战斗时限={3} ms",
@@ -89,6 +117,7 @@ namespace TideCombat
             bool triedForeground = false;
             long invalidCaptureSince = -1;
             int inputRoute = world.InputRouteVersion;
+            int dismissedRevivePrompts = 0;
             try
             {
                 while (!token.IsCancellationRequested)
@@ -98,6 +127,7 @@ namespace TideCombat
                         return ReportOutcome(CombatOutcome.Timeout, watch);
                     if (!world.Tick(false, planner, now))
                     {
+                        deathCheck.Observe(false, now);
                         if (invalidCaptureSince < 0) invalidCaptureSince = now;
                         clearCheck.Observe(false, false, now);
                         if (postFight.Active)
@@ -130,11 +160,47 @@ namespace TideCombat
                         inputRoute = world.InputRouteVersion;
                         walking = false;
                         planner.HoldsCanceled(now);
+                        deathCheck.Observe(false, now);
                     }
-                    if (hud.Dead || world.Ui != null && world.Ui.Death)
-                        return ReportOutcome(CombatOutcome.Dead, watch);
-
                     FarmUi ui = world.Ui;
+                    bool reviveCandidate = hud.Dead || ui != null && ui.Death;
+                    bool firstCandidate = !deathCheck.Pending;
+                    bool stableReviveCandidate = deathCheck.Observe(reviveCandidate, now);
+                    if (reviveCandidate)
+                    {
+                        clearCheck.Observe(false, false, now);
+                        if (firstCandidate)
+                        {
+                            if (walking)
+                            {
+                                world.KeyUp('W');
+                                walking = false;
+                            }
+                            world.BattleInput.ReleaseAll();
+                            planner.HoldsCanceled(now);
+                        }
+                        if (!stableReviveCandidate)
+                        {
+                            token.WaitHandle.WaitOne(90);
+                            continue;
+                        }
+                        if (recordEvidence != null) recordEvidence("after-combat-revive-check", world.Frame);
+                        CombatDeathDialog dialog = ReadDeathDialog(world.Frame, world.Ocr);
+                        if (dialog == CombatDeathDialog.Defeat)
+                            return ReportOutcome(CombatOutcome.Dead, watch);
+                        if (dialog == CombatDeathDialog.ReviveItems)
+                        {
+                            if (returnRevivePrompt) return ReportOutcome(CombatOutcome.RevivePrompt, watch);
+                            if (dismissedRevivePrompts++ == 0 && TryDismissReviveItems(world, inputRoute))
+                            {
+                                deathCheck.Observe(false, now);
+                                planner.CancelBlockedSwitch(now);
+                                continue;
+                            }
+                        }
+                        throw new UnresolvedCombatException("战斗中出现疑似复苏界面，未确认可以续打，已停在当前场景。");
+                    }
+
                     bool playable = hud.Valid && ui != null && !ui.Claim && !ui.Challenge &&
                         ui.ConfirmBox.IsEmpty && !hud.ChallengePrompt;
                     bool enemyVisible = hud.Locked || hud.EnemyHealth;
@@ -289,6 +355,42 @@ namespace TideCombat
         internal static bool TryCaptureDuringCombat(bool playable, bool started, Func<long, bool> capture, long now)
         {
             return playable && started && capture != null && capture(now);
+        }
+
+        internal static CombatDeathDialog ReadDeathDialog(PixelFrame frame, OcrReader ocr)
+        {
+            if (ocr == null) return CombatDeathDialog.Unknown;
+            try
+            {
+                CombatDeathDialog title = ClassifyDeathText(ocr.ReadRelative(frame, .14, .145, .43, .28, centered: true));
+                return title != CombatDeathDialog.Unknown ? title :
+                    ClassifyDeathText(ocr.ReadRelative(frame, .26, .17, .74, .51, centered: true));
+            }
+            catch (Microsoft.ML.OnnxRuntime.OnnxRuntimeException error)
+            {
+                RunLog.Error("任务战斗", "复苏画面 OCR 失败", error);
+                return CombatDeathDialog.Unknown;
+            }
+        }
+
+        internal static CombatDeathDialog ClassifyDeathText(IEnumerable<OcrLine> lines)
+        {
+            if (DailyClaimVision.Contains(lines, "选择复苏物品", "選擇復甦物品", "選擇復蘇物品",
+                "选择复活物品", "選擇復活物品", "Select Revival Item", "Select Revival Items"))
+                return CombatDeathDialog.ReviveItems;
+            if (DailyClaimVision.Contains(lines, "挑战失败", "挑戰失敗", "全员倒下", "全員倒下",
+                "Challenge Failed", "All Resonators Defeated"))
+                return CombatDeathDialog.Defeat;
+            return CombatDeathDialog.Unknown;
+        }
+
+        private static bool TryDismissReviveItems(WorldSession world, int route)
+        {
+            if (!world.Tick() || world.InputRouteVersion != route ||
+                ReadDeathDialog(world.Frame, world.Ocr) != CombatDeathDialog.ReviveItems ||
+                !world.Key((char)27, route: route)) return false;
+            return world.WaitStable(() => world.InputRouteVersion == route && world.VerifiedWorld &&
+                world.TeamHud && !world.Hud.Dead, 4200, 180);
         }
 
         private static CombatOutcome ReportOutcome(CombatOutcome outcome, Stopwatch watch)

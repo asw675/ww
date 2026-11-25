@@ -470,18 +470,15 @@ namespace TideCombat
             if (!world.Key((char)27, route: expectedRoute) || !LoginDelay(1500, expectedRoute)) return false;
             Rectangle setting = Rectangle.Empty;
             if (!world.WaitUntil(() => RouteStillMatches(expectedRoute) && world.FindNear("esc_setting", .80, out setting), 10000)) return false;
-            if (expectedRoute.HasValue)
-            {
-                if (!world.Captured || !world.ClickOnRoute(new Point((int)(world.Frame.Width * .04),
-                    (int)(world.Frame.Height * .96)), expectedRoute.Value, 20)) return false;
-            }
-            else if (!world.Click(.04, .96, 20)) return false;
+            int route = expectedRoute.GetValueOrDefault(world.InputRouteVersion);
+            if (!world.Captured || !world.ClickMenuButton(new Point((int)(world.Frame.Width * .04),
+                (int)(world.Frame.Height * .96)), route: route)) return false;
             if (!LoginDelay(1000, expectedRoute)) return false;
             Rectangle confirm = Rectangle.Empty;
             if (world.WaitUntil(() => RouteStillMatches(expectedRoute) &&
                 (world.FindNear("confirm_btn_hcenter_vcenter", .60, out confirm) ||
                 world.FindNear("confirm_btn_highlight_hcenter_vcenter", .60, out confirm)), 10000) &&
-                !(expectedRoute.HasValue ? world.ClickOnRoute(confirm, expectedRoute.Value, 20) : world.Click(confirm, 20)))
+                !world.ClickMenuButton(confirm, route: expectedRoute.GetValueOrDefault(world.InputRouteVersion)))
                 return false;
             bool visible = world.WaitStable(() => RouteStillMatches(expectedRoute) && (FindCombo() != null || Dropdown() != null), 60000, 2000);
             token.ThrowIfCancellationRequested();
@@ -538,7 +535,7 @@ namespace TideCombat
                 token.ThrowIfCancellationRequested();
                 throw new InvalidOperationException("等待账号下拉框超时。");
             }
-            if (!world.Click(dropdown.Box, 20)) return false;
+            if (!world.ClickMenuButton(dropdown.Box, route: world.InputRouteVersion)) return false;
             world.Sleep(2000);
             token.ThrowIfCancellationRequested();
             return Dropdown() == null;
@@ -576,7 +573,7 @@ namespace TideCombat
                         offered.Add(key);
                         if (next == null && !done.Contains(key)) next = line;
                     }
-                    if (next == null || !world.Click(next.Box, 20)) return false;
+                    if (next == null || !world.ClickMenuButton(next.Box, route: world.InputRouteVersion)) return false;
                     selected = next.Text;
                     world.Sleep(2000);
                     return true;
@@ -630,7 +627,7 @@ namespace TideCombat
                 if (!world.WaitUntil(() =>
                 {
                     OcrLine row = FindTargetRow(world.Read(0, 0, 1, 1), key);
-                    if (row == null || !world.Click(row.Box, 20)) return false;
+                    if (row == null || !world.ClickMenuButton(row.Box, route: world.InputRouteVersion)) return false;
                     world.Sleep(2000);
                     return true;
                 }, 10000))
@@ -657,7 +654,7 @@ namespace TideCombat
                 var lines = world.Read(0, 0, 1, 1);
                 if (!world.Captured) return false;
                 Point button = LoginScreen.AccountLoginPoint(new Size(world.Frame.Width, world.Frame.Height), lines);
-                if (!world.ClickOnRoute(button, world.InputRouteVersion, 20))
+                if (!world.ClickMenuButton(button, route: world.InputRouteVersion))
                 {
                     token.ThrowIfCancellationRequested();
                     return false;

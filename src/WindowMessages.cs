@@ -10,6 +10,8 @@ namespace TideCombat
     internal sealed class WindowMessages
     {
         private const uint VisibleInteractiveChildren = 0x0001 | 0x0002 | 0x0004;
+        private const int TargetHoverMilliseconds = 32;
+        private const int TargetDownMilliseconds = 45;
         private readonly Dictionary<BattleButton, Message> holds = new Dictionary<BattleButton, Message>();
         private int mouseFlags;
         private IntPtr target;
@@ -176,7 +178,8 @@ namespace TideCombat
             return true;
         }
 
-        internal bool Send(BattleAction action, IntPtr window, uint process, CancellationToken token)
+        internal bool Send(BattleAction action, IntPtr window, uint process, CancellationToken token,
+            Func<bool> stillReady = null)
         {
             if (action.Kind == ActionKind.Release)
             {
@@ -193,7 +196,7 @@ namespace TideCombat
             }
             switch (action.Kind)
             {
-                case ActionKind.Target: return PressMouse(BattleButton.Attack, 16, false, token);
+                case ActionKind.Target: return PressTarget(token, stillReady);
                 case ActionKind.Attack: return PressMouse(BattleButton.Attack, 1, false, token);
                 case ActionKind.Switch: return PressKey(BattleButton.Attack, '1' + action.Slot, false, token);
                 case ActionKind.Cast: return PressKey(BattleButton.Attack, action.Key, false, token);
@@ -202,12 +205,33 @@ namespace TideCombat
                     bool hold = action.Kind == ActionKind.Hold;
                     int downMilliseconds = action.DownMilliseconds > 0 ? action.DownMilliseconds : 32;
                     if (action.Button == BattleButton.MiddleClick)
-                        return PressMouse(action.Button, 16, hold, token, downMilliseconds);
+                        return hold ? PressMouse(action.Button, 16, true, token, downMilliseconds) :
+                            PressTarget(token, stillReady, action.DownMilliseconds > 0 ? action.DownMilliseconds : TargetDownMilliseconds);
                     if (action.Button == BattleButton.Attack || action.Button == BattleButton.Dodge)
                         return PressMouse(action.Button, action.Button == BattleButton.Attack ? 1 : 2, hold, token, downMilliseconds);
                     return PressKey(action.Button, action.NativeKey, hold, token, downMilliseconds, action.ReassertHold);
                 default: return false;
             }
+        }
+
+        private bool PressTarget(CancellationToken token, Func<bool> stillReady, int downMilliseconds = TargetDownMilliseconds)
+        {
+            IntPtr window = target;
+            uint process = owner;
+            Native.Rect bounds;
+            if ((mouseFlags & 16) != 0 || stillReady != null && !stillReady() ||
+                !Native.GetClientRect(window, out bounds) || bounds.Right <= 0 || bounds.Bottom <= 0)
+                return false;
+
+            var center = new Point(bounds.Right / 2, bounds.Bottom / 2);
+            return ClickBackground(window, process, center, FarmMouse.Middle, downMilliseconds,
+                TargetHoverMilliseconds, token, () =>
+                {
+                    Native.Rect latest;
+                    return target == window && owner == process && (stillReady == null || stillReady()) &&
+                        Native.GetClientRect(window, out latest) &&
+                        latest.Right == bounds.Right && latest.Bottom == bounds.Bottom;
+                }, mouseFlags);
         }
 
         private bool PressKey(BattleButton button, int key, bool hold, CancellationToken token, int downMilliseconds = 32,

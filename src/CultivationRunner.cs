@@ -155,6 +155,7 @@ namespace TideCombat
         private sealed class MaterialRow
         {
             internal string Type;
+            internal Rectangle Label;
             internal List<Tuple<Rectangle, int, int>> Quantities;
             internal int? WeeklyLeft;
             internal string Key
@@ -175,6 +176,9 @@ namespace TideCombat
         private List<CultivationGoal> goals = new List<CultivationGoal>();
         private int materialSpent;
         private NightmareNestRunner echoSearch;
+        internal bool HasUnverifiedConsumption { get; private set; }
+        internal bool NightmareCompleted { get; private set; }
+        internal int UsedStamina { get { return materialSpent + domain.UsedStamina; } }
 
         internal CultivationRunner(CombatSettings settings, CancellationToken token, IProgress<DomainReport> progress,
             Action<string, PixelFrame> record = null, WorldSession session = null)
@@ -194,6 +198,7 @@ namespace TideCombat
         {
             goals.Clear();
             materialSpent = 0;
+            NightmareCompleted = false;
             int tacetSpent = 0;
             string stopReason = null;
             try
@@ -214,7 +219,7 @@ namespace TideCombat
                     Require(OpenPage(), "无法打开培养目标。请先在索拉指南设置培养目标。");
                     goals = ReadGoals();
                     if (CultivationVision.PendingTypes(goals).Any())
-                        stopReason = FarmMaterials();
+                        stopReason = FarmMaterials(dailyBudget);
                     else
                     {
                         if (goals.Count > 0 && goals.All(goal => goal.Owned >= goal.Required))
@@ -227,16 +232,22 @@ namespace TideCombat
                 {
                     CultivationEchoRow row = FindEchoRow(true);
                     int returnTimeout = 30000;
-                    if (row != null && !dailyBudget.HasValue && ReadStamina() < Cost)
+                    if (row == null && dailyBudget.HasValue)
+                        throw new InvalidOperationException("未识别培养无音区目标，无法核验本次培养。");
+                    if (row != null && dailyBudget.HasValue && dailyBudget.Value - materialSpent < Cost)
+                        stopReason = "剩余日常体力额度不足 " + Cost + " 点";
+                    else if (row != null && !dailyBudget.HasValue && ReadStamina() < Cost)
                         stopReason = "体力不足 " + Cost + " 点";
                     else if (row != null)
                     {
                         Report("刷取培养目标无音区 " + row.Name);
                         tacetOptions.MaxStamina = Math.Max(0, dailyBudget.GetValueOrDefault() - materialSpent);
-                        domain.Run(OpenPage, EnterEchoTacet);
+                        try { domain.Run(OpenPage, EnterEchoTacet); }
+                        finally { HasUnverifiedConsumption |= domain.HasUnverifiedConsumption; }
                         token.ThrowIfCancellationRequested();
                         if (domain.Failed)
                             throw new InvalidOperationException(domain.Failure);
+                        Require(domain.CompletionVerified, "未核验培养目标无音区的领奖或可用体力。");
                         tacetSpent = domain.UsedStamina;
                         stopReason = "已执行声骸培养无音区";
                         returnTimeout = 60000;
@@ -253,6 +264,7 @@ namespace TideCombat
                     throw;
                 if (record != null && world.Captured)
                     record("cultivation-failed", world.Frame);
+                if (error is UnresolvedCombatException) throw;
                 try { LeaveChallenge(); }
                 catch (InvalidOperationException leaveError) { RunLog.Warn("培养目标", leaveError.Message); }
                 throw;
@@ -272,8 +284,15 @@ namespace TideCombat
         private List<CultivationGoal> ReadGoals()
         {
             var found = new List<CultivationGoal>();
-            if (!(options.Ascension || options.Skills) || !CultivationVision.HasMaterialRows(Headers()))
+            if (!(options.Ascension || options.Skills))
                 return found;
+            var headers = Headers();
+            if (!CultivationVision.HasMaterialRows(headers))
+            {
+                Require(headers.Any(line => line.Score >= .75f &&
+                    OcrText.Compact(line.Text) == "已完成共鸣者培养"), "未核验培养材料列表或已完成状态。");
+                return found;
+            }
             var rows = new List<MaterialRow>();
             foreach (string type in new[] { CultivationVision.Ascension, CultivationVision.Skills })
             {
@@ -294,8 +313,9 @@ namespace TideCombat
                 string type = observed.Type;
                 foreach (var quantity in observed.Quantities)
                 {
-                    Require(world.Click(quantity.Item1, 20), "无法打开培养材料详情。");
-                    world.Sleep(400);
+                    int route = world.InputRouteVersion;
+                    Require(world.ClickMenuTransition(route, () => FindMaterialQuantity(type, quantity),
+                        () => ItemDetail(type) != null, 2000, 400), "无法打开培养材料详情。");
                     Tuple<string, int> detail;
                     try { detail = Stable(() => ItemDetail(type), "材料详情"); }
                     finally { CloseDetail(); }
@@ -331,8 +351,18 @@ namespace TideCombat
                     if (match.Success && int.TryParse(match.Groups[1].Value, out count)) weekly = count;
                 }
             }
-            return quantities.Count == 0 ? null : new MaterialRow { Type = type, WeeklyLeft = weekly,
+            return quantities.Count == 0 ? null : new MaterialRow { Type = type, Label = labels[0].Box, WeeklyLeft = weekly,
                 Quantities = quantities.OrderBy(entry => entry.Item1.Left).ToList() };
+        }
+
+        private Rectangle FindMaterialQuantity(string type, Tuple<Rectangle, int, int> original)
+        {
+            if (!CultivationVision.IsPage(Headers())) return Rectangle.Empty;
+            MaterialRow row = ReadMaterialRow(type);
+            if (row == null) return Rectangle.Empty;
+            var match = row.Quantities.FirstOrDefault(value => value.Item2 == original.Item2 &&
+                value.Item3 == original.Item3 && value.Item1.IntersectsWith(original.Item1));
+            return match == null ? Rectangle.Empty : match.Item1;
         }
 
         private Tuple<string, int> ItemDetail(params string[] acceptedTypes)
@@ -354,15 +384,21 @@ namespace TideCombat
                 world.Sleep(300);
         }
 
-        private string FarmMaterials()
+        private string FarmMaterials(int? dailyBudget)
         {
+            if (dailyBudget.HasValue && dailyBudget.Value < Cost)
+            {
+                Require(domain.EnsureMain(30000), "剩余日常体力额度不足，未确认返回大世界。");
+                return "剩余日常体力额度不足 " + Cost + " 点";
+            }
             int stamina = ReadStamina();
             if (stamina < Cost)
             {
                 Require(domain.EnsureMain(30000), "体力不足，未确认返回大世界。");
                 return "体力不足 " + Cost + " 点";
             }
-            string reason = RunMaterialChallenges(stamina / Cost);
+            int available = dailyBudget.HasValue ? Math.Min(stamina, dailyBudget.Value) : stamina;
+            string reason = RunMaterialChallenges(available / Cost);
             LeaveChallenge();
             return reason;
         }
@@ -383,7 +419,10 @@ namespace TideCombat
                     IDictionary<string, int> inventory = RewardInventory(type);
                     int stamina = Stable(() => ReadNumber(world.Read(.48, .87, .75, .97), Remaining), "结算剩余体力").Value;
                     CultivationVision.ApplyClaim(goals, type, inventory, before, stamina, Cost);
+                    HasUnverifiedConsumption = false;
                     materialSpent += Cost;
+                    if (record != null && world.Captured)
+                        record("cultivation-debit-confirmed", world.Frame);
                     limit--;
                     foreach (CultivationGoal target in goals.Where(goal => inventory.ContainsKey(goal.Name)))
                         Report(target.Name + " 已核对库存 " + target.Owned + "/" + target.Required);
@@ -409,16 +448,35 @@ namespace TideCombat
 
         private void EnterMaterial(string type)
         {
-            Require(ReadMaterialRow(type) != null, "未找到培养目标上的材料行。");
-            Require(world.Click(.900, type == CultivationVision.Ascension ? .320 : .597, 20), "无法点击材料挑战。");
-            world.Sleep(1000);
-            if (!world.WaitFind("team_start_challenge", 10000, .75))
-            {
-                Require(world.Click(.800, .910, 20), "无法点击单人挑战。");
-                world.Sleep(1000);
-                Require(world.WaitFind("team_start_challenge", 20000, .75), "未识别到队伍挑战界面。");
-            }
+            int route = world.InputRouteVersion;
+            Require(world.ClickMenuTransition(route, () => FindMaterialChallenge(type),
+                () => HasTeamStart() || !SingleMaterialChallenge().IsEmpty, 10000, 1000), "未确认打开材料挑战。");
+            if (!HasTeamStart())
+                Require(world.ClickMenuTransition(route, SingleMaterialChallenge, HasTeamStart, 20000, 1000),
+                    "未识别到队伍挑战界面。");
             Require(domain.StartTeamChallenge(), "未确认已进入培养材料挑战。");
+        }
+
+        private Rectangle FindMaterialChallenge(string type)
+        {
+            if (!CultivationVision.IsPage(Headers())) return Rectangle.Empty;
+            MaterialRow row = ReadMaterialRow(type);
+            if (row == null) return Rectangle.Empty;
+            double height = world.Frame.Height;
+            return DailyClaimVision.UniqueButton(world.Read(.81, Math.Max(0, row.Label.Top / height - .035),
+                .97, Math.Min(1, row.Label.Bottom / height + .07)), "直接挑战", "前往挑战", "前往", "挑战");
+        }
+
+        private Rectangle SingleMaterialChallenge()
+        {
+            return CultivationVision.IsPage(Headers()) ? Rectangle.Empty :
+                DailyClaimVision.UniqueButton(world.Read(.68, .77, .94, .98), "单人挑战");
+        }
+
+        private bool HasTeamStart()
+        {
+            Rectangle start;
+            return world.FindNear("team_start_challenge", .75, out start);
         }
 
         private bool FightMaterial(string type)
@@ -430,7 +488,9 @@ namespace TideCombat
                 if (outcome == CombatOutcome.Finished)
                     return true;
                 token.ThrowIfCancellationRequested();
-                if (attempt == 1 || outcome == CombatOutcome.Timeout)
+                if (outcome == CombatOutcome.Timeout || outcome == CombatOutcome.Unverified)
+                    throw new UnresolvedCombatException("培养材料挑战未核实战斗结束，保留当前挑战。");
+                if (attempt == 1)
                     throw new InvalidOperationException("培养材料挑战未完成，战斗结果 " + outcome + "。");
                 Require(domain.EnsureWorld() && OpenPage(), "战斗失败后未返回培养目标。");
                 List<CultivationGoal> observed = ReadGoals();
@@ -501,7 +561,8 @@ namespace TideCombat
             string button = cost.HasValue ? "confirm_btn" : "cancel_button";
             Require(world.FindNear(button + "_hcenter_vcenter", .80, out confirm) ||
                 world.FindNear(button + "_highlight_hcenter_vcenter", .80, out confirm), "未找到培养材料单倍领取按钮。");
-            Require(world.ClickOnRoute(confirm, route, 20), "领取点击未发送。");
+            HasUnverifiedConsumption = true;
+            Require(world.ClickMenuButton(confirm, route: route), "领取点击未发送。");
             world.Sleep(2000);
             Require(world.WaitUntil(() => world.InputRouteVersion != route || ResultButtons() != null, 15000),
                 "未确认培养奖励回执，已停止扣费流程。");
@@ -551,9 +612,10 @@ namespace TideCombat
 
         private void RestartMaterial()
         {
-            var buttons = ResultButtons();
-            Require(buttons != null && world.Click(buttons.Item2, 20), "未确认培养材料的重新挑战按钮。");
-            world.Sleep(1000);
+            int route = world.InputRouteVersion;
+            Require(world.ClickMenuTransition(route, () => FindResultButton(restart: true),
+                () => world.VerifiedWorld && world.TeamHud || world.Ui != null && world.Ui.SkipDialog,
+                12000, 1000), "未确认培养材料的重新挑战是否已启动。");
             domain.WaitForEntryDialog();
             Require(domain.WaitTeam(), "重新挑战后未确认进入副本。");
         }
@@ -563,12 +625,20 @@ namespace TideCombat
             var buttons = ResultButtons();
             if (buttons != null)
             {
-                Require(world.Click(buttons.Item1, 20), "退出培养挑战的点击未发送。");
-                world.Sleep(1000);
-                Require(world.WaitUntil(() => world.VerifiedWorld && !world.InRealm, 100000), "未确认退出培养挑战。");
+                int route = world.InputRouteVersion;
+                Require(world.ClickMenuTransition(route, () => FindResultButton(restart: false),
+                    () => world.VerifiedWorld && !world.InRealm, 12000, 1000) ||
+                    world.WaitUntil(() => world.InputRouteVersion != route || world.VerifiedWorld && !world.InRealm,
+                        100000) && world.InputRouteVersion == route, "未确认退出培养挑战。");
             }
             else
                 Require(domain.EnsureWorld(), "未确认返回大世界。");
+        }
+
+        private Rectangle FindResultButton(bool restart)
+        {
+            var buttons = ResultButtons();
+            return buttons == null ? Rectangle.Empty : restart ? buttons.Item2 : buttons.Item1;
         }
 
         private CultivationEchoRow FindEchoRow(bool tacet)
@@ -595,9 +665,15 @@ namespace TideCombat
         private bool EnterEchoTacet()
         {
             CultivationEchoRow row = FindEchoRow(true);
-            if (row == null || !world.Click(row.Button, 20)) return false;
-            world.Sleep(1000);
-            return world.WaitFind("team_start_challenge", 20000, .75);
+            if (row == null) return false;
+            return world.ClickMenuTransition(world.InputRouteVersion, () =>
+            {
+                if (!CultivationVision.IsPage(Headers())) return Rectangle.Empty;
+                var lines = world.Read(.35, .12, .99, .95);
+                CultivationEchoRow visible = CultivationVision.EchoRows(lines, new Size(world.Frame.Width, world.Frame.Height))
+                    .FirstOrDefault(candidate => candidate.Tacet && candidate.Name == row.Name);
+                return visible == null ? Rectangle.Empty : visible.Button;
+            }, HasTeamStart, 20000, 1000);
         }
 
         private void FarmNightmare()
@@ -605,18 +681,34 @@ namespace TideCombat
             CultivationEchoRow row = FindEchoRow(false);
             if (row == null)
                 return;
-            if (row.Done) return;
+            if (row.Done)
+            {
+                NightmareCompleted = true;
+                Require(domain.EnsureMain(30000), "核对培养巢穴状态后未确认返回大世界。");
+                return;
+            }
             Report("挑战培养目标的梦魇巢穴 " + row.Name);
             using (var runner = new NightmareNestRunner(settings, NightmareOptions.Defaults(), token,
                 new StepProgress<NightmareReport>(report => Report(report.State)), record, world))
             {
-                if (!runner.RunSelectedNest(row.Name, row.Button))
-                    throw new InvalidOperationException(runner.Failure ?? "未确认完成培养梦魇巢穴。");
+                try
+                {
+                    if (!runner.RunSelectedNest(row.Name, row.Button))
+                    {
+                        if (runner.CombatUnresolved)
+                            throw new UnresolvedCombatException(runner.Failure ?? "未确认培养梦魇已清场，保留当前挑战。");
+                        throw new InvalidOperationException(runner.Failure ?? "未确认完成培养梦魇巢穴。");
+                    }
+                }
+                finally { HasUnverifiedConsumption |= runner.HasUnverifiedPickup; }
             }
+            Require(!HasUnverifiedConsumption, "培养梦魇的声骸吸收已发送，尚未核实回执。");
             Require(domain.EnsureMain(60000), "梦魇巢穴挑战后未确认返回大世界。");
             CultivationEchoRow after = FindEchoRow(false);
-            if (after != null && after.Total.HasValue)
-                Report("培养梦魇巢穴已击败残象 " + after.Defeated + "/" + after.Total);
+            Require(after != null && after.Name == row.Name && after.Done, "未核验培养梦魇巢穴已击败全部残象。");
+            NightmareCompleted = true;
+            if (record != null && world.Captured) record("after-cultivation-nest-verified", world.Frame);
+            Report("培养梦魇巢穴已击败残象 " + after.Defeated + "/" + after.Total);
             Require(domain.EnsureMain(30000), "查看巢穴进度后未确认返回大世界。");
         }
 

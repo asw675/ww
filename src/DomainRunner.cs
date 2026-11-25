@@ -83,6 +83,13 @@ namespace TideCombat
             return y - size.Height * .05 > size.Height * vertical ? 'S' : 'W';
         }
 
+        internal static bool CanReapproachTacetReward(HudSnapshot hud, FarmUi ui, bool verifiedWorld)
+        {
+            return verifiedWorld && hud != null && hud.Valid && !hud.Locked && !hud.EnemyHealth &&
+                !hud.Dead && !hud.ChallengePrompt && ui != null && !ui.OpenWorld &&
+                !ui.Claim && !ui.Challenge && !ui.Death && !ui.SkipDialog && ui.ConfirmBox.IsEmpty;
+        }
+
         internal static int StaminaCost(DomainKind kind)
         {
             return kind == DomainKind.Tacet || kind == DomainKind.Cultivation ? 60 : 40;
@@ -115,9 +122,10 @@ namespace TideCombat
                 foreach (OcrLine line in lines)
                 {
                     int amount;
-                    if (!line.Box.IsEmpty && line.Score >= .70f && Math.Abs(line.Box.Top - label.Top) <= 20 &&
+                    if (!line.Box.IsEmpty && line.Score >= .70f && line.Box.Right <= label.Left &&
+                        Math.Abs(line.Box.Top - label.Top) <= 20 &&
                         int.TryParse(OcrText.Compact(line.Text), out amount) && amount == cost)
-                        return label;
+                        return Rectangle.Union(line.Box, label);
                 }
                 return Rectangle.Empty;
             }
@@ -135,6 +143,52 @@ namespace TideCombat
         internal static Rectangle RechallengeButton(IEnumerable<OcrLine> lines)
         {
             return DailyClaimVision.UniqueButton(lines, "重新挑战", "重新挑戰", "再次挑战", "再次挑戰", "Rechallenge");
+        }
+
+        internal static bool IsSelectedRewardPrompt(IEnumerable<OcrLine> lines, Rectangle key)
+        {
+            if (key.IsEmpty) return false;
+            int center = key.Top + key.Height / 2;
+            foreach (OcrLine line in lines)
+            {
+                if (line == null || line.Box.IsEmpty || line.Score < .62f || line.Box.Left < key.Right - key.Width / 3 ||
+                    Math.Abs(line.Box.Top + line.Box.Height / 2 - center) > Math.Max(8, key.Height * .65))
+                    continue;
+                string text = OcrText.Compact(line.Text);
+                if (text == "领取奖励" || text == "領取獎勵" || text == "领奖" ||
+                    string.Equals(text, "ClaimReward", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(text, "ClaimRewards", StringComparison.OrdinalIgnoreCase))
+                    return true;
+            }
+            return false;
+        }
+
+        internal static List<Rectangle> TacetEntryButtons(IEnumerable<OcrLine> lines, Rectangle area)
+        {
+            var boxes = new List<Rectangle>();
+            foreach (OcrLine line in lines)
+            {
+                if (line == null || line.Box.IsEmpty || line.Score < .72f || !area.Contains(line.Box))
+                    continue;
+                string text = OcrText.Compact(line.Text);
+                if (text != "直接挑战" && text != "前往" && !string.Equals(text, "DirectChallenge", StringComparison.OrdinalIgnoreCase) &&
+                    !string.Equals(text, "Goto", StringComparison.OrdinalIgnoreCase))
+                    continue;
+                if (!boxes.Exists(box => box.IntersectsWith(line.Box)))
+                    boxes.Add(line.Box);
+            }
+            boxes.Sort((first, second) => first.Top.CompareTo(second.Top));
+            return boxes;
+        }
+
+        internal static bool SameBookRows(IList<Rectangle> first, IList<Rectangle> second, int frameHeight)
+        {
+            if (first.Count == 0 || first.Count != second.Count) return false;
+            int margin = Math.Max(3, frameHeight / 150);
+            for (int i = 0; i < first.Count; i++)
+                if (!Rectangle.Inflate(first[i], margin, margin).Contains(second[i]))
+                    return false;
+            return true;
         }
 
         internal static double ReferenceCategoryY(DomainKind kind)
@@ -271,6 +325,7 @@ namespace TideCombat
         internal bool Failed { get; private set; }
         internal string Failure { get; private set; }
         internal bool CompletionVerified { get; private set; }
+        internal bool HasUnverifiedConsumption { get; private set; }
         internal bool NoStamina { get; private set; }
         internal int UsedStamina { get { return usedStamina; } }
 
@@ -336,14 +391,14 @@ namespace TideCombat
                         return;
                     }
                     CaptureSpendEvidence("stamina-insufficient");
+                    NoStamina = usedStamina == 0;
+                    CompletionVerified = true;
                     if (!EnsureWorld())
                     {
                         if (!token.IsCancellationRequested)
                             Fail("体力不足，未确认返回大世界。");
                         return;
                     }
-                    NoStamina = usedStamina == 0;
-                    CompletionVerified = true;
                     Report("已确认可用体力不足，任务结束", finished: true);
                     return;
                 }
@@ -358,7 +413,11 @@ namespace TideCombat
                 Report("传送进本");
                 if (!(enterTacet == null ? TeleportIntoDomain() : enterTacet() && StartTeamChallenge()))
                 {
-                    if (!token.IsCancellationRequested) Fail("传送进副本失败。");
+                    if (!token.IsCancellationRequested)
+                    {
+                        CaptureSpendEvidence("stamina-domain-entry-failed");
+                        Fail("传送进副本失败，尚未开始战斗。");
+                    }
                     return;
                 }
                 world.Sleep(1000);
@@ -391,6 +450,7 @@ namespace TideCombat
         private bool FarmInDomain(ref int mustUse)
         {
             bool tacet = options.Kind == DomainKind.Tacet;
+            bool retriedUnclaimedRound = false;
             while (!token.IsCancellationRequested)
             {
                 Report("进入战斗");
@@ -416,7 +476,8 @@ namespace TideCombat
                 if (token.IsCancellationRequested) return false;
                 if (combat == CombatOutcome.Dead)
                 {
-                    if (!RecoverAfterDeath()) return StopDomain("角色倒下后未确认退本回血。");
+                    if (!RecoverAfterDeath())
+                        throw new UnresolvedCombatException("体力本战斗失败后未核实可恢复画面，保留当前状态。");
                     return false;
                 }
                 // BaseCombatTask.wait_combat 超时抛普通 Exception，DomainTask 的指定
@@ -424,37 +485,54 @@ namespace TideCombat
                 if (combat == CombatOutcome.NoCombat)
                     return StopDomain("200 秒内未确认开战。");
                 if (combat != CombatOutcome.Finished && !(canVerifyReward && rewardReached))
-                    return StopDomain("未确认战斗结束（" + combat + "）。");
+                {
+                    CaptureSpendEvidence("after-stamina-combat-unverified");
+                    throw new UnresolvedCombatException("体力本未确认战斗结束（" + combat + "），保留当前挑战。");
+                }
                 if (!rewardReached)
                     return StopDomain("战斗结束后未到达宝箱交互位置。");
-                PickF();
-                if (tacet)
+                if (tacet && !TryOpenTacetReward())
                 {
-                    world.Sleep(2000);
-                    if (!world.Tick()) return StopDomain("无法读取宝箱交互后的画面。");
-                    if (!HasClaimStamina())
-                    {
-                        Report("当前交互没有打开奖励，返回挑战");
-                        if (!EscCancel()) return StopDomain("退出交互后未确认返回挑战。");
-                        continue;
-                    }
+                    CaptureSpendEvidence("stamina-reward-interaction-unconfirmed");
+                    if (retriedUnclaimedRound)
+                        return StopDomain("再次挑战后仍未确认领奖交互，已停在当前副本。");
+                    Report("未确认打开体力奖励，尝试重新挑战");
+                    if (!RestartTacetAfterUnclaimed())
+                        return StopDomain("领奖交互未确认，未能确认重新挑战。");
+                    retriedUnclaimedRound = true;
+                    continue;
                 }
+                if (!tacet && !HasClaimStamina() && !PickF())
+                    return StopDomain("战斗结束后未确认发送领奖交互。");
                 int claimedBefore = runs;
-                bool canContinue;
-                if (!UseStamina(ref mustUse, out canContinue))
+                bool canContinue, tacetSettlement;
+                if (!UseStamina(ref mustUse, out canContinue, out tacetSettlement))
                     return false;
                 if (runs == claimedBefore)
                 {
                     return EndInWorld();
                 }
+                retriedUnclaimedRound = false;
                 world.Sleep(4000);
+                if (tacet && !tacetSettlement && world.Captured)
+                {
+                    TacetSettlement observedSettlement;
+                    tacetSettlement = TacetSettlement.TryRead(world.Frame, world.Ocr, out observedSettlement);
+                }
                 if (!canContinue)
                 {
+                    CompletionVerified = true;
+                    if (tacetSettlement)
+                    {
+                        if (!NavigateTacetSettlement(restart: false) && !token.IsCancellationRequested)
+                            Fail("体力已扣减，尚未确认从无音区结算页退出。");
+                        return !Failed && !token.IsCancellationRequested;
+                    }
                     if (tacet ? world.ClickCentered(.365, .853) : world.Click(.42, .84))
                         world.Sleep(1800);
                     return EndInWorld();
                 }
-                if (!Rechallenge())
+                if (!(tacetSettlement ? NavigateTacetSettlement(restart: true) : Rechallenge()))
                 {
                     if (!token.IsCancellationRequested)
                         Fail("已领取奖励，但未确认再挑战进入副本。");
@@ -491,22 +569,24 @@ namespace TideCombat
             {
                 Rectangle button = Rectangle.Empty;
                 int route = world.InputRouteVersion;
-                world.WaitUntil(() =>
+                Func<Rectangle> find = () =>
                 {
                     if (world.InputRouteVersion != route || world.VerifiedWorld || world.Ui == null || world.Ui.ClaimReward)
-                        return false;
-                    button = DomainMath.RechallengeButton(world.Read(.54, .81, .72, .90));
-                    return !button.IsEmpty;
-                }, 3000);
-                if (button.IsEmpty || world.InputRouteVersion != route || !world.Captured)
+                        return Rectangle.Empty;
+                    return DomainMath.RechallengeButton(world.Read(.54, .81, .72, .90));
+                };
+                if (!world.WaitUntil(() => world.InputRouteVersion != route || !(button = find()).IsEmpty, 3000) ||
+                    button.IsEmpty || world.InputRouteVersion != route)
                     return false;
-                Point reference = DomainMath.CenteredPoint(new Size(world.Frame.Width, world.Frame.Height), .640, .851);
-                if (!world.ClickOnRoute(DomainMath.VerifiedReferencePoint(button, reference), route))
+                if (!world.ClickMenuTransition(route, find,
+                    () => world.VerifiedWorld && world.TeamHud || world.Ui != null && world.Ui.SkipDialog || find().IsEmpty,
+                    4000, firstPoint: matched => DomainMath.VerifiedReferencePoint(matched,
+                        DomainMath.CenteredPoint(new Size(world.Frame.Width, world.Frame.Height), .640, .851))))
                     return false;
             }
             else
             {
-                if (!world.Click(.68, .84)) return false;
+                if (!world.ClickMenuButton(.68, .84)) return false;
                 world.Sleep(1000);
                 if (!ConfirmDomainRestart()) return false;
                 return WaitTeam();
@@ -514,6 +594,39 @@ namespace TideCombat
             world.Sleep(200);
             WaitForEntryDialog();
             return WaitTeam();
+        }
+
+        private bool NavigateTacetSettlement(bool restart)
+        {
+            if (!world.Tick()) return false;
+            int route = world.InputRouteVersion;
+            Func<Rectangle> control = () =>
+            {
+                TacetSettlement settlement;
+                if (!TacetSettlement.TryRead(world.Frame, world.Ocr, out settlement)) return Rectangle.Empty;
+                return restart ? settlement.Restart : settlement.Exit;
+            };
+            Func<bool> arrived = () => restart ? world.VerifiedWorld && world.TeamHud : TaskContinuation.IsSafeWorld(world);
+            Func<bool> entryDialog = () => restart && world.Ui != null && world.Ui.SkipDialog;
+            Func<bool> destination = () => arrived() || entryDialog();
+
+            CaptureSpendEvidence(restart ? "stamina-settlement-restart-before" : "stamina-settlement-exit-before");
+            bool sourceSeen = !control().IsEmpty;
+            bool transitioned = world.ClickMenuTransition(route, control, destination, 15000, 450);
+            if (!transitioned && sourceSeen && world.InputRouteVersion == route &&
+                world.Captured && control().IsEmpty && !token.IsCancellationRequested)
+            {
+                RunLog.Info("体力本", "结算控件消失，继续等待场景加载");
+                transitioned = world.WaitUntil(() => world.InputRouteVersion != route || destination(), 100000);
+            }
+            if (transitioned && world.InputRouteVersion == route)
+            {
+                if (entryDialog()) world.WaitForOptionalDialog(route);
+                if (world.WaitStable(() => world.InputRouteVersion == route && arrived(), 20000, 180))
+                    return true;
+            }
+            CaptureSpendEvidence(restart ? "stamina-settlement-restart-unconfirmed" : "stamina-settlement-exit-unconfirmed");
+            return false;
         }
 
         private bool ConfirmDomainRestart()
@@ -571,40 +684,62 @@ namespace TideCombat
         private bool SelectBookCategory(DomainKind kind)
         {
             Rectangle heading = Rectangle.Empty;
-            if (!world.WaitUntil(() =>
-            {
-                heading = DomainMath.BookKindButton(world.Read(.095, .11, .35, .91), kind);
-                return !heading.IsEmpty;
-            }, 5000))
-                return false;
-            if (kind == DomainKind.Cultivation)
-            {
-                // v3.8.4 无此 WW 扩展入口，保留原有已选页免点击行为。
-                if (DomainMath.IsHighlightedBookKind(world.Frame, heading)) return true;
-                if (!world.ClickMenuButton(heading)) return false;
-                return world.WaitUntil(() =>
-                {
-                    heading = DomainMath.BookKindButton(world.Read(.095, .11, .35, .91), kind);
-                    return DomainMath.IsHighlightedBookKind(world.Frame, heading);
-                }, 5000);
-            }
+            bool selected = false;
             int route = world.InputRouteVersion;
-            world.Sleep(400);
+            if (!world.WaitUntil(() => world.InputRouteVersion != route ||
+                TryReadBookCategory(kind, route, out heading, out selected), 5000) ||
+                world.InputRouteVersion != route)
+                return false;
+
+            for (int attempt = 0; attempt < 2 && !token.IsCancellationRequested; attempt++)
+            {
+                if (attempt != 0 && !TryReadBookCategory(kind, route, out heading, out selected))
+                    return false;
+                if (selected) return WaitForSelectedBookCategory(kind, route, 1500);
+
+                Point preferred = attempt == 0 ? DomainMath.ReferenceCategoryPoint(kind,
+                    new Size(world.Frame.Width, world.Frame.Height), heading) : Point.Empty;
+                Point click = preferred.IsEmpty ? DomainMath.VerifiedReferencePoint(heading, Point.Empty) : preferred;
+                bool sent = world.ClickMenuButton(click, retry: attempt != 0, route: route);
+                RunLog.Info("体力本", string.Format("切换图鉴分类 · 类型={0} · 位置={1} · 尝试={2} · 投递={3}",
+                    kind, click, attempt + 1, sent));
+                if (sent)
+                {
+                    world.Sleep(2000);
+                    if (WaitForSelectedBookCategory(kind, route, 5000)) return true;
+                }
+            }
+            return false;
+        }
+
+        private bool TryReadBookCategory(DomainKind kind, int route, out Rectangle heading, out bool selected)
+        {
+            heading = Rectangle.Empty;
+            selected = false;
             Rectangle guideTab;
-            bool selected;
-            if (!guide.FindBookTab(out guideTab, out selected) || !selected || world.InputRouteVersion != route)
+            bool bookSelected;
+            if (world.InputRouteVersion != route ||
+                !guide.FindBookTab(out guideTab, out bookSelected) || !bookSelected)
                 return false;
             heading = DomainMath.BookKindButton(world.Read(.095, .11, .35, .91), kind);
-            if (heading.IsEmpty || world.InputRouteVersion != route) return false;
-            Point reference = DomainMath.ReferenceCategoryPoint(kind, new Size(world.Frame.Width, world.Frame.Height), heading);
-            if (!(reference.IsEmpty ? world.ClickOnRoute(heading, route) : world.ClickOnRoute(reference, route))) return false;
-            world.Sleep(2000);
-            return world.WaitUntil(() =>
+            if (!world.Captured || world.InputRouteVersion != route || heading.IsEmpty)
+                return false;
+            selected = DomainMath.IsHighlightedBookKind(world.Frame, heading);
+            return true;
+        }
+
+        private bool WaitForSelectedBookCategory(DomainKind kind, int route, int timeoutMs)
+        {
+            int stable = 0;
+            bool matched = world.WaitUntil(() =>
             {
-                if (world.InputRouteVersion != route) return false;
-                heading = DomainMath.BookKindButton(world.Read(.095, .11, .35, .91), kind);
-                return DomainMath.IsHighlightedBookKind(world.Frame, heading);
-            }, 5000);
+                if (world.InputRouteVersion != route) return true;
+                Rectangle heading;
+                bool selected;
+                stable = TryReadBookCategory(kind, route, out heading, out selected) && selected ? stable + 1 : 0;
+                return stable >= 2;
+            }, timeoutMs);
+            return matched && world.InputRouteVersion == route;
         }
 
         private bool TeleportIntoDomain()
@@ -618,18 +753,18 @@ namespace TideCombat
                     if (ClickBookTarget(options.Index, 20, ForgeryStructure) != BookDestination.Team) return false;
                     if (!world.Ui.TeamStart)
                     {
-                        if (!world.Click(0.891, 0.910)) return false;
+                        if (!world.ClickMenuButton(0.891, 0.910)) return false;
                         world.Sleep(1000);
                     }
                     break;
                 default:
-                    if (!world.Click(0.9730, 0.8806)) return false;
+                    if (!world.ClickMenuButton(0.9730, 0.8806)) return false;
                     world.Sleep(1000);
                     int index = options.Material == DomainOptions.Materials[0] ? 0 :
                         options.Material == DomainOptions.Materials[1] ? 1 : 2;
-                    if (!world.Click(0.898, 0.533 + index * 0.14)) return false;
+                    if (!world.ClickMenuButton(0.898, 0.533 + index * 0.14)) return false;
                     world.Sleep(1000);
-                    if (!world.Click(0.93, 0.90)) return false;
+                    if (!world.ClickMenuButton(0.93, 0.90)) return false;
                     world.Sleep(1000);
                     break;
             }
@@ -646,16 +781,16 @@ namespace TideCombat
             var rows = new List<Rectangle>();
             if (serial <= 4)
             {
-                rows = ReadTargetRows();
+                rows = ReadStableTargetRows(route);
                 if (rows.Count == 0) return BookDestination.None;
                 if (index < rows.Count)
-                    return ClickTargetRow(rows[index], route);
+                    return ClickTargetRow(rows, index, route);
             }
             double offset = DomainMath.ScrollOffset(top, serial, total, structure);
             if (!ClickBookScrollbar(offset, route))
                 return BookDestination.None;
             world.Sleep(1000);
-            rows = ReadTargetRows();
+            rows = ReadStableTargetRows(route);
             if (serial > 4 && structure != null && (rows.Count == 3 || rows.Count == 4) &&
                 rows[rows.Count - 1].Y < world.Frame.Height * .73)
             {
@@ -663,34 +798,88 @@ namespace TideCombat
                 if (!ClickBookScrollbar(Math.Min(DomainMath.BookScrollBottom, offset + (rowHeight > 0 ? rowHeight * .55 : .018)), route))
                     return BookDestination.None;
                 world.Sleep(1000);
-                rows = ReadTargetRows();
+                rows = ReadStableTargetRows(route);
             }
-            return rows.Count == 0 ? BookDestination.None : ClickTargetRow(rows[rows.Count - 1], route);
+            return rows.Count == 0 ? BookDestination.None : ClickTargetRow(rows, rows.Count - 1, route);
         }
 
         private bool ClickBookScrollbar(double y, int route)
         {
-            if (!world.Captured) return false;
-            return world.ClickOnRoute(GuidebookList.PointAt(new Size(world.Frame.Width, world.Frame.Height), .973, y), route);
+            Func<Rectangle> thumb = () => world.Captured && world.Ui != null && world.Ui.BookSelected ?
+                NestMath.ScrollThumb(world.Frame, sidebar: false) : Rectangle.Empty;
+            Func<int> trackY = () => GuidebookList.PointAt(new Size(world.Frame.Width, world.Frame.Height), .973, y).Y;
+            return world.ClickMenuTransition(route, () =>
+            {
+                Rectangle range = thumb();
+                return range.IsEmpty ? Rectangle.Empty : new Rectangle(range.Left - 2, trackY() - 2, 5, 5);
+            }, () =>
+            {
+                Rectangle range = thumb();
+                int yAt = trackY();
+                return !range.IsEmpty && yAt >= range.Top - 5 && yAt <= range.Bottom + 5;
+            }, 3500, settleMs: 500);
         }
 
         private List<Rectangle> ReadTargetRows()
         {
-            return world.Tick() && world.Ui != null ? world.Ui.BossRows : new List<Rectangle>();
+            if (!world.Tick() || world.Ui == null) return new List<Rectangle>();
+            if (options.Kind != DomainKind.Tacet) return world.Ui.BossRows;
+            if (!world.Ui.BookSelected) return new List<Rectangle>();
+            var size = new Size(world.Frame.Width, world.Frame.Height);
+            Rectangle area = GuidebookList.Area(size, .80, .213, .964, .859);
+            List<OcrLine> lines = world.Read(area.Left / (double)size.Width, area.Top / (double)size.Height,
+                area.Right / (double)size.Width, area.Bottom / (double)size.Height);
+            return world.Ui != null && world.Ui.BookSelected && world.Frame.Width == size.Width &&
+                world.Frame.Height == size.Height ? DomainMath.TacetEntryButtons(lines, area) : new List<Rectangle>();
         }
 
-        private BookDestination ClickTargetRow(Rectangle row, int route)
+        private List<Rectangle> ReadStableTargetRows(int route)
         {
-            if (!world.ClickOnRoute(row, route))
-                return BookDestination.None;
-            world.Sleep(1000);
-            BookDestination observed = BookDestination.None;
-            bool found = world.WaitUntil(() => world.InputRouteVersion != route ||
-                (observed = ReadBookDestination()) != BookDestination.None, 10000);
-            if (!found || world.InputRouteVersion != route) return BookDestination.None;
-            // 参考 wait_feature settle_time=.5：命中后等待，而非累计连续命中时间。
-            world.Sleep(500);
-            return world.Tick() && world.InputRouteVersion == route && ReadBookDestination() == observed ? observed : BookDestination.None;
+            if (options.Kind != DomainKind.Tacet) return ReadTargetRows();
+            var previous = new List<Rectangle>();
+            var stable = new List<Rectangle>();
+            world.WaitUntil(() =>
+            {
+                if (world.InputRouteVersion != route) return true;
+                List<Rectangle> current = ReadTargetRows();
+                if (DomainMath.SameBookRows(previous, current, world.Frame.Height))
+                {
+                    stable = current;
+                    return true;
+                }
+                previous = current;
+                return false;
+            }, 3500);
+            return world.InputRouteVersion == route ? stable : new List<Rectangle>();
+        }
+
+        private BookDestination ClickTargetRow(List<Rectangle> rows, int index, int route)
+        {
+            const int attempts = 2;
+            for (int attempt = 0; attempt < attempts && !token.IsCancellationRequested; attempt++)
+            {
+                Rectangle row = rows[index];
+                RunLog.Info("体力本", string.Format("点击图鉴入口 · 类型={0} · 序号={1} · 可见行={2}/{3} · 按钮={4} · 第 {5} 次",
+                    options.Kind, options.Index, index + 1, rows.Count, row, attempt + 1));
+                Point point = DomainMath.VerifiedReferencePoint(row, Point.Empty);
+                if (world.ClickMenuButton(point, retry: attempt != 0, route: route))
+                    world.Sleep(1000);
+                BookDestination observed = BookDestination.None;
+                bool found = world.WaitUntil(() => world.InputRouteVersion != route ||
+                    (observed = ReadBookDestination()) != BookDestination.None, 10000);
+                if (world.InputRouteVersion != route) return BookDestination.None;
+                if (found)
+                {
+                    world.Sleep(500);
+                    if (world.Tick() && world.InputRouteVersion == route && ReadBookDestination() == observed)
+                        return observed;
+                }
+                if (attempt + 1 >= attempts) break;
+                List<Rectangle> current = ReadStableTargetRows(route);
+                if (!DomainMath.SameBookRows(rows, current, world.Frame.Height)) break;
+                rows = current;
+            }
+            return BookDestination.None;
         }
 
         private BookDestination ReadBookDestination()
@@ -709,15 +898,29 @@ namespace TideCombat
 
         private bool TeamChallenge()
         {
-            if (!world.WaitClick("team_start_challenge", 10000, .75))
+            const string label = "team_start_challenge";
+            if (!world.WaitFind(label, 10000, .75))
                 return false;
-            WaitForEntryDialog();
+            int route = world.InputRouteVersion;
+            Func<Rectangle> find = () =>
+            {
+                Rectangle button;
+                return world.Vision.FindLabel(world.Frame, label, .75, out button) ? button : Rectangle.Empty;
+            };
+            if (!world.ClickMenuTransition(route, find,
+                () => world.VerifiedWorld && world.TeamHud || world.Ui != null && world.Ui.SkipDialog || find().IsEmpty,
+                4500))
+                return false;
+            world.WaitForOptionalDialog(route);
             return true;
         }
 
         internal bool StartTeamChallenge()
         {
-            return TeamChallenge() && WaitTeam();
+            Report("等待开始挑战");
+            if (!TeamChallenge()) return false;
+            Report("等待副本加载");
+            return WaitTeam();
         }
 
         internal void WaitForEntryDialog()
@@ -781,23 +984,33 @@ namespace TideCombat
             return !token.IsCancellationRequested;
         }
 
-        private bool ApproachTreasure(bool requireClaim, bool requireQuietRealm = false)
+        private bool ApproachTreasure(bool requireClaim, bool requireQuietRealm = false, int? reapproachRoute = null)
         {
             var watch = Stopwatch.StartNew();
             char held = '\0';
             bool centered = false;
-            int route = world.InputRouteVersion;
+            int route = reapproachRoute ?? world.InputRouteVersion;
+            int timeout = reapproachRoute.HasValue ? 6500 : 30000;
             Rectangle target = Rectangle.Empty;
             try
             {
-                while (watch.ElapsedMilliseconds < 30000 && !token.IsCancellationRequested)
+                while (watch.ElapsedMilliseconds < timeout && !token.IsCancellationRequested)
                 {
                     if (!world.Tick() || world.InputRouteVersion != route || world.Ui == null) return false;
                     if (requireQuietRealm && (!world.VerifiedWorld || !world.InRealm || world.Hud == null ||
                         world.Hud.Locked || world.Hud.EnemyHealth || world.Hud.Dead)) return false;
+                    if (reapproachRoute.HasValue && !DomainMath.CanReapproachTacetReward(world.Hud, world.Ui, world.VerifiedWorld))
+                        return false;
                     if (HasInteraction() && (!requireClaim || IsRewardPrompt())) return true;
                     if (world.Ui.Treasure) target = world.Ui.TreasureBox;
-                    if (!target.IsEmpty)
+                    else if (reapproachRoute.HasValue) target = Rectangle.Empty;
+                    if (target.IsEmpty)
+                    {
+                        if (held != '\0') world.KeyUp(held);
+                        held = '\0';
+                        centered = false;
+                    }
+                    else
                     {
                         char direction = DomainMath.TreasureDirection(target, new Size(world.Frame.Width, world.Frame.Height),
                             held, ref centered);
@@ -805,7 +1018,7 @@ namespace TideCombat
                         {
                             if (held != '\0') world.KeyUp(held);
                             held = '\0';
-                            if (!world.KeyDown(direction)) return false;
+                            if (!world.KeyDown(direction, route: route)) return false;
                             held = direction;
                         }
                     }
@@ -820,20 +1033,45 @@ namespace TideCombat
         {
             Rectangle key = world.Ui.FBox;
             if (key.IsEmpty) return false;
-            var area = new Rectangle(key.Left + 5 * key.Width, key.Top - key.Height,
-                7 * key.Width, 6 * key.Height);
-            foreach (OcrLine line in world.Ocr.Read(world.Frame, area))
+            var frame = world.Frame;
+            var area = Rectangle.Intersect(new Rectangle(0, 0, frame.Width, frame.Height),
+                new Rectangle(key.Right - key.Width / 3, key.Top - 2 * key.Height, 15 * key.Width, 5 * key.Height));
+            return !area.IsEmpty && DomainMath.IsSelectedRewardPrompt(world.Ocr.Read(frame, area), key);
+        }
+
+        private bool TryOpenTacetReward()
+        {
+            if (!world.Tick()) return false;
+            int route = world.InputRouteVersion;
+            bool reapproached = false;
+            for (int attempt = 0; attempt < 2 && !token.IsCancellationRequested; attempt++)
             {
-                string text = line.Text ?? "";
-                if (line.Score >= .6f && (text.Contains("领取") || text.Contains("領取") ||
-                    text.IndexOf("claim", StringComparison.OrdinalIgnoreCase) >= 0)) return true;
+                bool ready = world.WaitUntil(() => world.InputRouteVersion != route || HasClaimStamina() ||
+                    HasInteraction() && IsRewardPrompt(), 2500);
+                if (world.InputRouteVersion != route) return false;
+                if (HasClaimStamina()) return world.InputRouteVersion == route;
+                if (!ready && !(HasInteraction() && IsRewardPrompt()))
+                {
+                    if (reapproached || !world.Tick() || world.InputRouteVersion != route ||
+                        !DomainMath.CanReapproachTacetReward(world.Hud, world.Ui, world.VerifiedWorld) ||
+                        !world.Ui.Treasure || world.Ui.TreasureBox.IsEmpty) return false;
+                    reapproached = true;
+                    CaptureSpendEvidence("stamina-reward-reapproach-before");
+                    Report("领奖提示暂未出现，已重新定位宝箱，尝试靠近一次");
+                    if (!ApproachTreasure(true, reapproachRoute: route)) return false;
+                }
+                if (!world.Tick() || world.InputRouteVersion != route) return false;
+                if (!HasInteraction() || !IsRewardPrompt() || !world.Key('F', route: route)) continue;
+                if (world.WaitUntil(() => world.InputRouteVersion != route || HasClaimStamina(), 4500))
+                    return world.InputRouteVersion == route;
             }
             return false;
         }
 
-        private bool UseStamina(ref int mustUse, out bool canContinue)
+        private bool UseStamina(ref int mustUse, out bool canContinue, out bool tacetSettlement)
         {
             canContinue = false;
+            tacetSettlement = false;
             StaminaReadout before = default(StaminaReadout);
             world.Sleep(1000);
             if (!world.WaitUntil(() => HasClaimStamina() && ReadStaminaHeader(out before), 4000))
@@ -860,15 +1098,23 @@ namespace TideCombat
                 return UnverifiedSpend("未识别到显示本次体力金额的领取按钮。");
             if (DailyClaimVision.Contains(world.Read(.16, .11, .84, .57), DailyClaimVision.Receipts))
                 return UnverifiedSpend("领取前已经显示奖品回执，当前操作未执行。");
+            TacetSettlement priorSettlement;
+            if (options.Kind == DomainKind.Tacet && TacetSettlement.TryRead(world.Frame, world.Ocr, out priorSettlement))
+                return UnverifiedSpend("领取前已显示无音区结算，当前操作未执行。");
             if (!HasClaimStamina() || world.InputRouteVersion != route)
                 return UnverifiedSpend("领取前的体力领奖界面不再可确认。");
-            if (!world.ClickOnRoute(button, route))
-                return UnverifiedSpend("体力领取点击未发送。");
+            // Keep this pending through any refill and its subsequent claim.
+            HasUnverifiedConsumption = true;
+            if (!ClickSpendControl(button, route))
+                RunLog.Warn("体力本", "领取输入未获确认，先核对体力扣减或新回执");
+            token.ThrowIfCancellationRequested();
             long initialClick = world.Now;
 
             StaminaReadout debitBaseline = before;
             int stableDebit = 0;
-            bool replenishment = false, sawReceipt = false, routeChanged = false;
+            var settlementDebit = new TacetDebitCheck();
+            bool sawSettlement = false, verifiedSettlement = false;
+            bool replenishment = false, sawReceipt = false, routeChanged = false, claimMayHaveAdvanced = false;
             Func<bool> observeClaim = delegate
             {
                 if (world.InputRouteVersion != route)
@@ -876,12 +1122,38 @@ namespace TideCombat
                     routeChanged = true;
                     return true;
                 }
+                bool claimVisible = HasClaimStamina();
+                if (!world.Captured || world.InputRouteVersion != route)
+                {
+                    stableDebit = 0;
+                    settlementDebit.Reset();
+                    return false;
+                }
+                TacetSettlement settlement;
+                if (options.Kind == DomainKind.Tacet && !claimVisible &&
+                    TacetSettlement.TryRead(world.Frame, world.Ocr, out settlement))
+                {
+                    claimMayHaveAdvanced = sawSettlement = true;
+                    replenishment = false;
+                    stableDebit = 0;
+                    verifiedSettlement = settlementDebit.Observe(settlement, debitBaseline.Current, used);
+                    return verifiedSettlement;
+                }
+                settlementDebit.Reset();
+                if (sawSettlement) return false;
                 Rectangle gem;
                 replenishment = world.Vision.FindLabel(world.Frame, "gem_add_stamina", .80, out gem);
                 if (replenishment)
                     return true;
+                if (!claimVisible)
+                    claimMayHaveAdvanced = true;
                 StaminaReadout observed;
-                if (ReadStaminaHeader(out observed) && ExpectedStaminaDebit(debitBaseline, observed, used))
+                bool balanceRead = ReadStaminaHeader(out observed);
+                if (balanceRead && SameStaminaHeader(debitBaseline, observed) &&
+                    (observed.Current < debitBaseline.Current ||
+                    debitBaseline.BackupKnown && observed.BackupKnown && observed.Backup < debitBaseline.Backup))
+                    claimMayHaveAdvanced = true;
+                if (balanceRead && ExpectedStaminaDebit(debitBaseline, observed, used))
                 {
                     if (++stableDebit >= 2)
                         return true;
@@ -896,38 +1168,84 @@ namespace TideCombat
                 }
                 return false;
             };
-            bool confirmed = world.WaitUntil(observeClaim, 9000);
+            Func<bool> waitForClaim = delegate
+            {
+                if (world.WaitUntil(observeClaim, 9000)) return true;
+                if (claimMayHaveAdvanced || !RetryUnchangedSpend(debitBaseline, button, useDouble, used, route))
+                    return false;
+                stableDebit = 0;
+                return world.WaitUntil(observeClaim, 9000);
+            };
+            bool confirmed = waitForClaim();
             // 参考 click_dialog_* after_sleep=2；观察回执期间仍允许及时采样。
             world.Sleep((int)Math.Max(0, 2000 - (world.Now - initialClick)));
             if (confirmed && replenishment && !routeChanged && world.InputRouteVersion == route)
             {
-                if (!ConfirmSelectedRefillAndRetry(before, used, useDouble, route, out debitBaseline))
+                if (!ConfirmSelectedRefillAndRetry(before, used, useDouble, route, out debitBaseline, out button))
                     return UnverifiedSpend("未确认所选方式已补充足够波片并返回领奖界面。");
                 stableDebit = 0;
+                settlementDebit.Reset();
                 replenishment = false;
+                claimMayHaveAdvanced = false;
                 long refillClick = world.Now;
-                confirmed = world.WaitUntil(observeClaim, 9000);
+                confirmed = waitForClaim();
                 world.Sleep((int)Math.Max(0, 1000 - (world.Now - refillClick)));
             }
             if (routeChanged || world.InputRouteVersion != route)
                 return UnverifiedSpend("领取后游戏窗口或输入方式发生变化，无法核对本次扣除。");
             if (!confirmed || replenishment)
                 return UnverifiedSpend(replenishment ? "游戏显示补充结晶波片，领取费用未扣除。"
-                    : "点击后未确认体力扣减或新奖励回执。");
+                    : sawSettlement ? "已识别无音区结算，但尚未核对剩余波片。" : "点击后未确认体力扣减或新奖励回执。");
 
-            CaptureSpendEvidence(sawReceipt ? "stamina-spend-receipt" : "stamina-debit-confirmed");
+            HasUnverifiedConsumption = false;
+            tacetSettlement = verifiedSettlement;
             canContinue = DomainMath.CanContinue(before.Current, before.Backup, used, mustUse, once);
             mustUse -= used;
             usedStamina += used;
             runs++;
+            CaptureSpendEvidence(tacetSettlement ? "after-stamina-tacet-settlement" :
+                sawReceipt ? "after-stamina-spend-receipt" : "after-stamina-debit-confirmed");
             RunLog.Info("体力本", string.Format("本次确认使用={0} · 依据={1} · 累计={2} · 继续下一轮={3}",
-                used, sawReceipt ? "奖励回执" : "同一体力计数", usedStamina, canContinue));
+                used, tacetSettlement ? "无音区结算剩余 " + settlementDebit.Remaining : sawReceipt ? "奖励回执" : "同一体力计数",
+                usedStamina, canContinue));
             return true;
         }
 
         internal static Rectangle RefillConfirmButton(IEnumerable<OcrLine> lines)
         {
             return DailyClaimVision.UniqueButton(lines, "确认", "確認", "确定", "確定", "Confirm");
+        }
+
+        private bool ClickSpendControl(Rectangle button, int route, bool useWindowMessage = false)
+        {
+            return !button.IsEmpty && world.ClickMenuButton(DomainMath.VerifiedReferencePoint(button, Point.Empty),
+                retry: !useWindowMessage, route: route);
+        }
+
+        private bool RetryUnchangedSpend(StaminaReadout before, Rectangle originalButton, bool useDouble, int cost, int route)
+        {
+            Rectangle button = Rectangle.Empty;
+            for (int sample = 0; sample < 2; sample++)
+            {
+                if (token.IsCancellationRequested || !world.Tick() ||
+                    world.InputRouteVersion != route || !HasClaimStamina()) return false;
+                StaminaReadout balance;
+                if (!ReadStaminaHeader(out balance)) return false;
+                button = FindSpendControl(useDouble, cost);
+                if (!CanRetrySpend(before, balance, originalButton, button) ||
+                    DailyClaimVision.Contains(world.Read(.16, .11, .84, .57), DailyClaimVision.Receipts))
+                    return false;
+                Rectangle refill;
+                if (!world.Captured || world.InputRouteVersion != route || !HasClaimStamina() ||
+                    world.Vision.FindLabel(world.Frame, "gem_add_stamina", .80, out refill))
+                    return false;
+                if (sample == 0) world.Sleep(120);
+            }
+            CaptureSpendEvidence("stamina-spend-retry");
+            RunLog.Warn("体力本", "领取弹窗、按钮金额与两项体力余额均未变化，重试一次领取点击");
+            if (!ClickSpendControl(button, route, useWindowMessage: true))
+                RunLog.Warn("体力本", "重试输入未获确认，继续核对体力扣减或新回执");
+            return true;
         }
 
         private Rectangle ReadRefillConfirm()
@@ -939,13 +1257,15 @@ namespace TideCombat
         {
             if (button.IsEmpty || !world.Captured) return false;
             Point reference = DomainMath.CenteredPoint(new Size(world.Frame.Width, world.Frame.Height), .70, .71);
-            return world.ClickOnRoute(DomainMath.VerifiedReferencePoint(button, reference), route);
+            return world.ClickMenuButton(DomainMath.VerifiedReferencePoint(button, reference),
+                retry: true, route: route);
         }
 
         private bool ConfirmSelectedRefillAndRetry(StaminaReadout before, int cost, bool useDouble, int route,
-            out StaminaReadout debitBaseline)
+            out StaminaReadout debitBaseline, out Rectangle spendButton)
         {
             debitBaseline = default(StaminaReadout);
+            spendButton = Rectangle.Empty;
             CaptureSpendEvidence("stamina-refill-method");
             Rectangle gem;
             if (!world.Tick() || world.InputRouteVersion != route || !world.Vision.FindLabel(world.Frame,
@@ -992,9 +1312,12 @@ namespace TideCombat
                 replenished.Limit == before.Limit && replenished.Current >= cost, 3500) ||
                 world.InputRouteVersion != route) return false;
             debitBaseline = replenished;
-            if (!world.ClickOnRoute(FindSpendControl(useDouble, cost), route)) return false;
+            spendButton = FindSpendControl(useDouble, cost);
+            if (spendButton.IsEmpty || world.InputRouteVersion != route || !HasClaimStamina()) return false;
+            if (!ClickSpendControl(spendButton, route))
+                RunLog.Warn("体力本", "补充后的领取输入未获确认，先核对体力扣减或新回执");
             // 立即进入回执观察，调用者会补足参考的 1 秒等待，避免漏掉短暂回执。
-            return true;
+            return !token.IsCancellationRequested && world.InputRouteVersion == route;
         }
 
         internal struct StaminaReadout
@@ -1071,9 +1394,22 @@ namespace TideCombat
             int debit = before.Current - after.Current;
             if (before.BackupKnown && after.BackupKnown)
                 debit += before.Backup - after.Backup;
-            return before.Limit == after.Limit &&
-                Rectangle.Inflate(before.Position, 30, 10).IntersectsWith(after.Position) &&
-                (debit == cost || debit == cost - 1);
+            return SameStaminaHeader(before, after) && (debit == cost || debit == cost - 1);
+        }
+
+        private static bool SameStaminaHeader(StaminaReadout before, StaminaReadout after)
+        {
+            return !before.Position.IsEmpty && !after.Position.IsEmpty && before.Limit == after.Limit &&
+                Rectangle.Inflate(before.Position, 30, 10).IntersectsWith(after.Position);
+        }
+
+        internal static bool CanRetrySpend(StaminaReadout before, StaminaReadout observed,
+            Rectangle originalButton, Rectangle observedButton)
+        {
+            return SameStaminaHeader(before, observed) && before.BackupKnown && observed.BackupKnown &&
+                before.Current == observed.Current && before.Backup == observed.Backup &&
+                !originalButton.IsEmpty && !observedButton.IsEmpty &&
+                Rectangle.Inflate(originalButton, 12, 8).Contains(observedButton);
         }
 
         private Rectangle FindSpendControl(bool useDouble, int cost)
@@ -1114,22 +1450,36 @@ namespace TideCombat
             return healPoint;
         }
 
-        private bool EscCancel()
+        private bool RestartTacetAfterUnclaimed()
         {
-            if (!world.Key((char)0x1B)) return false;
-            world.Sleep(1000);
-            if (world.Tick() && world.VerifiedWorld) return true;
-            Rectangle cancel;
-            if (!(world.FindNear("cancel_button_hcenter_vcenter", .80, out cancel) ||
-                  world.FindNear("cancel_button_highlight_hcenter_vcenter", .80, out cancel)) ||
-                !world.Click(cancel)) return false;
-            world.Sleep(2000);
-            return WaitTeam();
+            if (!world.Tick()) return false;
+            int route = world.InputRouteVersion;
+            Func<Rectangle> restart = () => FarmVision.ReadRechallengeDialog(world.Frame, world.Ocr);
+            if (restart().IsEmpty)
+            {
+                if (!world.VerifiedWorld || !world.TeamHud || world.Hud.Locked || world.Hud.EnemyHealth || world.Hud.Dead ||
+                    !world.Key((char)0x1B, route: route) ||
+                    !world.WaitUntil(() => world.InputRouteVersion != route || !restart().IsEmpty, 5000) ||
+                    world.InputRouteVersion != route)
+                    return false;
+            }
+            CaptureSpendEvidence("stamina-restart-dialog");
+            int clearedFrames = 0;
+            if (!world.ClickMenuTransition(route, restart, () =>
+            {
+                if (world.VerifiedWorld && world.TeamHud || world.Ui != null && world.Ui.SkipDialog) return true;
+                bool absent = world.Ui != null && world.Ui.ConfirmBox.IsEmpty && restart().IsEmpty;
+                clearedFrames = absent ? clearedFrames + 1 : 0;
+                return clearedFrames >= 2;
+            }, 5000))
+                return false;
+            world.WaitForOptionalDialog(route);
+            return WaitTeam(30000);
         }
 
-        internal bool WaitTeam()
+        internal bool WaitTeam(int timeoutMs = 120000)
         {
-            return world.WaitUntil(() => world.VerifiedWorld && world.TeamHud, 120000);
+            return world.WaitUntil(() => world.VerifiedWorld && world.TeamHud, timeoutMs);
         }
 
         internal bool EnsureWorld()

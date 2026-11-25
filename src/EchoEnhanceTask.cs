@@ -816,17 +816,25 @@ namespace TideCombat
                     overflowSeenAt = now;
                 if (now - overflowSeenAt < 500)
                     return default(EnhanceDecision);
-                return Click(frame.CheckBox, "勾选本次登录不再提示", now, 500, sent =>
+                return ClickOverflowControl(frame.CheckBox, "勾选本次登录不再提示", now, 500, sent =>
                 {
                     overflowChecked = true;
                     nextAction = Math.Max(nextAction, sent + 500);
                 });
             }
-            return Click(frame.ConfirmBox, "确认材料溢出提示", now, OverflowConfirmSettleMs, sent =>
+            return ClickOverflowControl(frame.ConfirmBox, "确认材料溢出提示", now, OverflowConfirmSettleMs, sent =>
             {
                 overflowConfirmed = true;
                 ResultActionSent(sent, OverflowConfirmSettleMs);
             });
+        }
+
+        private EnhanceDecision ClickOverflowControl(Rectangle box, string label, long now, int delay, Action<long> sent)
+        {
+            EnhanceDecision decision = Click(box, label, now, delay, sent);
+            decision.SettleMs = MenuSettleMs;
+            decision.UseWindowMessage = true;
+            return decision;
         }
 
         private EnhanceDecision HandleLateResult(EnhanceFrame frame, long now)

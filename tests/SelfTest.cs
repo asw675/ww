@@ -150,7 +150,15 @@ namespace TideCombat
             Check("domain stamina and scroll math", DomainChecks.Arithmetic);
             Check("domain rechallenge text and nearest-waypoint order", DomainChecks.NavigationAndRechallenge);
             Check("waveplate over-cap balance and daily counter isolation", DomainChecks.HeaderBounds);
+            Check("domain claim targets the matched price and reward label together", DomainChecks.SpendControlUsesFullButton);
+            Check("domain claim retries only with unchanged confirmed balances and button", DomainChecks.SpendRetryRequiresUnchangedBalanceAndControl);
+            Check("Tacet settlement confirms the paid debit before advancing to the next round", DomainChecks.TacetSettlementConfirmsSpend);
+            Check("Tacet reward re-approach uses a quiet frame and the current treasure marker", TacetRewardApproachChecks.UsesQuietCurrentTreasureLocation);
+            Check("domain reward interaction requires the selected F prompt", DomainChecks.RewardInteractionRequiresSelectedRow);
+            Check("domain leave dialog separates restart from exit actions", DomainChecks.LeaveDialogSeparatesRestartAndExit);
             Check("guidebook scrollbar ignores bright artifacts and follows wide-screen anchors", DomainChecks.GuideScrollbar);
+            Check("Tacet guide clicks only complete recognized entry buttons", DomainChecks.TacetGuideButtons);
+            Check("Tacet guide waits for stable entry rows before clicking", DomainChecks.StableTacetGuideButtons);
             Check("domain options validate", DomainChecks.Options);
             Check("Rahai solver clears intersecting lines and plans across pieces", RahaiChecks.Solver);
             Check("cultivation recognizes the target page, quantities and echo rows", CultivationChecks.ReadRows);
@@ -161,19 +169,48 @@ namespace TideCombat
             Check("Second Sola recognizes the date, event marker and exam answer", SecondSolaChecks.Decisions);
             Check("nightmare nest counts and cache keys", NightmareChecks.Counts);
             Check("nightmare nest cache keys tolerate jitter", NightmareChecks.Keys);
+            Check("nightmare travel waits through the map and loading frames", NightmareChecks.TravelWaitsThroughLoading);
+            Check("nightmare travel keeps observing the same client across automatic focus changes", NightmareChecks.TravelObservesSameAutoLocalClientAcrossFocusChanges);
+            Check("nightmare travel treats a delayed confirmation as one transition", NightmareChecks.TravelConfirmsLatePromptOnce);
+            Check("nightmare guidebook distinguishes categories and verifies scrollbar positions", NightmareChecks.GuidebookCategoryAndScroll);
+            Check("nightmare guidebook scans overlapping intermediate sheets before the special section",
+                NightmareChecks.GuidebookIntermediatePurification);
+            Check("nightmare may retry an unstarted fight once in the same nest", NightmareChecks.RetryUnstartedCombat);
             Check("nightmare options fall back to both categories when empty", NightmareChecks.Options);
             Check("nightmare skips clipped buttons and tries the next visible nest", NightmareChecks.VisibleVisitButtons);
             Check("named nightmare nests are identified across scroll positions without merging other nests", NightmareChecks.NamedTargetsAcrossPages);
             Check("purification associates direct challenge buttons with the correct visible nest", NightmareChecks.PurificationTargets);
             Check("nightmare reads partial and full progress on the same named row", NightmareChecks.SameNestProgress);
+            Check("nightmare full clear selects a verified partial nest before later untouched rows", NightmareChecks.PartialNestPrecedesLaterUntouchedNest);
             Check("nightmare pickup looks for the absorb interaction", NightmareChecks.AbsorbLabels);
             Check("nightmare requires a new pickup receipt after F", NightmareChecks.ReceiptMustBeNew);
             Check("garden progress detection", GardenChecks.Progress);
+            Check("garden next day requires text and a stable verified transition", GardenChecks.NextDayRequiresTextAndAStableTransition);
+            Check("garden reward popup confirms its visible control roles", GardenRewardVisionChecks.RequiresRecognizedRewardPopupControls);
+            Check("garden reward selection requires a green card outline and enabled confirm control", GardenRewardVisionChecks.RequiresEnabledConfirmationAndFullSelectedCard);
+            Check("garden reward cards require verified title and panel geometry", GardenRewardCardsChecks.UsesVerifiedCardsAndRejectsGutters);
+            Check("garden reward rarity uses title color and equal cards prefer the center", GardenRewardVisionChecks.RarityUsesColorAndEqualCardsPreferCenter);
+            Check("garden reward continuation distinguishes board progress and a new card offer", GardenChecks.RewardBoardAndOfferProgress);
+            Check("garden encounter distinguishes the opt-out from paid choices", GardenEncounterVisionChecks.DistinguishesDeclineFromPaidChoices);
+            Check("garden encounter verifies enabled confirmation and the selected opt-out", GardenEncounterVisionChecks.RequiresPositiveConfirmationStateAndDeclineSelection);
             Check("task indicator signatures load", GardenChecks.Signatures);
             Check("merge full-batch detection", MergeChecks.FullBatch);
             Check("echo change OCR text fixes", ChangeChecks.TextFixes);
             Check("echo change options validate", ChangeChecks.Options);
             Check("daily plan decisions", DailyChecks.Plan);
+            Check("daily step retries once when completion is unverified and replay is safe", DailyChecks.StepRetriesOnce);
+            Check("daily plan replay covers the live default order and all optional items", DailyPlanReplayChecks.ReferenceAndCustomPlans);
+            Check("daily plan replay isolates first misses, repeat failures, pending actions and cancellation at each item",
+                DailyPlanReplayChecks.VerificationFailuresAndCancellation);
+            Check("menu transitions replay missing frames, delayed completion and bounded retries",
+                MenuTransitionReplayChecks.ReplaysInterruptedTransitions);
+            Check("menu transition sends the original click and one retry only to the offline test window",
+                MenuInputChecks.ReplayTransitionAgainstWindow);
+            Check("combat interruption rejects isolated popup matches and distinguishes revive items from defeat", CombatReviveObservation);
+            Check("daily progress verifies paging through the activity scrollbar", DailyChecks.ActivityScrollbar);
+            Check("daily reward receipt requires its short heading and continuation prompt", DailyChecks.ObtainedRewardReceiptNeedsHeadingAndDismissal);
+            Check("daily activity track distinguishes checked rewards from pending and locked chests", DailyRewardTrackChecks.DistinguishesClaimedFromPendingAndLocked);
+            Check("daily plan stops after unresolved nightmare combat", DailyChecks.NightmareUnresolvedCombatStopsPlan);
             Check("daily options validate", DailyChecks.Options);
             Check("custom daily choices and ordering survive a settings round-trip", DailyChecks.SavesOrderedPlan);
             Check("older daily settings preserve the original plan and toggles", DailyChecks.ReadsLegacySettings);
@@ -205,6 +242,7 @@ namespace TideCombat
             Check("administrator restart preserves domain and nightmare tasks", TaskResumeRouting);
             Check("the command line resolves one daily task and rejects unknown options", DailyCommandLineRouting);
             Check("daily command-line exit is scoped to successful runs", DailyCommandLineExit);
+            Check("restored background assist preserves the finished daily result", DailyResultSurvivesAssist);
             Check("cloud combat uses health evidence and a bounded grace period", CloudGrace);
             Check("retargeting keeps the long health window and uses the short window without health", HealthRetargetWindows);
             Check("visible cloud health starts combat without sending a needless lock", CloudEntry);
@@ -244,6 +282,7 @@ namespace TideCombat
             Check("background client crop and key flags", BackgroundCoordinates);
             Check("background capture fallback reads an offline test window", BackgroundFallback);
             Check("background keyboard and mouse releases reach only the verified test window", WindowMessageDelivery);
+            Check("background target sends a complete middle-click to the verified viewport", MenuInputChecks.BackgroundTargetDispatch);
             Check("menu clicks use the visible child window and its local coordinates", MenuClickDelivery);
             Check("pickup F reaches the verified window with both key transitions", PickupKeyDelivery);
             Check("background menu actions deliver buttons, wheel, Alt and text to the verified window",
@@ -282,6 +321,8 @@ namespace TideCombat
                     () => NightmareChecks.ReplayAbsorbPrompt(args[1]));
                 Check("nightmare detects the reference pickup receipt glyphs only in the loot notice",
                     () => NightmareChecks.ReplayPickupReceipt(args[1]));
+                Check("real revive-item dialog is not classified as a defeated party",
+                    () => ReplayCombatRevive(args[1]));
                 ReplayReference(args[1]);
                 RotationChecks.Replay(args[1], Check);
             }
@@ -519,6 +560,36 @@ namespace TideCombat
             Require(check.IsQuiet(6250), "three stable scene observations over the interval confirm quiet");
             check.Observe(true, true, 6300);
             Require(!check.IsQuiet(6300), "an enemy appearing after a wave cancels the clearance");
+        }
+
+        private static void CombatReviveObservation()
+        {
+            var check = new CombatDeathCheck();
+            Require(!check.Observe(true, 0) && !check.Observe(false, 600) &&
+                !check.Observe(true, 700) && !check.Observe(true, 800) &&
+                !check.Observe(false, 950), "an isolated match or a lost frame cannot authorize recovery");
+            Require(!check.Observe(true, 1000) && !check.Observe(true, 1220) &&
+                check.Observe(true, 1450), "the candidate needs consecutive samples and elapsed time");
+            var box = new Rectangle(280, 150, 150, 34);
+            Require(CombatRunner.ClassifyDeathText(new[] { new OcrLine { Box = box, Score = .99f, Text = "确认" } }) ==
+                CombatDeathDialog.Unknown, "a generic confirmation does not identify a battle outcome");
+            Require(CombatRunner.ClassifyDeathText(new[] { new OcrLine { Box = box, Score = .99f, Text = "选择复苏物品" } }) ==
+                CombatDeathDialog.ReviveItems, "a character's revive-item menu does not indicate defeat");
+            Require(CombatRunner.ClassifyDeathText(new[] { new OcrLine { Box = box, Score = .99f, Text = "挑战失败" } }) ==
+                CombatDeathDialog.Defeat, "an explicit challenge loss can use the defeat path");
+        }
+
+        private static void ReplayCombatRevive(string root)
+        {
+            using (var image = new Bitmap(Path.Combine(root, "ok_templates", "revive.png")))
+            using (var reader = new FrameReader())
+            using (var ocr = new OcrReader(OcrReader.Directory))
+            {
+                PixelFrame frame = reader.Read(image);
+                Require(new FarmVision().Read(frame, false).Death &&
+                    CombatRunner.ReadDeathDialog(frame, ocr) == CombatDeathDialog.ReviveItems,
+                    "the template must be independently interpreted from its actual dialog title");
+            }
         }
 
         private static void SkillSelection()
@@ -1029,6 +1100,55 @@ namespace TideCombat
             })
                 Require(!Program.TryReadTaskStart(invalid, out mode, out domain, out exitAfter, out error) && error != null,
                     "invalid CLI unexpectedly started a task or normal GUI: " + string.Join(" ", invalid));
+        }
+
+        private static void DailyResultSurvivesAssist()
+        {
+            const BindingFlags privateInstance = BindingFlags.Instance | BindingFlags.NonPublic;
+            Type formType = typeof(MainForm);
+            var preserve = formType.GetField("preserveTaskResult", privateInstance);
+            var assistOwner = formType.GetField("assistCancellation", privateInstance);
+            var assistRun = formType.GetField("assistRun", privateInstance);
+            var renderDaily = formType.GetMethod("RenderDaily", privateInstance);
+            var renderAssist = formType.GetMethod("RenderAssistReport", privateInstance);
+            var beginManualAssist = formType.GetMethod("BeginManualAssist", privateInstance);
+            string settings = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N") + ".json");
+            using (var form = new MainForm(settings, enableGlobalHotkey: false))
+            using (var active = new CancellationTokenSource())
+            using (var stale = new CancellationTokenSource())
+            {
+                Func<string, Label> label = name => (Label)formType.GetField(name, privateInstance).GetValue(form);
+                assistOwner.SetValue(form, active);
+                var assist = new BattleReport
+                {
+                    State = "后台辅助运行中", LastAction = "—", DetectedMode = GameSource.Background, Size = new Size(1920, 1080)
+                };
+                foreach (string failure in new[] { "梦魇巢穴失败：未确认传送。", null })
+                {
+                    string final = failure ?? "一条龙完成";
+                    renderDaily.Invoke(form, new object[] { new DailyReport
+                    {
+                        State = final, Failure = failure, Finished = true, UsedStamina = 0, Points = 20
+                    } });
+                    preserve.SetValue(form, true);
+                    string terminalMode = label("mode").Text, terminalFooter = label("footer").Text;
+                    renderAssist.Invoke(form, new object[] { active, assist });
+                    Require(label("mode").Text == terminalMode && label("state").Text == final &&
+                        label("footer").Text == terminalFooter && label("lastAction").Text == "已停止" &&
+                        label("skills").Text == "积分 20", "automatic assist masked a final daily result");
+                }
+
+                // Simulate an already-running restored assist, then explicitly select it.
+                assistRun.SetValue(form, System.Threading.Tasks.Task.FromResult(0));
+                beginManualAssist.Invoke(form, null);
+                renderAssist.Invoke(form, new object[] { stale, assist });
+                Require(label("state").Text == "一条龙完成", "an obsolete assist report replaced the result");
+                renderAssist.Invoke(form, new object[] { active, assist });
+                Require(label("state").Text == "后台 · 后台辅助运行中" && label("mode").Text == "已待命",
+                    "explicitly choosing assist should show the current assistant status");
+                assistRun.SetValue(form, null);
+                assistOwner.SetValue(form, null);
+            }
         }
 
         private static void DailyCommandLineExit()

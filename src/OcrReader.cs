@@ -18,7 +18,7 @@ namespace TideCombat
 
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, EntryPoint = "LCMapStringW", ExactSpelling = true)]
         private static extern int MapSimplified(uint locale, uint flags, string source, int sourceLength,
-            StringBuilder destination, int destinationLength);
+            [Out] char[] destination, int destinationLength);
 
         [StructLayout(LayoutKind.Sequential)]
         private struct CFRange
@@ -65,9 +65,9 @@ namespace TideCombat
                 return SimplifyWithCoreFoundation(text);
             int length = MapSimplified(ChineseSimplifiedLocale, SimplifiedChinese, text, text.Length, null, 0);
             if (length <= 0) return text;
-            var mapped = new StringBuilder(length);
-            return MapSimplified(ChineseSimplifiedLocale, SimplifiedChinese, text, text.Length, mapped, length) > 0
-                ? mapped.ToString() : text;
+            var mapped = new char[length];
+            int written = MapSimplified(ChineseSimplifiedLocale, SimplifiedChinese, text, text.Length, mapped, mapped.Length);
+            return written > 0 ? new string(mapped, 0, written) : text;
         }
 
         private static IntPtr CreateCFString(string text)

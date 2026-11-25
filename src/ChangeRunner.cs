@@ -221,15 +221,17 @@ namespace TideCombat
         private bool ChangeOne(Rectangle cultivate)
         {
             Report("打开培养界面");
-            var watch = System.Diagnostics.Stopwatch.StartNew();
-            while (watch.ElapsedMilliseconds < 5000 && !token.IsCancellationRequested)
-            {
-                world.Click(cultivate);
-                world.Sleep(500);
-                if (!FindCultivate(out cultivate))
-                    break;
-            }
-            if (WaitText(null, "声骸强化", 5000) == null)
+            int route = world.InputRouteVersion;
+            if (!world.ClickMenuTransition(route, () =>
+                {
+                    Rectangle currentButton;
+                    return FindCultivate(out currentButton) && currentButton.IntersectsWith(cultivate) ?
+                        currentButton : Rectangle.Empty;
+                }, () =>
+                {
+                    Rectangle ignored;
+                    return HasChangeHeading("声骸强化") && !FindCultivate(out ignored);
+                }, 5000, 500))
             {
                 Fail("未能打开声骸强化界面。");
                 return false;
@@ -248,18 +250,21 @@ namespace TideCombat
                 return false;
             }
 
-            world.Click(0.04, 0.41);
-            if (WaitText(null, "主音属性", 5000) == null)
+            if (!HasChangeHeading("声骸强化") || !ClickChangeMenu(.04, .41, route) ||
+                WaitText(null, "主音属性", 5000) == null)
             {
                 Fail("未找到主音属性面板。");
                 return false;
             }
             world.Sleep(800);
-            world.Click(0.52, 0.71);
+            if (!HasChangeHeading("主音属性") || !ClickChangeMenu(.52, .71, route))
+            {
+                Fail("未能打开主音属性选项。");
+                return false;
+            }
             OcrLine target = WaitText(null, options.Target, 5000, mainStat: true);
             if (target != null)
             {
-                int route = world.InputRouteVersion;
                 world.Sleep(100);
                 // Re-read the exact option after the reference's settle
                 // delay; never click a stale or non-unique hit.
@@ -270,7 +275,7 @@ namespace TideCombat
                     return false;
                 }
                 target = refreshed;
-                if (!world.ClickOnRoute(target.Box, route))
+                if (!world.ClickMenuButton(target.Box, route: route))
                 {
                     Fail("未成功点击目标属性选项。");
                     return false;
@@ -282,13 +287,13 @@ namespace TideCombat
                 return false;
             }
             world.Sleep(500);
-            if (!ClickText(null, "确认", 5000))
+            if (!ClickText(null, "确认", route, 5000))
             {
                 Fail("未找到确认按钮。");
                 return false;
             }
             world.Sleep(2000);
-            if (!ClickText(new RectangleF(.37f, .82f, .27f, .17f), "数据重构", 5000))
+            if (!ClickText(new RectangleF(.37f, .82f, .27f, .17f), "数据重构", route, 5000))
             {
                 Fail("未找到数据重构按钮。");
                 return false;
@@ -300,6 +305,18 @@ namespace TideCombat
                 return false;
             }
             return true;
+        }
+
+        private bool HasChangeHeading(string heading)
+        {
+            return world.Read(0, 0, 1, 1).Any(line => ChangeMath.Fix(line.Text).Contains(heading));
+        }
+
+        private bool ClickChangeMenu(double x, double y, int route)
+        {
+            if (!world.Captured || world.InputRouteVersion != route) return false;
+            var point = new Point((int)(world.Frame.Width * x), (int)(world.Frame.Height * y));
+            return world.ClickMenuButton(point, route: route);
         }
 
         private bool ReturnToBag()
@@ -413,10 +430,10 @@ namespace TideCombat
             return null;
         }
 
-        private bool ClickText(RectangleF? area, string text, int timeoutMs)
+        private bool ClickText(RectangleF? area, string text, int route, int timeoutMs)
         {
             OcrLine line = WaitText(area, text, timeoutMs);
-            return line != null && world.Click(line.Box);
+            return line != null && world.ClickMenuButton(line.Box, route: route);
         }
 
         private void Report(string state)

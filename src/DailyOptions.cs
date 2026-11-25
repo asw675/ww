@@ -4,6 +4,7 @@ using System.Drawing;
 using System.IO;
 using System.Runtime.Serialization;
 using System.Text.RegularExpressions;
+using System.Threading;
 
 namespace TideCombat
 {
@@ -123,6 +124,32 @@ namespace TideCombat
         private static readonly Regex ActivityCounter = new Regex(
             @"^(?:(?:[今每]日)?活[跃躍](?:度)?[:：]?)?([0-9]{1,3})(/100)?$");
 
+        internal static void ExecuteWithOneRetry(Action<bool> execute, Func<InvalidOperationException, bool> prepareRetry)
+        {
+            try { execute(false); }
+            catch (InvalidOperationException error)
+            {
+                if (!prepareRetry(error)) throw;
+                execute(true);
+            }
+        }
+
+        internal static void RunOrderedTasks(DailyTask[] tasks, CancellationToken token, Action<DailyTask, int> runStep,
+            Action<int> reportStop)
+        {
+            for (int index = 0; index < tasks.Length; index++)
+            {
+                token.ThrowIfCancellationRequested();
+                try { runStep(tasks[index], index); }
+                catch (InvalidOperationException)
+                {
+                    if (reportStop != null) reportStop(index);
+                    throw;
+                }
+            }
+            token.ThrowIfCancellationRequested();
+        }
+
         // This WW-only task has no v3.8.4 counterpart. Keep its prior
         // reward/capture ordering based on actual cultivation stamina use.
         internal static void OrderCultivationRewardsAndNightmare(DailyTask[] tasks, bool spentStamina)
@@ -164,8 +191,10 @@ namespace TideCombat
             return task == DailyTask.Nightmare || task == DailyTask.Garden || task == DailyTask.Merge;
         }
 
-        internal static bool CanAttemptRecovery(DailyTask task, bool referencePlan, bool cultivation, bool normalUnverifiedResult)
+        internal static bool CanAttemptRecovery(DailyTask task, bool referencePlan, bool cultivation,
+            bool normalUnverifiedResult, bool nightmareCombatUnresolved = false)
         {
+            if (nightmareCombatUnresolved && task == DailyTask.Nightmare) return false;
             // A normal but unverified child return is distinct from a failed
             // input/combat/route operation. The caller must still confirm a
             // safe world boundary before continuing; the result stays failed.

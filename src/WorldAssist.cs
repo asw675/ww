@@ -424,7 +424,7 @@ namespace TideCombat
                 options.PickUpBlock ?? WorldAssistOptions.DefaultBlock;
             // OcrReader already filters rejected recognitions. Do not add a
             // separate confidence gate to this task's text matching.
-            return lines.FirstOrDefault(line => line != null && ContainsAny(new[] { line.Text ?? "" }, terms));
+            return lines.FirstOrDefault(line => line != null && ContainsAny(new[] { OcrText.Compact(line.Text) }, terms));
         }
 
         private static bool ContainsAny(IEnumerable<string> texts, string[] terms)

@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Drawing;
 using System.Globalization;
 using System.IO;
@@ -11,32 +12,36 @@ namespace TideCombat
 {
     internal sealed class DailyEvidence
     {
-        private const string LogArea = "一条龙截图";
         private const int RetainedRuns = 10;
         private const int ExtraScreenshotsPerStep = 12;
+        private const int RecentGardenScreenshotsPerStep = 4;
         private const int SampleWidth = 32, SampleHeight = 18;
         private static readonly object FolderGate = new object();
-        private static readonly Regex RunName = new Regex(@"^daily-[0-9]{8}-[0-9]{9}-[0-9a-f]{12}$",
-            RegexOptions.CultureInvariant);
         private static readonly Regex StageName = new Regex(@"^[a-z0-9][a-z0-9_-]{0,47}$",
             RegexOptions.CultureInvariant);
         private static readonly Regex FileName = new Regex(
             @"^[0-9]+-[A-Za-z0-9]+-[0-9]+-[a-z0-9][a-z0-9_-]{0,47}\.png(?:\.tmp)?$",
             RegexOptions.CultureInvariant);
 
-        private readonly string logRoot;
-        private readonly string runName = "daily-" + DateTime.UtcNow.ToString("yyyyMMdd-HHmmssfff",
-            CultureInfo.InvariantCulture) + "-" + Guid.NewGuid().ToString("N").Substring(0, 12);
-        private bool folderUnavailable;
+        private readonly string logRoot, logArea, runName;
+        private readonly Regex runNamePattern;
+        private readonly Queue<string> recentGardenScreenshots = new Queue<string>();
+        private bool folderUnavailable, gardenStep;
         private string step;
         private int sequence, extras;
         private byte[] beforeSample;
         private Size beforeSize;
         internal string DirectoryPath { get; private set; }
 
-        internal DailyEvidence(string logRoot)
+        internal DailyEvidence(string logRoot, bool standaloneGarden = false)
         {
             this.logRoot = logRoot;
+            string prefix = standaloneGarden ? "garden-" : "daily-";
+            logArea = standaloneGarden ? "周常乐园截图" : "一条龙截图";
+            runName = prefix + DateTime.UtcNow.ToString("yyyyMMdd-HHmmssfff", CultureInfo.InvariantCulture) +
+                "-" + Guid.NewGuid().ToString("N").Substring(0, 12);
+            runNamePattern = new Regex("^" + prefix + @"[0-9]{8}-[0-9]{9}-[0-9a-f]{12}$",
+                RegexOptions.CultureInvariant);
         }
 
         internal string Begin(DailyTask task, int oneBasedIndex, PixelFrame frame)
@@ -48,7 +53,9 @@ namespace TideCombat
         internal void StartStep(DailyTask task, int oneBasedIndex)
         {
             step = oneBasedIndex.ToString("D2", CultureInfo.InvariantCulture) + "-" + task;
+            gardenStep = task == DailyTask.Garden;
             extras = 0;
+            recentGardenScreenshots.Clear();
             beforeSample = null;
             beforeSize = Size.Empty;
         }
@@ -62,12 +69,14 @@ namespace TideCombat
                 stage = "checkpoint";
             if (frame.Width <= 0 || frame.Height <= 0)
             {
-                RunLog.Warn(LogArea, step + " " + stage + "｜没有可用游戏画面");
+                RunLog.Warn(logArea, step + " " + stage + "｜没有可用游戏画面");
                 return null;
             }
             bool isBefore = stage == "before";
             bool isAfter = stage == "after" || stage.StartsWith("after-", StringComparison.Ordinal);
-            if (!isBefore && !isAfter && extras >= ExtraScreenshotsPerStep)
+            bool isExtra = !isBefore && !isAfter;
+            bool keepRecent = isExtra && extras >= ExtraScreenshotsPerStep;
+            if (keepRecent && !gardenStep)
                 return null;
             if (!EnsureDirectory())
                 return null;
@@ -82,6 +91,17 @@ namespace TideCombat
             string temporary = path + ".tmp";
             try
             {
+                if (keepRecent && recentGardenScreenshots.Count == RecentGardenScreenshotsPerStep)
+                {
+                    string oldest = recentGardenScreenshots.Peek();
+                    TryDelete(oldest);
+                    if (File.Exists(oldest))
+                    {
+                        RunLog.Warn(logArea, step + "｜未能轮换近期乐园截图");
+                        return null;
+                    }
+                    recentGardenScreenshots.Dequeue();
+                }
                 Screenshots.WritePng(frame, area, temporary);
                 File.Move(temporary, path);
                 if (isBefore)
@@ -89,17 +109,19 @@ namespace TideCombat
                     beforeSample = Sample(frame);
                     beforeSize = area.Size;
                 }
-                if (!isBefore && !isAfter)
+                if (keepRecent)
+                    recentGardenScreenshots.Enqueue(path);
+                else if (isExtra)
                     extras++;
                 string comparison = isAfter ? CompareToBefore(frame, area.Size) : string.Empty;
-                RunLog.Info(LogArea, step + " " + stage + "｜" + path + comparison);
+                RunLog.Info(logArea, step + " " + stage + "｜" + path + comparison);
                 return path;
             }
             catch (Exception error)
             {
                 if (!IsEvidenceError(error)) throw;
                 TryDelete(temporary);
-                RunLog.Error(LogArea, step + " " + stage + "｜保存截图失败", error);
+                RunLog.Error(logArea, step + " " + stage + "｜保存截图失败", error);
                 return null;
             }
         }
@@ -163,19 +185,19 @@ namespace TideCombat
                 {
                     if (!IsEvidenceError(error)) throw;
                     folderUnavailable = true;
-                    RunLog.Error(LogArea, "无法创建截图证据目录", error);
+                    RunLog.Error(logArea, "无法创建截图证据目录", error);
                     return false;
                 }
             }
         }
 
-        private static void Prune(string root, string current)
+        private void Prune(string root, string current)
         {
             try
             {
                 var older = Directory.GetDirectories(root)
                     .Where(path => !string.Equals(path, current, StringComparison.OrdinalIgnoreCase) &&
-                        RunName.IsMatch(Path.GetFileName(path)))
+                        runNamePattern.IsMatch(Path.GetFileName(path)))
                     .OrderByDescending(path => path, StringComparer.Ordinal)
                     .Skip(RetainedRuns - 1);
                 foreach (string path in older)
@@ -192,7 +214,7 @@ namespace TideCombat
             catch (Exception error)
             {
                 if (!IsEvidenceError(error)) throw;
-                RunLog.Warn(LogArea, "未能清理旧截图证据目录");
+                RunLog.Warn(logArea, "未能清理旧截图证据目录");
             }
         }
 

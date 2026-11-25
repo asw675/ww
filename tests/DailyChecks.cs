@@ -16,6 +16,102 @@ namespace TideCombat
                 throw new InvalidOperationException(explanation);
         }
 
+        internal static void ObtainedRewardReceiptNeedsHeadingAndDismissal()
+        {
+            var heading = new OcrLine { Text = "获得", Box = new Rectangle(764, 212, 72, 38), Score = .99f };
+            var footer = new OcrLine { Text = "点击空白处继续", Box = new Rectangle(733, 786, 135, 19), Score = .99f };
+            var otherFooter = new OcrLine { Text = footer.Text, Box = new Rectangle(878, 786, 135, 19), Score = .99f };
+            var faint = new OcrLine { Text = footer.Text, Box = footer.Box, Score = .5f };
+            var unrelated = new OcrLine { Text = "获得声骸", Box = heading.Box, Score = .99f };
+            Require(DailyClaimVision.ObtainedReceiptDismissal(new[] { heading }, new[] { footer }) == footer.Box,
+                "the short receipt must return the verified continuation prompt");
+            Require(DailyClaimVision.ObtainedReceiptDismissal(new[] { heading }, new OcrLine[0]).IsEmpty &&
+                DailyClaimVision.ObtainedReceiptDismissal(new[] { unrelated }, new[] { footer }).IsEmpty &&
+                DailyClaimVision.ObtainedReceiptDismissal(new[] { heading }, new[] { faint }).IsEmpty &&
+                DailyClaimVision.ObtainedReceiptDismissal(new[] { heading }, new[] { footer, otherFooter }).IsEmpty,
+                "partial, unrelated, faint, and ambiguous text cannot authorize closing a receipt");
+        }
+
+        internal static void ActivityScrollbar()
+        {
+            using (var image = new Bitmap(1600, 900))
+            using (Graphics paint = Graphics.FromImage(image))
+            using (var reader = new FrameReader())
+            {
+                paint.Clear(Color.FromArgb(28, 41, 60));
+                paint.FillRectangle(Brushes.White, 1540, 174, 3, 260);
+                paint.FillRectangle(Brushes.White, 1558, 174, 5, 22);
+                Require(DailyRunner.FindDailyActivityScrollThumb(reader.Read(image)).IsEmpty,
+                    "忽略列表内容里的长边缘与滚动条边缘的短干扰");
+
+                paint.FillRectangle(Brushes.White, 1558, 214, 5, 200);
+                Require(DailyRunner.FindDailyActivityScrollThumb(reader.Read(image)) ==
+                    new Rectangle(1558, 214, 1, 200), "识别右侧日常列表滑块");
+
+                paint.Clear(Color.FromArgb(28, 41, 60));
+                paint.FillRectangle(Brushes.White, 1558, 419, 5, 200);
+                Require(DailyRunner.FindDailyActivityScrollThumb(reader.Read(image)) ==
+                    new Rectangle(1558, 419, 1, 200), "翻页后应测得滑块的新位置");
+            }
+        }
+
+        internal static void StepRetriesOnce()
+        {
+            var attempts = new System.Collections.Generic.List<bool>();
+            int recoveryChecks = 0;
+            var firstFailure = new InvalidOperationException("首次截图未核验");
+            var finalFailure = new InvalidOperationException("重试截图仍未核验");
+            Func<InvalidOperationException, bool> safeToRetry = error =>
+            {
+                Require(ReferenceEquals(error, firstFailure), "只处理首次执行的未完成结果");
+                recoveryChecks++;
+                return true;
+            };
+
+            DailyPlan.ExecuteWithOneRetry(attempts.Add, safeToRetry);
+            Require(attempts.SequenceEqual(new[] { false }) && recoveryChecks == 0, "已核验的项目只执行一次");
+
+            attempts.Clear();
+            DailyPlan.ExecuteWithOneRetry(retry =>
+            {
+                attempts.Add(retry);
+                if (!retry) throw firstFailure;
+            }, safeToRetry);
+            Require(attempts.SequenceEqual(new[] { false, true }) && recoveryChecks == 1, "可安全恢复的未完成项目只重跑一次");
+
+            attempts.Clear();
+            try
+            {
+                DailyPlan.ExecuteWithOneRetry(retry =>
+                {
+                    attempts.Add(retry);
+                    throw retry ? finalFailure : firstFailure;
+                }, safeToRetry);
+                throw new Exception("重试失败必须返回失败");
+            }
+            catch (InvalidOperationException error)
+            {
+                Require(ReferenceEquals(error, finalFailure) && attempts.SequenceEqual(new[] { false, true }) &&
+                    recoveryChecks == 2, "重试失败不能触发第三次执行");
+            }
+
+            attempts.Clear();
+            try
+            {
+                DailyPlan.ExecuteWithOneRetry(retry =>
+                {
+                    attempts.Add(retry);
+                    throw firstFailure;
+                }, error => false);
+                throw new Exception("无法安全恢复时必须返回失败");
+            }
+            catch (InvalidOperationException error)
+            {
+                Require(ReferenceEquals(error, firstFailure) && attempts.SequenceEqual(new[] { false }),
+                    "无法安全重跑的项目不能重复操作");
+            }
+        }
+
         internal static void Plan()
         {
             Require(DailyPlan.RewardReady(100), "100 积分应视为已领取");
@@ -116,6 +212,20 @@ namespace TideCombat
         private static OcrLine Line(string text)
         {
             return new OcrLine { Text = text, Box = new Rectangle(300, 300, 50, 25), Score = .95f };
+        }
+
+        internal static void NightmareUnresolvedCombatStopsPlan()
+        {
+            foreach (bool reference in new[] { false, true })
+            {
+                Require(!DailyPlan.CanAttemptRecovery(DailyTask.Nightmare, reference, false, false,
+                    nightmareCombatUnresolved: true), "梦魇未确认开战或清场时必须中止后续步骤");
+                Require(!DailyPlan.CanAttemptRecovery(DailyTask.Nightmare, reference, false, true,
+                    nightmareCombatUnresolved: true), "普通未核验返回的恢复规则不能覆盖梦魇战斗未核验");
+                Require(DailyPlan.CanAttemptRecovery(DailyTask.Nightmare, reference, false, false) &&
+                    DailyPlan.CanAttemptRecovery(DailyTask.Nightmare, reference, false, true),
+                    "其他梦魇导航或扫描问题仍按各自的恢复规则判断");
+            }
         }
 
         internal static void Options()

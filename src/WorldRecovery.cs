@@ -17,17 +17,22 @@ namespace TideCombat
 
         internal bool Recover(bool enteredFromWaypoint, bool requireRealmForSkip)
         {
+            if (!world.Tick() || HasActiveCombat()) return false;
             report("角色倒下，退出副本");
-            if (!world.Tick()) return false;
             bool wasInRealm = world.InRealm;
             if (!world.VerifiedWorld || world.Ui != null && world.Ui.Death)
                 CloseRevivePopup();
-            if (!world.Tick()) return false;
+            if (!world.Tick() || HasActiveCombat()) return false;
             wasInRealm |= world.InRealm;
             if ((!world.VerifiedWorld || world.InRealm) && !LeaveRealm()) return false;
             if (enteredFromWaypoint && (wasInRealm || !requireRealmForSkip)) return true;
             report("从图鉴定位回血信标");
             return TeleportToHeal();
+        }
+
+        private bool HasActiveCombat()
+        {
+            return world.TeamHud && (world.Hud.Locked || world.Hud.EnemyHealth);
         }
 
         internal bool ClearFarmInterruption()
@@ -57,7 +62,7 @@ namespace TideCombat
             bool disconnected;
             Rectangle exit = WorldAssist.CloudDisconnectButton(world.Read(.20, .25, .80, .75, centered: true), out disconnected);
             if (exit.IsEmpty) return null;
-            if (!world.ClickOnRoute(exit, route, 20)) return false;
+            if (!world.ClickMenuButton(exit, route: route)) return false;
             report("云游戏已断线，等待重新进入大世界");
             world.Sleep(3000);
             var clock = System.Diagnostics.Stopwatch.StartNew();
@@ -97,10 +102,10 @@ namespace TideCombat
             if (world.WaitUntil(cancelVisible, 1200))
             {
                 world.Sleep(200);
-                if (cancelVisible() && world.Click(button)) { world.Sleep(500); return; }
+                if (cancelVisible() && world.ClickMenuButton(button)) { world.Sleep(500); return; }
                 if (world.VerifiedWorld) return;
             }
-            if (world.FindNear("btn_dialog_close", .80, out button) && world.Click(button))
+            if (world.FindNear("btn_dialog_close", .80, out button) && world.ClickMenuButton(button))
             {
                 world.Sleep(500);
                 return;
@@ -120,8 +125,8 @@ namespace TideCombat
                 world.Tick();
                 return world.InputRouteVersion == route;
             };
-            Func<double, double, bool> click = (x, y) => world.Tick() && world.ClickOnRoute(
-                new Point((int)(world.Frame.Width * x), (int)(world.Frame.Height * y)), route);
+            Func<double, double, bool> click = (x, y) => world.Tick() && world.ClickMenuButton(
+                new Point((int)(world.Frame.Width * x), (int)(world.Frame.Height * y)), route: route);
             Func<Func<bool>, int, bool> wait = (condition, timeout) => world.WaitUntil(
                 () => world.InputRouteVersion != route || condition(), timeout) && world.InputRouteVersion == route;
 
@@ -155,18 +160,36 @@ namespace TideCombat
             // Detect may reveal waypoints before the map finishes centering on the boss.
             if (!delay(2000) || !wait(mapOpen, 1000)) return false;
             Rectangle point = points[0];
-            if (!world.ClickOnRoute(point, route) || !delay(1000)) return false;
             Rectangle travel = Rectangle.Empty;
+            Rectangle popup = Rectangle.Empty;
+            Func<bool> waypointReady = () => world.FindNear("gray_teleport", .76, out travel) ||
+                world.Captured && world.Vision.FindWaypointPopup(world.Frame, out popup);
+            if (waypointReady())
+            {
+                if (!world.ClickMenuButton(point, route: route) || !delay(1000)) return false;
+            }
+            else if (!world.ClickMenuTransition(route, () =>
+                {
+                    if (!mapOpen()) return Rectangle.Empty;
+                    return points.Find(candidate => candidate.IntersectsWith(point));
+                }, waypointReady, 3000, 1000))
+                return false;
+
             if (!wait(() => world.FindNear("gray_teleport", .76, out travel), 3000))
             {
-                Rectangle popup;
-                if (!world.Tick() || world.InputRouteVersion != route || world.VerifiedWorld ||
-                    !world.Vision.FindWaypointPopup(world.Frame, out popup) || !world.ClickOnRoute(popup, route) ||
-                    !delay(1000) || !wait(() => world.FindNear("gray_teleport", .76, out travel), 3000)) return false;
+                if (!world.ClickMenuTransition(route, () => !world.VerifiedWorld &&
+                    world.Vision.FindWaypointPopup(world.Frame, out popup) ? popup : Rectangle.Empty,
+                    () => world.FindNear("gray_teleport", .76, out travel), 3000, 1000)) return false;
             }
-            var destination = new Point(travel.X + 3 * travel.Width / 2, travel.Y + travel.Height / 2);
-            if (!world.ClickOnRoute(destination, route)) return false;
-            if (!wait(() => world.VerifiedWorld && !world.InRealm, 20000)) return false;
+            Rectangle originalTravel = travel;
+            if (!world.ClickMenuTransition(route, () =>
+                {
+                    Rectangle current;
+                    if (world.VerifiedWorld || !world.FindNear("gray_teleport", .76, out current) ||
+                        !originalTravel.IntersectsWith(current)) return Rectangle.Empty;
+                    return new Rectangle(current.Right, current.Y, current.Width, current.Height);
+                }, () => world.VerifiedWorld && !world.InRealm, 20000))
+                return false;
             return delay(2000);
         }
 
@@ -245,18 +268,35 @@ namespace TideCombat
 
         private bool LeaveRealm()
         {
-            if (!world.Key((char)0x1B)) return false;
-            world.Sleep(1000);
-            Rectangle exit = Rectangle.Empty;
-            if (!world.WaitUntil(() => world.VerifiedWorld && !world.InRealm ||
-                world.FindNear("gray_confirm_exit_button", .70, out exit), 3000))
-                return world.WaitUntil(() => world.VerifiedWorld && !world.InRealm, 120000);
-            if (world.VerifiedWorld && !world.InRealm) return true;
-            world.Sleep(500);
-            if (!world.FindNear("gray_confirm_exit_button", .70, out exit))
-                return world.WaitUntil(() => world.VerifiedWorld && !world.InRealm, 120000);
-            if (!world.Click(exit)) return false;
-            return world.WaitUntil(() => world.VerifiedWorld && !world.InRealm, 120000);
+            if (!world.Tick()) return false;
+            int route = world.InputRouteVersion;
+            Func<bool> exited = () => world.VerifiedWorld && !world.InRealm;
+            if (exited()) return true;
+            bool recognizedLeave = false;
+            Func<Rectangle> findExit = () =>
+            {
+                RealmExitDialog dialog = FarmVision.ReadRealmExitDialog(world.Frame, world.Ocr);
+                recognizedLeave = dialog.Recognized;
+                Rectangle template;
+                return dialog.Recognized ? dialog.Exit :
+                    world.Vision.FindLabel(world.Frame, "gray_confirm_exit_button", .70, out template) ?
+                        template : Rectangle.Empty;
+            };
+            if (findExit().IsEmpty)
+            {
+                if (recognizedLeave || !world.Key((char)0x1B, route: route)) return false;
+                world.Sleep(1000);
+                if (!world.WaitUntil(() => world.InputRouteVersion != route || exited() || !findExit().IsEmpty, 3000))
+                    return world.WaitUntil(() => world.InputRouteVersion != route || exited(), 120000) &&
+                        world.InputRouteVersion == route;
+            }
+            if (world.InputRouteVersion != route) return false;
+            if (world.ClickMenuTransition(route, findExit, exited, 5000, 500))
+                return true;
+            if (world.Tick() && world.InputRouteVersion == route && !findExit().IsEmpty)
+                return false;
+            return world.WaitUntil(() => world.InputRouteVersion != route || exited(), 120000) &&
+                world.InputRouteVersion == route;
         }
 
     }

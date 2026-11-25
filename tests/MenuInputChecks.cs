@@ -118,6 +118,114 @@ namespace TideCombat
             }
         }
 
+        internal static void BackgroundTargetDispatch()
+        {
+            using (var root = new Sink(IntPtr.Zero, new Rectangle(-21100, -21200, 320, 200)))
+            {
+                uint owner;
+                Native.GetWindowThreadProcessId(root.Handle, out owner);
+                var input = new WindowMessages();
+                var target = BattleAction.Target();
+                var token = CancellationToken.None;
+                using (var container = new Sink(root.Handle, new Rectangle(40, 35, 250, 135)))
+                using (var viewport = new Sink(container.Handle, new Rectangle(90, 42, 64, 45)))
+                {
+                    Application.DoEvents();
+                    root.Messages.Clear();
+                    container.Messages.Clear();
+                    viewport.Messages.Clear();
+                    Require(!input.Send(target, root.Handle, owner + 1, token),
+                        "background target accepted an incorrect process");
+                    Require(!input.Send(target, root.Handle, owner, new CancellationToken(true)),
+                        "cancelled background target was sent");
+                    int readinessChecks = 0;
+                    Require(!input.Send(target, root.Handle, owner, token, () => ++readinessChecks == 1),
+                        "background target was sent after its input route changed during the mouse move");
+                    Application.DoEvents();
+                    Require(!root.Messages.Any() && !container.Messages.Any() &&
+                        viewport.Messages.Select(message => message.Msg).SequenceEqual(new[] { 0x0200 }),
+                        "a button or activation message escaped the rejected background target");
+                    viewport.Messages.Clear();
+
+                    Require(input.Send(BattleAction.Press(BattleButton.Attack, 0, true), root.Handle, owner, token),
+                        "failed to hold left mouse before background target");
+                    Application.DoEvents();
+                    root.Messages.Clear();
+                    container.Messages.Clear();
+                    viewport.Messages.Clear();
+                    Require(input.Send(target, root.Handle, owner, token), "background target was not sent");
+                    Application.DoEvents();
+
+                    int viewportCenter = 30 | 23 << 16;
+                    Require(!root.Messages.Any() && !container.Messages.Any(),
+                        "background target reached a parent or sent activation");
+                    Require(viewport.Messages.Select(message => message.Msg).SequenceEqual(new[] { 0x0200, 0x0207, 0x0208 }) &&
+                        viewport.Messages.All(message => message.LParam.ToInt32() == viewportCenter) &&
+                        viewport.Messages.Select(message => message.WParam.ToInt32()).SequenceEqual(new[] { 1, 0x11, 1 }),
+                        "background target must move, press and release middle mouse at the verified child point without releasing left mouse");
+                    Require(input.ReleaseAll() && !input.ReleaseAll(), "middle click must leave only the original left hold outstanding");
+
+                    Application.DoEvents();
+                    viewport.Messages.Clear();
+                    Require(input.Send(BattleAction.Press(BattleButton.MiddleClick, 0x04, false), root.Handle, owner, token),
+                        "a rotation's middle-click target was not sent");
+                    Application.DoEvents();
+                    Require(viewport.Messages.Select(message => message.Msg).SequenceEqual(new[] { 0x0200, 0x0207, 0x0208 }) &&
+                        viewport.Messages.All(message => message.LParam.ToInt32() == viewportCenter) &&
+                        viewport.Messages.Select(message => message.WParam.ToInt32()).SequenceEqual(new[] { 0, 0x10, 0 }),
+                        "rotation middle-click must use the same verified viewport as automatic targeting");
+                }
+                Application.DoEvents();
+                root.Messages.Clear();
+                Require(input.Send(target, root.Handle, owner, token), "background target without children was not sent");
+                Application.DoEvents();
+                int rootCenter = 160 | 100 << 16;
+                Require(root.Messages.Select(message => message.Msg).SequenceEqual(new[] { 0x0200, 0x0207, 0x0208 }) &&
+                    root.Messages.All(message => message.LParam.ToInt32() == rootCenter) &&
+                    root.Messages.Select(message => message.WParam.ToInt32()).SequenceEqual(new[] { 0, 0x10, 0 }),
+                    "without a child, the same middle-click sequence must reach the game window itself");
+            }
+        }
+
+        internal static void ReplayTransitionAgainstWindow()
+        {
+            using (var root = new Sink(IntPtr.Zero, new Rectangle(-21100, -21200, 300, 200)))
+            using (var child = new Sink(root.Handle, new Rectangle(40, 50, 100, 100)))
+            {
+                Application.DoEvents();
+                root.Messages.Clear();
+                child.Messages.Clear();
+                uint owner;
+                Native.GetWindowThreadProcessId(root.Handle, out owner);
+                var control = new Rectangle(55, 70, 12, 10);
+                int dispatched = 0;
+                long now = 0, destinationAt = long.MaxValue;
+                bool arrived = WorldSession.RunMenuTransition(() => true, () => true,
+                    () =>
+                    {
+                        uint current;
+                        return Native.GetWindowThreadProcessId(root.Handle, out current) != 0 && current == owner;
+                    },
+                    () => now, delay => now += delay, delay => now += delay,
+                    () => control, () => now >= destinationAt, (button, retry) =>
+                    {
+                        dispatched++;
+                        var click = new Point(button.Left + button.Width / 2, button.Top + button.Height / 2);
+                        Require(WindowMessages.ClickBackground(root.Handle, owner, click, FarmMouse.Left, 1, 0,
+                            CancellationToken.None, () => true), "click did not reach the offline menu window");
+                        Application.DoEvents();
+                        // The window receives the first click but models a game
+                        // that only responds after the verified retry.
+                        if (retry) destinationAt = now + 120;
+                        return true;
+                    }, 240, 0);
+                Require(arrived && dispatched == 2 &&
+                    child.Messages.Count(message => message.Msg == 0x0201) == 2 &&
+                    child.Messages.Count(message => message.Msg == 0x0202) == 2 &&
+                    !root.Messages.Any(), "the original click and one retry must target only the offline child window");
+            }
+        }
+
         private static void Require(bool condition, string message)
         {
             if (!condition) throw new InvalidOperationException(message);

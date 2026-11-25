@@ -228,8 +228,12 @@ namespace TideCombat
 
         private void Challenge(Stage stage, int completed)
         {
-            Click(stage.Box, 450);
-            if (!WaitUntil(IsDetails, 5000))
+            if (!NavigateNative(() =>
+                {
+                    List<Stage> matches = ReadStages().Where(candidate => candidate.Name == stage.Name &&
+                        stage.Box.IntersectsWith(candidate.Box)).ToList();
+                    return matches.Count == 1 ? matches[0].Box : Rectangle.Empty;
+                }, IsDetails))
                 throw new InvalidOperationException("无法打开关卡「" + stage.Name + "」。");
             string difficulty = completed == 0 ? "简单" : "困难";
             Func<bool> selected = () => !Find(.68, .125, .96, .181, difficulty + "$").IsEmpty;
@@ -312,9 +316,26 @@ namespace TideCombat
             }
             if (leave.IsEmpty)
                 throw new InvalidOperationException("无法确认退出挑战按钮。");
-            Click(leave, 450);
-            if (!WaitUntil(IsDetails, 5000))
+            if (!NavigateNative(leaveButton, IsDetails))
                 throw new InvalidOperationException("退出挑战后未返回关卡详情。");
+        }
+
+        private bool NavigateNative(Func<Rectangle> findControl, Func<bool> destination)
+        {
+            Rectangle original = Rectangle.Empty;
+            for (int attempt = 0; attempt < 2; attempt++)
+            {
+                RequireForeground();
+                if (destination()) return true;
+                Rectangle button = findControl();
+                if (button.IsEmpty || attempt != 0 && !original.IntersectsWith(button)) return false;
+                if (attempt == 0) original = button;
+                var center = new Point(button.Left + button.Width / 2, button.Top + button.Height / 2);
+                if (SendNativeClick(center, 35, settleMs: 150, useWindowMessage: attempt != 0))
+                    Pause(450);
+                if (WaitUntil(destination, 5000)) return true;
+            }
+            return false;
         }
 
         private RahaiBoard Playable()
@@ -532,11 +553,17 @@ namespace TideCombat
 
         private void ClickNative(Point point, int delay, int hold)
         {
-            RequireForeground();
-            if (point.X < 0 || point.X >= targetSize.Width || point.Y < 0 || point.Y >= targetSize.Height ||
-                !world.Input.Click(point, targetSize, world.Bounds, FarmMouse.Left, hold, token))
+            if (!SendNativeClick(point, hold))
                 throw new InvalidOperationException("活动按钮点击未发送。");
             Pause(delay);
+        }
+
+        private bool SendNativeClick(Point point, int hold, int settleMs = 0, bool useWindowMessage = false)
+        {
+            RequireForeground();
+            return point.X >= 0 && point.X < targetSize.Width && point.Y >= 0 && point.Y < targetSize.Height &&
+                world.Input.Click(point, targetSize, world.Bounds, FarmMouse.Left, hold, token,
+                    settleMs: settleMs, useWindowMessage: useWindowMessage);
         }
 
         private bool RefreshFrame()

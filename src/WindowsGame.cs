@@ -570,7 +570,10 @@ namespace TideCombat
             if (window.Mode == GameSource.Background)
             {
                 if (messages == null) messages = new WindowMessages();
-                sent = messages.Send(action, window.Handle, window.ProcessId, cancellation);
+                IntPtr handle = window.Handle;
+                uint process = window.ProcessId;
+                sent = messages.Send(action, handle, process, cancellation, () => window.Handle == handle &&
+                    window.ProcessId == process && window.Mode == GameSource.Background && window.Available());
                 if (!sent && action.Kind != ActionKind.Wait && !cancellation.IsCancellationRequested)
                     SkipInput("游戏窗口未接受后台操作 " + action.Label);
             }
@@ -584,7 +587,9 @@ namespace TideCombat
         private void LogAction(BattleAction action, string operation)
         {
             int key = action.Kind == ActionKind.Cast ? action.Key : action.NativeKey;
-            if (action.Kind == ActionKind.Switch)
+            if (action.Kind == ActionKind.Target)
+                key = 0x04;
+            else if (action.Kind == ActionKind.Switch)
                 key = '1' + action.Slot;
             string keyDetail = key == 0 ? string.Empty : " VK=0x" + key.ToString("X2");
             RunLog.Info("Input", string.Format("已发送战斗操作｜模式={0} PID={1} 操作={2} {3}{4}",

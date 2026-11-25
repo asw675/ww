@@ -121,6 +121,7 @@ namespace TideCombat
         private Task assistRun;
         private bool assistEnabled;
         private bool startupAssistOnly;
+        private bool preserveTaskResult;
         internal enum WorkMode
         {
             Battle, Preview, Farm, Enhance, Domain, Nightmare, Garden, Merge, Change, Daily,
@@ -685,6 +686,7 @@ namespace TideCombat
         private async void BeginManualAssist()
         {
             if (closing || work != null) return;
+            preserveTaskResult = false;
             if (assistRun != null && !startupAssistOnly) return;
             assistEnabled = true;
             startupAssistOnly = false;
@@ -701,7 +703,8 @@ namespace TideCombat
             catch (InvalidDataException error)
             {
                 assistEnabled = false;
-                SetFooter(error.Message, true);
+                if (CanShowAssistStatus) SetFooter(error.Message, true);
+                else RunLog.Warn("后台辅助", error.Message);
                 return;
             }
             if (startupAssistOnly)
@@ -716,14 +719,19 @@ namespace TideCombat
             bool startupBattle = startupAssistOnly && current.WorldAssist.StartsBattleAutomatically;
             var cancellation = new CancellationTokenSource();
             assistCancellation = cancellation;
-            var report = new Progress<BattleReport>(value =>
-            {
-                if (work == null && assistCancellation == cancellation && !cancellation.IsCancellationRequested)
-                    RenderReport(value);
-            });
+            var report = new Progress<BattleReport>(value => RenderAssistReport(cancellation, value));
             stop.Enabled = true;
-            mode.Text = startupBattle ? "启动辅助和自动战斗" : "后台辅助";
+            if (CanShowAssistStatus)
+                mode.Text = startupBattle ? "启动辅助和自动战斗" : "后台辅助";
             assistRun = RunAssist(current, report, cancellation, startupBattle);
+        }
+
+        private bool CanShowAssistStatus { get { return work == null && !preserveTaskResult; } }
+
+        private void RenderAssistReport(CancellationTokenSource cancellation, BattleReport report)
+        {
+            if (CanShowAssistStatus && assistCancellation == cancellation && !cancellation.IsCancellationRequested)
+                RenderReport(report);
         }
 
         private async Task RunAssist(CombatSettings current, IProgress<BattleReport> report,
@@ -740,7 +748,7 @@ namespace TideCombat
                 {
                     assistEnabled = false;
                     RunLog.Error("后台辅助", "运行中断", error);
-                    SetFooter(FriendlyError(error), true);
+                    if (CanShowAssistStatus) SetFooter(FriendlyError(error), true);
                 }
             }
             finally
@@ -751,7 +759,7 @@ namespace TideCombat
                 if (work == null)
                 {
                     stop.Enabled = false;
-                    mode.Text = "已停止";
+                    if (CanShowAssistStatus) mode.Text = "已停止";
                     if (closing) Close();
                 }
             }
@@ -1009,6 +1017,7 @@ namespace TideCombat
                 return;
             }
             var cancellation = new CancellationTokenSource();
+            preserveTaskResult = false;
             work = cancellation;
             inPreview = isPreview;
             hasReadout = false;
@@ -1060,10 +1069,18 @@ namespace TideCombat
                 if (!cancellation.IsCancellationRequested && ReferenceEquals(work, cancellation))
                     RenderChange(report);
             });
-            var dailyProgress = new Progress<DailyReport>(report =>
+            DailyReport dailyResult = null;
+            IProgress<DailyReport> dailyProgressUi = new Progress<DailyReport>(report =>
             {
                 if (!cancellation.IsCancellationRequested && ReferenceEquals(work, cancellation))
                     RenderDaily(report);
+            });
+            var dailyProgress = new StepProgress<DailyReport>(report =>
+            {
+                if (report.Finished)
+                    dailyResult = report;
+                else
+                    dailyProgressUi.Report(report);
             });
             var multiProgress = new Progress<MultiAccountReport>(report =>
             {
@@ -1134,7 +1151,10 @@ namespace TideCombat
                     case WorkMode.Garden:
                         failure = await Task.Run(delegate
                         {
-                            using (var runner = new GardenRunner(settings, cancellation.Token, gardenProgress))
+                            var evidence = new DailyEvidence(RunLog.DirectoryPath, standaloneGarden: true);
+                            evidence.StartStep(DailyTask.Garden, 1);
+                            using (var runner = new GardenRunner(settings, cancellation.Token, gardenProgress,
+                                (stage, frame) => evidence.Save(stage, frame)))
                             {
                                 runner.Run();
                                 completionVerified = runner.CompletionVerified;
@@ -1203,6 +1223,9 @@ namespace TideCombat
                                 return runner.Failure;
                             }
                         });
+                        completionVerified = dailyResult != null;
+                        if (!completionVerified && failure == null && !cancellation.IsCancellationRequested)
+                            failure = "一条龙未返回核验结果。";
                         break;
                     case WorkMode.MultiDaily:
                         failure = await Task.Run(delegate
@@ -1277,6 +1300,9 @@ namespace TideCombat
                     RunLog.Warn("任务", workMode + " 执行结束" + duration + "，失败原因=" + failure);
                 else if (!needsElevation)
                     RunLog.Info("任务", workMode + " 执行结束" + duration);
+                if (dailyResult != null && !cancellation.IsCancellationRequested)
+                    RenderDaily(dailyResult);
+                preserveTaskResult = waitForWindow;
                 work = null;
                 SetRunning(false);
                 resume.Enabled = false;
@@ -1290,11 +1316,16 @@ namespace TideCombat
                 if (cancellation.IsCancellationRequested)
                 {
                     state.Text = "已停止任务。";
-                    if (waitForWindow) SetFooter(persistenceError ?? "可以重新选择并运行任务。", persistenceError != null);
+                    if (waitForWindow)
+                    {
+                        lastAction.Text = "已停止";
+                        SetFooter(persistenceError ?? "可以重新选择并运行任务。", persistenceError != null);
+                    }
                 }
                 else if (failure != null)
                 {
                     state.Text = failure;
+                    if (waitForWindow) lastAction.Text = "已停止";
                     SetFooter(failure, true);
                 }
                 else if (!waitForWindow)
@@ -1559,13 +1590,13 @@ namespace TideCombat
         {
             mode.Text = report.Finished ? "任务结束" : "周常乐园";
             state.Text = report.State;
-            target.Text = "操作 " + report.Actions;
+            target.Text = "已确认 " + report.Actions;
             skills.Text = "—";
             lastAction.Text = report.Finished ? "已停止" : "运行中";
             if (report.Failure != null)
                 SetFooter(report.Failure, true);
             else
-                SetFooter(string.Format("已执行 {0} 次操作 · {1}", report.Actions,
+                SetFooter(string.Format("已确认 {0} 次操作 · {1}", report.Actions,
                     report.Size.Width > 0 ? report.Size.Width + "×" + report.Size.Height : "—"), false);
         }
 

@@ -7,6 +7,12 @@ namespace TideCombat
 {
     internal enum RechallengeChoice { None, Selected, Above, Below, RewardSelected }
 
+    internal struct RealmExitDialog
+    {
+        internal bool Recognized;
+        internal Rectangle Restart, Exit;
+    }
+
     internal sealed class FarmUi
     {
         internal bool FPrompt;
@@ -29,6 +35,8 @@ namespace TideCombat
         internal bool Book;
         internal bool BookSelected;
         internal Rectangle BookBox;
+        internal bool BossCategoryObserved, BossCategorySelected;
+        internal Rectangle BossCategoryBox, BossCategoryScroll;
         internal bool BookMonsters, BookMonstersSelected;
         internal Rectangle BookMonstersBox;
         internal List<Rectangle> BossRows = new List<Rectangle>();
@@ -398,19 +406,28 @@ namespace TideCombat
 
         internal static Rectangle ReadRechallengeDialog(PixelFrame frame, OcrReader ocr)
         {
-            if (ocr == null)
-                return Rectangle.Empty;
-            int center = frame.Width / 2;
-            var region = new Rectangle(center - 440, (int)(frame.Height * .43), 700, (int)(frame.Height * .27));
-            List<OcrLine> lines;
-            try { lines = ocr.Read(frame, region); }
-            catch (Microsoft.ML.OnnxRuntime.OnnxRuntimeException) { return Rectangle.Empty; }
+            return ReadRealmExitDialog(frame, ocr).Restart;
+        }
 
-            bool leaveHeading = false;
-            Rectangle restart = Rectangle.Empty;
+        internal static RealmExitDialog ReadRealmExitDialog(PixelFrame frame, OcrReader ocr)
+        {
+            if (ocr == null || frame.Width <= 0 || frame.Height <= 0)
+                return default(RealmExitDialog);
+            int center = frame.Width / 2;
+            var area = Rectangle.Intersect(new Rectangle(0, 0, frame.Width, frame.Height),
+                new Rectangle(center - 440, (int)(frame.Height * .43), 880, (int)(frame.Height * .27)));
+            try { return ParseLeaveDialog(ocr.Read(frame, area), new Size(frame.Width, frame.Height)); }
+            catch (Microsoft.ML.OnnxRuntime.OnnxRuntimeException) { return default(RealmExitDialog); }
+        }
+
+        internal static RealmExitDialog ParseLeaveDialog(IEnumerable<OcrLine> lines, Size frame)
+        {
+            var dialog = new RealmExitDialog();
+            if (frame.Width <= 0 || frame.Height <= 0) return dialog;
+            int center = frame.Width / 2;
             foreach (OcrLine line in lines)
             {
-                if (line.Score < .65f || string.IsNullOrWhiteSpace(line.Text))
+                if (line == null || line.Score < .65f || line.Box.IsEmpty || string.IsNullOrWhiteSpace(line.Text))
                     continue;
                 int x = line.Box.Left + line.Box.Width / 2;
                 double y = (line.Box.Top + line.Box.Height / 2.0) / frame.Height;
@@ -418,11 +435,15 @@ namespace TideCombat
                 if (Math.Abs(x - center) <= 140 && y >= .45 && y <= .55 &&
                     (text == "确认离开" || text == "確認離開" || text == "确定离开" || text == "確定離開" ||
                      text == "confirmexit" || text == "confirmleave" || text == "leavechallenge"))
-                    leaveHeading = true;
-                if (x >= center - 420 && x <= center - 120 && y >= .59 && y <= .68 && IsRechallengeLabel(text))
-                    restart = line.Box;
+                    dialog.Recognized = true;
+                if (y < .59 || y > .68) continue;
+                if (x >= center - 420 && x <= center - 120 && IsRechallengeLabel(text))
+                    dialog.Restart = line.Box;
+                if (x >= center + 120 && x <= center + 420 &&
+                    (text == "确认" || text == "確認" || text == "确定" || text == "確定" || text == "confirm"))
+                    dialog.Exit = line.Box;
             }
-            return leaveHeading ? restart : Rectangle.Empty;
+            return dialog.Recognized ? dialog : default(RealmExitDialog);
         }
 
         private static string NormalizeLabel(string text)

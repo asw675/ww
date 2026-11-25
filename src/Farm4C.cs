@@ -51,6 +51,13 @@ namespace TideCombat
         public FarmBoss Boss { get; set; }
         public bool ExitAfterTask { get; set; }
 
+        internal FarmOptions WithRepeatCount(int count)
+        {
+            var copy = (FarmOptions)MemberwiseClone();
+            copy.RepeatCount = count;
+            return copy;
+        }
+
         public static FarmOptions Defaults()
         {
             return new FarmOptions
@@ -179,9 +186,11 @@ namespace TideCombat
         private long endWaitUntil;
         private EchoApproach echoApproach;
         private int pickupAttempts, pickupScrolls, yoloTurns, deathRecoveries;
-        private int startClicks, rowClicks, rechallengePresses, rechallengeMenuOpens;
+        private int startClicks, rowClicks, rechallengePresses, rechallengeMenuOpens, bookKindClicks, bookCategoryScrolls;
         private Rectangle selectedBossRow;
         private Rectangle entryConfirmation;
+        private Rectangle pendingTravelButton;
+        private bool travelClickRetried;
         private bool confirmationChecked, entryOpenedByInteraction, entryAfterRechallenge, requireBossLevel, configuredRealmEntry;
         private bool specialInteractionWait;
         private double scrollTarget = double.NaN;
@@ -229,6 +238,7 @@ namespace TideCombat
         internal string CompletionMessage { get; private set; }
         internal bool Finished { get { return step == Step.Done || step == Step.Failed; } }
         internal int Attempts { get { return attempts; } }
+        internal int SettledRounds { get; private set; }
         internal int Kills { get { return kills; } }
         internal int Echoes { get { return echoes; } }
         internal double EchoesPerHour { get; private set; }
@@ -265,6 +275,44 @@ namespace TideCombat
                 (step == Step.AimTeleport && aimStep <= 1); }
         }
         internal bool AwaitingBossDestination { get { return step == Step.Teleport && teleportStep == TeleportStep.Travel; } }
+        internal bool WantsBossCategory(long now)
+        {
+            return step == Step.Teleport && now >= nextAction &&
+                (teleportStep == TeleportStep.PickKind || teleportStep == TeleportStep.PickSpecial);
+        }
+
+        internal void ReadBossCategory(FarmUi ui, PixelFrame frame, OcrReader ocr)
+        {
+            ui.BossCategoryObserved = true;
+            if (ocr == null || !ui.BookSelected) return;
+            var size = new Size(frame.Width, frame.Height);
+            List<OcrLine> lines = ocr.Read(frame, GuidebookList.Area(size, .095, .11, .35, .91));
+            switch (options.TeleportMode)
+            {
+                case FarmTeleportMode.WeeklyChallenge:
+                    ui.BossCategoryBox = DailyClaimVision.UniqueButton(lines, "战歌重奏", "戰歌重奏", "Weekly Challenge");
+                    break;
+                case FarmTeleportMode.SpecialNightmare:
+                    ui.BossCategoryBox = DailyClaimVision.UniqueButton(lines, "特异梦魇", "特異夢魘", "Special Nightmare");
+                    if (ui.BossCategoryBox.IsEmpty)
+                        ui.BossCategoryBox = NestMath.BookCategoryButton(lines, purification: false);
+                    if (ui.BossCategoryBox.IsEmpty)
+                    {
+                        Rectangle thumb = NestMath.ScrollThumb(frame, sidebar: true);
+                        if (!thumb.IsEmpty)
+                        {
+                            int y = GuidebookList.PointAt(size, .356, .882).Y;
+                            ui.BossCategoryScroll = new Rectangle(thumb.Left, y - 1, thumb.Width, 3);
+                        }
+                    }
+                    break;
+                default:
+                    ui.BossCategoryBox = DailyClaimVision.UniqueButton(lines, "讨伐强敌", "討伐強敵", "Boss Challenge");
+                    break;
+            }
+            ui.BossCategorySelected = DomainMath.IsHighlightedBookKind(frame, ui.BossCategoryBox);
+        }
+
         internal bool NeedsBossMenuMarker { get { return AwaitingBossDestination ||
             step == Step.Enter && !entered && !entryAfterRechallenge; } }
         internal bool WantsMonsterGuide { get { return step == Step.AimTeleport; } }
@@ -1418,6 +1466,8 @@ namespace TideCombat
                 attempts, dropSeen, roundAbsorbed, pickupAttempts));
             ReleaseForward(now);
             lootSearchFinished = true;
+            if (roundAttemptActive && roundKillCounted)
+                SettledRounds++;
             roundAttemptActive = false;
             // A completed round clears the consecutive recovery budget;
             // independent later failures may still re-enter the same boss.
@@ -1634,7 +1684,9 @@ namespace TideCombat
         {
             detail = TeleportDetail();
             if (now - stepAt > (teleportStep == TeleportStep.WaitWorld ? LoadingTimeout : 30000))
-                return Stop("自动传送失败。请手动传送到 Boss 附近，然后重新开始。");
+                return Stop(teleportStep == TeleportStep.PickKind || teleportStep == TeleportStep.PickSpecial
+                    ? "未确认切换到所选首领分类，停止在图鉴。"
+                    : "自动传送失败。请手动传送到 Boss 附近，然后重新开始。");
             switch (teleportStep)
             {
                 case TeleportStep.OpenBook:
@@ -1649,7 +1701,7 @@ namespace TideCombat
                         teleportStep = ui.BookSelected ? TeleportStep.PickKind : TeleportStep.PickCategory;
                         stepAt = now;
                         nextAction = now;
-                        scrollClicks = rowClicks = 0;
+                        scrollClicks = rowClicks = bookKindClicks = bookCategoryScrolls = 0;
                         return Idle();
                     }
                     return OpenGuideFromScene(frame, ui, now);
@@ -1676,6 +1728,7 @@ namespace TideCombat
                 case TeleportStep.PickKind:
                     if (now >= nextAction)
                     {
+                        if (ui.BossCategoryObserved) return PickVerifiedBookKind(ui, now);
                         nextAction = now + 2000;
                         if (options.TeleportMode == FarmTeleportMode.SpecialNightmare)
                         {
@@ -1689,6 +1742,7 @@ namespace TideCombat
                 case TeleportStep.PickSpecial:
                     if (now < nextAction)
                         return Idle();
+                    if (ui.BossCategoryObserved) return PickVerifiedBookKind(ui, now);
                     nextAction = now + 2000;
                     teleportStep = TeleportStep.PickBoss;
                     return Click(At(frame, .24, .86), now);
@@ -1750,11 +1804,12 @@ namespace TideCombat
                         return ConfirmTravel(ui, now);
                     if (!ui.Teleport)
                     {
+                        pendingTravelButton = Rectangle.Empty;
                         teleportStep = TeleportStep.WaitWorld;
                         stepAt = now;
                         nextAction = now + 500;
                     }
-                    return Idle();
+                    return ConfirmTravel(ui, now);
                 case TeleportStep.WaitWorld:
                     if (WorldReady(frame, ui) && now >= nextAction)
                     {
@@ -1775,6 +1830,32 @@ namespace TideCombat
                 case FarmTeleportMode.SpecialNightmare: return .86;
                 default: return .49;
             }
+        }
+
+        private FarmDecision PickVerifiedBookKind(FarmUi ui, long now)
+        {
+            if (!ui.BookSelected) return Idle();
+            if (ui.BossCategorySelected)
+            {
+                teleportStep = TeleportStep.PickBoss;
+                nextAction = now;
+                return Idle();
+            }
+            if (!ui.BossCategoryBox.IsEmpty && bookKindClicks < 2)
+            {
+                nextAction = now + 2000;
+                var click = Click(Center(ui.BossCategoryBox), now);
+                click.RetryInput = bookKindClicks++ != 0;
+                return click;
+            }
+            if (ui.BossCategoryBox.IsEmpty && !ui.BossCategoryScroll.IsEmpty && bookCategoryScrolls < 2)
+            {
+                nextAction = now + 2000;
+                var reveal = Click(Center(ui.BossCategoryScroll), now);
+                reveal.RetryInput = bookCategoryScrolls++ != 0;
+                return reveal;
+            }
+            return Idle();
         }
 
         private Point LevelPoint(FarmFrame frame)
@@ -2082,6 +2163,8 @@ namespace TideCombat
         private FarmDecision ClickTravel(Rectangle button, long now, double horizontalOffset = .5)
         {
             confirmationChecked = false;
+            pendingTravelButton = button;
+            travelClickRetried = false;
             stepAt = now;
             nextAction = now + 850;
             return Click(new Point(button.X + (int)(button.Width * horizontalOffset), button.Y + button.Height / 2), now);
@@ -2090,7 +2173,22 @@ namespace TideCombat
         private FarmDecision ConfirmTravel(FarmUi ui, long now)
         {
             if (ui.ConfirmBox.IsEmpty)
+            {
+                Rectangle visible = !ui.WaypointTravelBox.IsEmpty && pendingTravelButton.IntersectsWith(ui.WaypointTravelBox) ?
+                    ui.WaypointTravelBox : ui.TeleportBox;
+                if (ui.Book || ui.ClaimReward || ui.Challenge || !pendingTravelButton.IntersectsWith(visible))
+                    pendingTravelButton = Rectangle.Empty;
+                if (!pendingTravelButton.IsEmpty && !travelClickRetried && now - stepAt >= 2000)
+                {
+                    travelClickRetried = true;
+                    nextAction = now + 850;
+                    var retry = Click(Center(visible), now);
+                    retry.RetryInput = true;
+                    return retry;
+                }
                 return Idle();
+            }
+            pendingTravelButton = Rectangle.Empty;
             if (EntryConfirmationVisible(ui))
                 return ConfirmEntryDialog(ui, now);
             nextAction = now + 850;
@@ -2227,6 +2325,7 @@ namespace TideCombat
             next.retries = retries + 1;
             next.kills = kills;
             next.attemptsBeforeRetry = next.attempts = attempts;
+            next.SettledRounds = SettledRounds;
             next.echoes = echoes;
             next.EchoesPerHour = EchoesPerHour;
             if (echoes > 0) next.startedAt = startedAt;
@@ -2274,6 +2373,7 @@ namespace TideCombat
             next.kills = kills;
             next.attempts = attempts;
             next.attemptsBeforeRetry = attemptsBeforeRetry;
+            next.SettledRounds = SettledRounds;
             next.echoes = echoes;
             next.EchoesPerHour = EchoesPerHour;
             next.startedAt = startedAt;

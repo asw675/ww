@@ -918,7 +918,8 @@ namespace TideCombat
         private bool Click(OcrLine line, int delay)
         {
             if (line == null) return false;
-            Require(confirmedRoute.HasValue && world.ClickOnRoute(line.Box, confirmedRoute.Value, ClickHoldMilliseconds), "活动按钮的点击未发送。");
+            Require(confirmedRoute.HasValue && world.ClickOnRoute(line.Box, confirmedRoute.Value,
+                ClickHoldMilliseconds, settleMs: 150), "活动按钮的点击未发送。");
             world.Sleep(delay);
             return true;
         }
